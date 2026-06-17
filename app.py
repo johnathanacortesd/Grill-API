@@ -31,7 +31,7 @@ import html
 from pathlib import Path
 
 # ======================================
-# Configuracion general
+# Configuración general
 # ======================================
 st.set_page_config(
     page_title="Análisis de Noticias · IA",
@@ -498,7 +498,7 @@ def load_local_config():
             return p
     base = Path(__file__).parent
     for f in base.iterdir():
-        if f.suffix.lower() == '.xlsx' and 'config' in f.get_filename().lower():
+        if f.suffix.lower() == '.xlsx' and 'config' in f.stem.lower():
             return f
     return None
 
@@ -2252,13 +2252,17 @@ def read_and_normalize_dossier(sheet, region_map, internet_map):
                 
     df['Link Nota'] = link_nota_final
 
+    # URL Nota se mapea a Link (Streaming - Imagen). Solamente para medios Internet debe persistir valor, para el resto queda None.
     url_nota_raw = df.get('URL Nota', pd.Series([''] * len(df)))
     link_stream_final = []
-    for val_url in url_nota_raw:
-        if isinstance(val_url, dict):
-            link_stream_final.append(val_url)
+    for val_url, is_int in zip(url_nota_raw, is_internet):
+        if is_int:
+            if isinstance(val_url, dict):
+                link_stream_final.append(val_url)
+            else:
+                link_stream_final.append({"value": "Link", "url": val_url if val_url else None})
         else:
-            link_stream_final.append({"value": "Link", "url": val_url if val_url else None})
+            link_stream_final.append(None)
             
     df['Link (Streaming - Imagen)'] = link_stream_final
 
@@ -2338,6 +2342,15 @@ def generate_output_excel(rows, km):
         date_cell = ws.cell(row=current_row, column=date_col_idx)
         if isinstance(date_cell.value, (datetime.datetime, datetime.date)):
             date_cell.number_format = 'DD/MM/YYYY'
+            
+        # Formatear CPE sin notación científica para Radio y Televisión (incluyendo AM, FM, Aire, Cable)
+        cpe_idx = ORDER.index("CPE") + 1
+        tipo_medio_idx = ORDER.index("Tipo de Medio") + 1
+        tipo_medio_val = ws.cell(row=current_row, column=tipo_medio_idx).value
+        cpe_cell = ws.cell(row=current_row, column=cpe_idx)
+        
+        if tipo_medio_val in ("Radio", "Televisión") and isinstance(cpe_cell.value, (int, float)):
+            cpe_cell.number_format = '#,##0'
             
     for i, col_name in enumerate(ORDER, start=1):
         letter = ws.cell(row=1, column=i).column_letter
