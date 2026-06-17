@@ -2662,7 +2662,7 @@ def main():
         <div class="app-header-icon">◈</div>
         <div class="app-header-text">
             <div class="app-header-title">Análisis de Noticias</div>
-            <div class="app-header-version">v18.1 · Clustering Semántico y Reputación Corporativa Avanzada</div>
+            <div class="app-header-version">v18.1 · 🕵️‍♂️ Realizado por Johnathan Cortés 😼</div>
         </div>
         <div class="app-header-badge">IA</div>
     </div>""", unsafe_allow_html=True)
