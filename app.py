@@ -34,7 +34,7 @@ from pathlib import Path
 # Configuración general
 # ======================================
 st.set_page_config(
-    page_title="Análisis de Noticias · IA",
+    page_title="Análisis de Noticias · API - Realizado por Johnathan Cortés",
     page_icon="◈",
     layout="wide",
     initial_sidebar_state="collapsed"
@@ -83,7 +83,7 @@ para por segun sin so sobre tras y o u e la el los las un una unos unas lo
 al del se su sus le les mi mis tu tus nuestro nuestros vuestra vuestras este
 esta estos estas ese esa esos esas aquel aquella aquellos aquellas que cual
 cuales quien quienes cuyo cuya cuyos cuyas como cuando donde cual es son fue
-fueron era eran sera seran seria serian he ha han habia habian hay hubo habra
+fueron era eran sera seran seria serian he ha han habia han hay hubo habra
 habria estoy esta estan estaba estaban estamos estan estar estare estaria
 estuvieron estarian estuvo asi ya mas menos tan tanto cada muy todo toda todos
 todas ser haber hacer tener poder deber ir dar ver saber querer llegar pasar
@@ -114,7 +114,7 @@ _PATRON_TITULAR = re.compile(
 )
 _PATRON_ESTADO = re.compile(
     r"\b(calma|caos|urgente|hoy|ya|ahora|ayer|mañana|nuevo|nueva|"
-    r"gran|grande|importantante|especial|exclusivo)\s*$",
+    r"gran|grande|importante|especial|exclusivo)\s*$",
     re.IGNORECASE
 )
 
@@ -2219,6 +2219,15 @@ def read_and_normalize_dossier(sheet, region_map, internet_map):
     is_grafica = df['Tipo de Medio'].isin(['Prensa', 'Internet', 'Revistas'])
     is_internet = df['Tipo de Medio'] == 'Internet'
 
+    # --- Buscarv Región (Antes de cambiar el nombre en Medio) ---
+    if 'Medio' in df.columns:
+        raw_medios_clean = df['Medio'].astype(str).str.lower().str.strip()
+        df['Región'] = raw_medios_clean.map(region_map).fillna("N/A")
+    else:
+        df['Medio'] = 'N/A'
+        df['Región'] = 'N/A'
+
+    # --- Buscarv Internet sobre Medio (Una vez mapeada la región) ---
     if 'Medio' in df.columns:
         df.loc[is_internet, 'Medio'] = (
             df.loc[is_internet, 'Medio']
@@ -2226,10 +2235,6 @@ def read_and_normalize_dossier(sheet, region_map, internet_map):
             .map(internet_map)
             .fillna(df.loc[is_internet, 'Medio'])
         )
-    else:
-        df['Medio'] = 'N/A'
-
-    df['Región'] = df['Medio'].astype(str).str.lower().str.strip().map(region_map).fillna("N/A")
 
     df['ID Noticia'] = df.get('NoticiaId', df.get('ID Noticia', pd.Series(dtype=str)))
     df['Fecha'] = pd.to_datetime(df.get('Fecha', pd.Series(dtype=str)), dayfirst=True, errors='coerce').dt.normalize()
@@ -2661,8 +2666,8 @@ def main():
     <div class="app-header">
         <div class="app-header-icon">◈</div>
         <div class="app-header-text">
-            <div class="app-header-title">Análisis de Noticias con API</div>
-            <div class="app-header-version">v18.1 · 🕵️‍♂️ Realizado por Johnathan Cortés 😼</div>
+            <div class="app-header-title">Análisis de Noticias</div>
+            <div class="app-header-version">v18.1 · 😼 Realizado por Johnathan Cortés 🕵️‍♂️ </div>
         </div>
         <div class="app-header-badge">IA</div>
     </div>""", unsafe_allow_html=True)
