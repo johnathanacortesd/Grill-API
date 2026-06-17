@@ -517,7 +517,7 @@ def load_config(config_source):
 
 
 # ======================================
-# Funciones Auxiliares de Limpieza y Enlaces
+# Funciones Auxiliares de Limpieza, Enlaces y Conversión
 # ======================================
 
 def check_password():
@@ -729,6 +729,38 @@ def normalizar_tipo_medio(tipo_raw):
         'television': 'Televisión', 'televisión': 'Televisión',
         'revista': 'Revistas', 'revistas': 'Revistas',
     }.get(t, str(tipo_raw).strip().title() or "Otro")
+
+def parse_numeric(val):
+    """Limpia y analiza valores numéricos que puedan venir como cadenas con coma decimal, separador de miles o formato científico."""
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return val
+    s = str(val).strip()
+    if not s:
+        return None
+    if 'e' in s.lower():
+        s = s.replace(',', '.')
+    else:
+        if ',' in s and '.' in s:
+            if s.rfind('.') < s.rfind(','):
+                s = s.replace('.', '').replace(',', '.')
+            else:
+                s = s.replace(',', '')
+        elif ',' in s:
+            parts = s.split(',')
+            if len(parts) > 2 or (len(parts) == 2 and len(parts[1]) == 3 and not s.lower().startswith('0,')):
+                s = s.replace(',', '')
+            else:
+                s = s.replace(',', '.')
+        elif '.' in s:
+            parts = s.split('.')
+            if len(parts) > 2 or (len(parts) == 2 and len(parts[1]) == 3 and not s.lower().startswith('0.')):
+                s = s.replace('.', '')
+    try:
+        return float(s)
+    except ValueError:
+        return None
 
 def texto_para_embedding(titulo, resumen, max_len=1800):
     t = str(titulo or "").strip()
@@ -2284,7 +2316,7 @@ def generate_output_excel(rows, km):
         "Link Nota", "Resumen - Aclaracion", "Link (Streaming - Imagen)", "Menciones - Empresa",
         "ID duplicada"
     ]
-    NUM = {"ID Noticia", "Nro. Pagina", "Dimensión", "Duración - Nro. Caracteres", "CPE", "Tier", "Audiencia"}
+    NUM = {"Nro. Pagina", "Dimensión", "Duración - Nro. Caracteres", "CPE", "Tier", "Audiencia"}
     ws.append(ORDER)
     
     font_hyperlink = Font(color="0563C1", underline="single")
@@ -2315,10 +2347,7 @@ def generate_output_excel(rows, km):
                 else:
                     cv = str(val) if val is not None else None
             elif h in NUM:
-                try:
-                    cv = float(val) if val is not None and str(val).strip() != "" else None
-                except:
-                    cv = str(val) if val is not None else None
+                cv = parse_numeric(val)
             elif isinstance(val, dict) and "url" in val:
                 cv = val.get("value", "Link")
                 if val.get("url"): links[ci] = val["url"]
