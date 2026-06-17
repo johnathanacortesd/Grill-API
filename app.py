@@ -114,7 +114,7 @@ _PATRON_TITULAR = re.compile(
 )
 _PATRON_ESTADO = re.compile(
     r"\b(calma|caos|urgente|hoy|ya|ahora|ayer|mañana|nuevo|nueva|"
-    r"gran|grande|importante|especial|exclusivo)\s*$",
+    r"gran|grande|importantante|especial|exclusivo)\s*$",
     re.IGNORECASE
 )
 
@@ -735,6 +735,8 @@ def parse_numeric(val):
     if val is None:
         return None
     if isinstance(val, (int, float)):
+        if isinstance(val, float) and val.is_integer():
+            return int(val)
         return val
     s = str(val).strip()
     if not s:
@@ -758,7 +760,10 @@ def parse_numeric(val):
             if len(parts) > 2 or (len(parts) == 2 and len(parts[1]) == 3 and not s.lower().startswith('0.')):
                 s = s.replace('.', '')
     try:
-        return float(s)
+        f_val = float(s)
+        if f_val.is_integer():
+            return int(f_val)
+        return f_val
     except ValueError:
         return None
 
@@ -2316,7 +2321,7 @@ def generate_output_excel(rows, km):
         "Link Nota", "Resumen - Aclaracion", "Link (Streaming - Imagen)", "Menciones - Empresa",
         "ID duplicada"
     ]
-    NUM = {"Nro. Pagina", "Dimensión", "Duración - Nro. Caracteres", "CPE", "Tier", "Audiencia"}
+    NUM = {"ID Noticia", "Nro. Pagina", "Dimensión", "Duración - Nro. Caracteres", "CPE", "Tier", "Audiencia"}
     ws.append(ORDER)
     
     font_hyperlink = Font(color="0563C1", underline="single")
