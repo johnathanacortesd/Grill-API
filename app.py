@@ -272,7 +272,6 @@ html,body,[data-testid="stApp"]{
 .block-container{padding-top:1rem!important;padding-bottom:0!important}
 [data-testid="stAppViewBlockContainer"]{padding-top:1rem!important}
 .app-header{background:var(--s1);border:1px solid var(--border);border-radius:var(--r3);padding:1rem 1.5rem;margin-bottom:1rem;display:flex;align-items:center;gap:1rem;box-shadow:var(--shadow-sm);position:relative;overflow:hidden;}
-.app-header::after{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,#f97316,#fb923c,#fdba74);}
 .app-header-icon{width:40px;height:40px;background:linear-gradient(135deg,#f97316,#ea580c);border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:1.2rem;color:white;flex-shrink:0;box-shadow:0 2px 8px rgba(249,115,22,0.3);}
 .app-header-text{flex:1}
 .app-header-title{font-family:'Google Sans',sans-serif;font-size:1.25rem;font-weight:700;color:var(--text);letter-spacing:-0.01em;line-height:1.3}
@@ -1070,10 +1069,11 @@ def agrupar_por_titulo_similar(titulos):
         for j in range(i + 1, len(norm)):
             if j in used or not norm[j]: continue
             if SequenceMatcher(None, norm[i], norm[j]).ratio() >= SIMILARITY_THRESHOLD_TITULOS:
+                grp.append(grp[-1] if grp else i) # Just maintaining simple union
                 grp.append(j)
                 used.add(j)
         if len(grp) >= 2:
-            grupos[gid] = grp
+            grupos[gid] = list(set(grp))
             gid += 1
     return grupos
 
@@ -2336,6 +2336,9 @@ def generate_output_excel(rows, km):
     for i, col_name in enumerate(ORDER, start=1):
         cell = ws.cell(row=1, column=i)
         cell.font = font_header
+
+    # Crear mapa rápido para indexar las columnas de openpyxl (basado en 1)
+    col_idx_map = {name: ORDER.index(name) + 1 for name in ORDER}
         
     for row in rows:
         tk = km.get("titulo")
@@ -2382,14 +2385,19 @@ def generate_output_excel(rows, km):
         if isinstance(date_cell.value, (datetime.datetime, datetime.date)):
             date_cell.number_format = 'DD/MM/YYYY'
             
-        # Formatear CPE sin notación científica para Radio y Televisión (incluyendo AM, FM, Aire, Cable)
-        cpe_idx = ORDER.index("CPE") + 1
-        tipo_medio_idx = ORDER.index("Tipo de Medio") + 1
-        tipo_medio_val = ws.cell(row=current_row, column=tipo_medio_idx).value
+        # Formatear columnas tipo número con estilo de millares sin decimales
+        cols_millares = ["Nro. Pagina", "Dimensión", "Duración - Nro. Caracteres", "Tier", "Audiencia"]
+        for col_name in cols_millares:
+            col_idx = col_idx_map[col_name]
+            cell = ws.cell(row=current_row, column=col_idx)
+            if isinstance(cell.value, (int, float)):
+                cell.number_format = '#,##0'
+
+        # Formatear la columna CPE con estilo Moneda sin decimales
+        cpe_idx = col_idx_map["CPE"]
         cpe_cell = ws.cell(row=current_row, column=cpe_idx)
-        
-        if tipo_medio_val in ("Radio", "Televisión") and isinstance(cpe_cell.value, (int, float)):
-            cpe_cell.number_format = '#,##0'
+        if isinstance(cpe_cell.value, (int, float)):
+            cpe_cell.number_format = '$#,##0'
             
     for i, col_name in enumerate(ORDER, start=1):
         letter = ws.cell(row=1, column=i).column_letter
