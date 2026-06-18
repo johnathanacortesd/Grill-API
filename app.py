@@ -172,7 +172,7 @@ _TILDE_MAP = {
     "movil":"móvil","moviles":"móviles","codigo":"código","informatica":"informática",
     "electronica":"electrónica","robotica":"robótica","ciberseguridad":"ciberseguridad",
     "trafico":"tráfico","transito":"tránsito","aereo":"aéreo","maritimo":"marítimo",
-    "turistica":"turística","turistico":"turístico","gastronomia":"gastronomía",
+    "turistica":"turística","turistico":"turístico","gastronomia":"gastrónomía",
     "academica":"académica","academico":"académico","pedagogica":"pedagógica",
     "cientifica":"científica","cientifico":"científico","juridica":"jurídica",
     "juridico":"jurídico","constitucion":"constitución","resolucion":"resolución",
@@ -701,10 +701,35 @@ def clean_cuerpo(text):
     text = re.sub(r'<[^>]+>', '', text)
     return text.strip()
 
+
+# ======================================
+# FUNCIÓN DE NORMALIZACIÓN DE TÍTULOS (MEJORADA)
+# ======================================
 def normalize_title_for_comparison(title):
-    if not isinstance(title, str): return ""
-    tmp = re.split(r"\s*[:|-]\s*", title, 1)
-    return re.sub(r"\W+", " ", tmp[0]).lower().strip()
+    """
+    Normaliza el título para comparaciones y detección de duplicados.
+    Evita falsos duplicados en noticias que inician con prefijos comunes de lugar, tag o categoría 
+    (ej: "Cundinamarca: ...") al conservar y comparar la sección principal del titular.
+    """
+    if not isinstance(title, str): 
+        return ""
+    
+    # 1. Limpiar fuentes de medios que aparezcan al final precedidos de espacios y barras o guiones 
+    # (ej: "Título de la Noticia | El Tiempo" o "Título - Caracol Radio")
+    cleaned = re.sub(r"\s+[\|–—-]\s+[^\|–—-]+$", "", title).strip()
+    
+    # 2. Manejar prefijos descriptivos/geográficos separados por dos puntos (ej: "Cundinamarca: ...")
+    # Si existen los dos puntos, extrae la frase posterior si tiene una longitud sustancial (>= 10 caracteres)
+    if ":" in cleaned:
+        parts = cleaned.split(":", 1)
+        prefix = parts[0].strip()
+        suffix = parts[1].strip()
+        if len(suffix) >= 10:
+            cleaned = suffix
+            
+    # 3. Remover caracteres no alfanuméricos y pasar todo a minúsculas
+    return re.sub(r"\W+", " ", cleaned).lower().strip()
+
 
 def clean_title_for_output(title):
     return re.sub(r"\s*\|\s*[\w\s]+$", "", str(title)).strip()
