@@ -73,8 +73,8 @@ PRICE_INPUT_1M     = 0.10
 PRICE_OUTPUT_1M    = 0.40
 PRICE_EMBEDDING_1M = 0.02
 
-if 'tokens_input'     not in st.session_state: st.session_state['tokens_input']     = 0
-if 'tokens_output'    not in st.session_state: st.session_state['tokens_output']    = 0
+if 'tokens_input' not in st.session_state: st.session_state['tokens_input']     = 0
+if 'tokens_output' not in st.session_state: st.session_state['tokens_output']    = 0
 if 'tokens_embedding' not in st.session_state: st.session_state['tokens_embedding'] = 0
 
 STOPWORDS_ES = set("""
@@ -1462,7 +1462,7 @@ class ClasificadorSubtema:
             f"     CORRECTO: {ejemplo_dinamico}\n"
             "     INCORRECTO: 'Alcalde presenta proyecto terminal', "
             "'Gobernador anuncia inversión', 'Alcaldía lanza plan'\n"
-            "  2. USA preposiciones (de, del, para, sobre, en, por) para conectar conceptos.\n"
+            "  2. USA preposiciones (de, del, para, sobre, en, por) para conectar concepts.\n"
             "  3. SÉ ESPECÍFICO: describe el asunto real, no el actor.\n"
             "  4. Ciudades y regiones SÍ pueden aparecer si son relevantes al tema.\n"
             "  5. Sin nombre de marcas privadas. Tildes y ñ correctas.\n\n"
@@ -2354,7 +2354,7 @@ def generate_output_excel(rows, km):
     NUM = {"ID Noticia", "Nro. Pagina", "Dimensión", "Duración - Nro. Caracteres", "CPE", "Tier", "Audiencia"}
     ws.append(ORDER)
     
-    font_hyperlink = Font(color="0563C1", underline="single")
+    font_hyperlink = Font(color="000000", underline=None)
     align_left = Alignment(horizontal='left')
     font_header = Font(bold=True)
     
