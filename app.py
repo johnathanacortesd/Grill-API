@@ -113,7 +113,7 @@ _PATRON_TITULAR = re.compile(
     re.IGNORECASE
 )
 _PATRON_ESTADO = re.compile(
-    r"\b(calma|caos|urgente|hoy|ya|ahora|ayer|mañana|nuevo|nueva|"
+    r"\b(calma|caos|urgente|hoy|ya|ahora|yesterday|mañana|nuevo|nueva|"
     r"gran|grande|importante|especial|exclusivo)\s*$",
     re.IGNORECASE
 )
@@ -2082,8 +2082,6 @@ def _fusionar_temas_contenidos(temas: List[str]) -> Dict[str, str]:
     if len(candidatos) >= 2:
         textos_c = [t for t, _ in candidatos]
         embs = get_embeddings_batch(textos_c)
-        validos = [(textos_c[i],钢铁_embs[i]) for i in range(len(textos_c)) if embs[i] is not None]
-        # Corrección menor para asegurar consistencia de nombres
         validos = [(textos_c[i], embs[i]) for i in range(len(textos_c)) if embs[i] is not None]
         if len(validos) >= 2:
             etqs, vecs = zip(*validos)
