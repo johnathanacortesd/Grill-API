@@ -2082,6 +2082,8 @@ def _fusionar_temas_contenidos(temas: List[str]) -> Dict[str, str]:
     if len(candidatos) >= 2:
         textos_c = [t for t, _ in candidatos]
         embs = get_embeddings_batch(textos_c)
+        validos = [(textos_c[i],钢铁_embs[i]) for i in range(len(textos_c)) if embs[i] is not None]
+        # Corrección menor para asegurar consistencia de nombres
         validos = [(textos_c[i], embs[i]) for i in range(len(textos_c)) if embs[i] is not None]
         if len(validos) >= 2:
             etqs, vecs = zip(*validos)
@@ -2473,6 +2475,7 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
                 row_dict = row_series.to_dict()
                 row_dict['Menciones - Empresa'] = ""
                 row_dict['original_index'] = idx
+                row_dict['expanded_index'] = len(rows_expanded)  # ID de fila expandida único para mapeo
                 row_dict['is_duplicate'] = False
                 rows_expanded.append(row_dict)
             else:
@@ -2480,6 +2483,7 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
                     row_dict = row_series.to_dict()
                     row_dict['Menciones - Empresa'] = m
                     row_dict['original_index'] = idx
+                    row_dict['expanded_index'] = len(rows_expanded)  # ID de fila expandida único para mapeo
                     row_dict['is_duplicate'] = False
                     rows_expanded.append(row_dict)
 
@@ -2567,10 +2571,11 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
                 df[km["tema"]] = temas
             s.update(label="✓ Paso 4 · Clasificación", state="complete")
             
-        rm2 = df.set_index("original_index").to_dict("index")
+        # Re-mapeo usando expanded_index para garantizar unicidad al indexar
+        rm2 = df.set_index("expanded_index").to_dict("index")
         for idx, row in enumerate(rows):
             if not row.get("is_duplicate"):
-                row.update(rm2.get(row["original_index"], {}))
+                row.update(rm2.get(row.get("expanded_index"), {}))
                 
     gc.collect()
     ci = (st.session_state['tokens_input']     / 1e6) * PRICE_INPUT_1M
