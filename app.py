@@ -44,7 +44,7 @@ OPENAI_MODEL_EMBEDDING     = "text-embedding-3-small"
 OPENAI_MODEL_CLASIFICACION = "gpt-4.1-nano-2025-04-14"
 
 CONCURRENT_REQUESTS          = 50
-SIMILARITY_THRESHOLD_TONO    = 0.82
+SIMILARITY_THRESHOLD_TONO    = 0.88
 SIMILARITY_THRESHOLD_TITULOS = 0.93
 
 # ── Umbrales base (corpus grande ≥ 20 noticias) ──────────────────────────────
@@ -52,10 +52,10 @@ UMBRAL_SUBTEMA = 0.78
 UMBRAL_TEMA    = 0.72
 NUM_TEMAS_MAX  = 15
 
-UMBRAL_DEDUP_LABEL           = 0.78
-UMBRAL_FUSION_SUBTEMAS       = 0.78
-UMBRAL_FUSION_INTERGRUPO     = 0.84
-MAX_ITER_FUSION              = 5
+UMBRAL_DEDUP_LABEL           = 0.86
+UMBRAL_FUSION_SUBTEMAS       = 0.88
+UMBRAL_FUSION_INTERGRUPO     = 0.90
+MAX_ITER_FUSION              = 3
 
 UMBRAL_MIN_PERTENENCIA_SUBTEMA = 0.60
 UMBRAL_MIN_PERTENENCIA_TEMA    = 0.52
@@ -65,9 +65,9 @@ UMBRAL_COHERENCIA_ETIQUETA   = 0.35
 MAX_GRUPO_ETIQUETA           = 40
 
 # ── Umbrales mínimos de similitud REAL para agrupar ──────────────────────────
-SIM_MINIMA_AGRUPACION_SUBTEMA = 0.82   
-SIM_MINIMA_KEYWORDS_RARAS     = 0.78   
-SIM_MINIMA_FUSION_INTER       = 0.88   
+SIM_MINIMA_AGRUPACION_SUBTEMA = 0.87   
+SIM_MINIMA_KEYWORDS_RARAS     = 0.86   
+SIM_MINIMA_FUSION_INTER       = 0.90   
 
 PRICE_INPUT_1M     = 0.10
 PRICE_OUTPUT_1M    = 0.40
@@ -379,16 +379,16 @@ def _umbrales_adaptativos(n: int) -> dict:
         )
     elif n <= 10:
         return dict(
-            subtema=0.88,
-            tema=0.80,
-            dedup_label=0.85,
-            fusion_subtemas=0.87,
-            fusion_intergrupo=0.91,
+            subtema=0.90,
+            tema=0.84,
+            dedup_label=0.88,
+            fusion_subtemas=0.90,
+            fusion_intergrupo=0.93,
             min_pertenencia_subtema=0.72,
             min_pertenencia_tema=0.65,
             coherencia_etiqueta=0.42,
-            sim_minima_agrupacion=0.88,
-            sim_minima_keywords=0.88,
+            sim_minima_agrupacion=0.90,
+            sim_minima_keywords=0.90,
             max_iter_fusion=2,
             num_temas_max=min(n, 5),
             usar_paso2b=False,
@@ -396,16 +396,16 @@ def _umbrales_adaptativos(n: int) -> dict:
         )
     elif n <= 20:
         return dict(
-            subtema=0.83,
-            tema=0.76,
-            dedup_label=0.82,
-            fusion_subtemas=0.82,
-            fusion_intergrupo=0.88,
+            subtema=0.87,
+            tema=0.82,
+            dedup_label=0.86,
+            fusion_subtemas=0.88,
+            fusion_intergrupo=0.91,
             min_pertenencia_subtema=0.66,
             min_pertenencia_tema=0.58,
             coherencia_etiqueta=0.38,
-            sim_minima_agrupacion=0.84,
-            sim_minima_keywords=0.84,
+            sim_minima_agrupacion=0.87,
+            sim_minima_keywords=0.87,
             max_iter_fusion=3,
             num_temas_max=min(n // 2, NUM_TEMAS_MAX),
             usar_paso2b=True,
@@ -625,6 +625,77 @@ def string_norm_label(s):
     s = unidecode(s.lower())
     s = re.sub(r"[^a-z0-9\s]", " ", s)
     return " ".join(t for t in s.split() if t not in STOPWORDS_ES)
+
+_ACCIONES_OPUESTAS = [
+    ({"aprobacion", "aprueba", "apoyo", "acuerdo", "aval", "respaldo"}, {"rechazo", "rechaza", "desacuerdo", "oposicion", "critica"}),
+    ({"aumento", "crecimiento", "alza", "subida", "incremento"}, {"caida", "reduccion", "baja", "disminucion", "descenso"}),
+    ({"apertura", "inauguracion", "inicio", "lanzamiento", "estreno"}, {"cierre", "suspension", "fin", "clausura", "cancelacion"}),
+    ({"exito", "logro", "triunfo", "premio", "reconocimiento"}, {"fracaso", "derrota", "problema", "crisis", "sancion"}),
+    ({"demanda", "denuncia", "investigacion", "sancion", "multa"}, {"absolucion", "archivo", "exoneracion", "acuerdo"}),
+]
+
+_TOKENS_DEBILES_AGRUPACION = STOPWORDS_ES | {
+    "noticia", "noticias", "informe", "informacion", "comunicado", "anuncio",
+    "colombia", "pais", "nacional", "regional", "local", "sector", "sectores",
+    "empresa", "empresas", "entidad", "entidades", "autoridad", "autoridades",
+    "gobierno", "alcaldia", "gobernacion", "ministerio", "nuevo", "nueva",
+    "nuevos", "nuevas", "plan", "programa", "proyecto", "iniciativa",
+    "actividad", "actividades", "gestion", "tema", "caso", "casos",
+}
+
+def _tokens_distintivos(texto: str, min_len: int = 4) -> set:
+    norm = string_norm_label(texto)
+    return {
+        t for t in norm.split()
+        if len(t) >= min_len and t not in _TOKENS_DEBILES_AGRUPACION and not t.isdigit()
+    }
+
+def _overlap_distintivo(a: str, b: str) -> float:
+    ta, tb = _tokens_distintivos(a), _tokens_distintivos(b)
+    if not ta or not tb: return 0.0
+    return len(ta & tb) / max(1, min(len(ta), len(tb)))
+
+def _hay_conflicto_accion(a: str, b: str) -> bool:
+    ta, tb = _tokens_distintivos(a, min_len=3), _tokens_distintivos(b, min_len=3)
+    for grupo_a, grupo_b in _ACCIONES_OPUESTAS:
+        if (ta & grupo_a and tb & grupo_b) or (ta & grupo_b and tb & grupo_a):
+            return True
+    return False
+
+def _etiquetas_compatibles(a: str, b: str, min_overlap: float = 0.45) -> bool:
+    na, nb = string_norm_label(a), string_norm_label(b)
+    if not na or not nb: return False
+    if _hay_conflicto_accion(na, nb): return False
+    if SequenceMatcher(None, na, nb).ratio() >= 0.90: return True
+    return _overlap_distintivo(na, nb) >= min_overlap
+
+def _grupos_contenido_compatibles(
+    textos_a: list,
+    textos_b: list,
+    etiqueta_a: str = "",
+    etiqueta_b: str = "",
+    min_sim: float = 0.88,
+    min_overlap: float = 0.20,
+) -> bool:
+    muestra_a = [str(t) for t in textos_a[:20] if str(t).strip()]
+    muestra_b = [str(t) for t in textos_b[:20] if str(t).strip()]
+    if not muestra_a or not muestra_b: return False
+    texto_a = " ".join(muestra_a)[:2500]
+    texto_b = " ".join(muestra_b)[:2500]
+    if _hay_conflicto_accion(f"{etiqueta_a} {texto_a}", f"{etiqueta_b} {texto_b}"):
+        return False
+    overlap = _overlap_distintivo(f"{etiqueta_a} {texto_a}", f"{etiqueta_b} {texto_b}")
+    labels_muy_cercanas = _etiquetas_compatibles(etiqueta_a, etiqueta_b, min_overlap=0.55)
+    if overlap < min_overlap and not labels_muy_cercanas:
+        return False
+    embs = get_embeddings_batch([texto_a, texto_b])
+    if len(embs) < 2 or embs[0] is None or embs[1] is None:
+        return labels_muy_cercanas and overlap >= min_overlap
+    sim = cosine_similarity(
+        np.array(embs[0]).reshape(1, -1),
+        np.array(embs[1]).reshape(1, -1)
+    )[0][0]
+    return sim >= min_sim
 
 def _validar_estructura_subtema(etiqueta: str) -> bool:
     if not etiqueta or len(etiqueta.split()) < 2: return False
@@ -859,24 +930,13 @@ def dedup_labels(etiquetas, umbral=UMBRAL_DEDUP_LABEL):
             parent[rb] = ra
 
     def _es_fusion_segura(s1, s2):
-        antagonicos = [
-            ({"aprobacion", "apoyo", "acuerdo"}, {"rechazo", "caida", "desacuerdo", "hundimiento"}),
-            ({"aumento", "crecimiento", "alza", "subida"}, {"caida", "reduccion", "baja", "disminucion"}),
-            ({"apertura", "inauguracion", "inicio"}, {"cierre", "suspension", "fin", "clausura"}),
-            ({"exito", "logro", "triunfo"}, {"fracaso", "derrota", "problema"})
-        ]
-        t1 = set(s1.split())
-        t2 = set(s2.split())
-        for pos_set, neg_set in antagonicos:
-            if (t1 & pos_set and t2 & neg_set) or (t1 & neg_set and t2 & pos_set):
-                return False
-        return True
+        return _etiquetas_compatibles(s1, s2, min_overlap=0.45)
 
     for i in range(n):
         if not normed[i]: continue
         for j in range(i + 1, n):
             if not normed[j] or find(i) == find(j): continue
-            if SequenceMatcher(None, normed[i], normed[j]).ratio() >= umbral:
+            if SequenceMatcher(None, normed[i], normed[j]).ratio() >= max(umbral, 0.88):
                 if _es_fusion_segura(normed[i], normed[j]):
                     union(i, j)
                     
@@ -890,7 +950,7 @@ def dedup_labels(etiquetas, umbral=UMBRAL_DEDUP_LABEL):
             if len(tokens_j) < 2: continue
             interseccion = tokens_i & tokens_j
             menor = min(len(tokens_i), len(tokens_j))
-            if menor > 0 and len(interseccion) / menor >= 0.6:
+            if menor > 0 and len(interseccion) / menor >= 0.78:
                 if _es_fusion_segura(normed[i], normed[j]):
                     union(i, j)
                     
@@ -901,7 +961,7 @@ def dedup_labels(etiquetas, umbral=UMBRAL_DEDUP_LABEL):
         sm = cosine_similarity(np.array(vv))
         for pi in range(len(vi)):
             for pj in range(pi + 1, len(vi)):
-                if sm[pi][pj] >= umbral:
+                if sm[pi][pj] >= max(umbral, 0.90):
                     if find(vi[pi]) != find(vi[pj]):
                         if _es_fusion_segura(normed[vi[pi]], normed[vi[pj]]):
                             union(vi[pi], vi[pj])
@@ -959,7 +1019,16 @@ def _fusionar_subtemas_semanticos(subtemas, textos_por_subtema, marca, aliases, 
     for i in range(n):
         for j in range(i + 1, n):
             if find(i) == find(j): continue
-            if sim[i][j] >= umbral: union(i, j)
+            sub_i, sub_j = unique_subs[v_idx[i]], unique_subs[v_idx[j]]
+            if sim[i][j] >= max(umbral, 0.88) and _grupos_contenido_compatibles(
+                textos_por_subtema.get(sub_i, []),
+                textos_por_subtema.get(sub_j, []),
+                sub_i,
+                sub_j,
+                min_sim=max(umbral, 0.88),
+                min_overlap=0.22,
+            ):
+                union(i, j)
             
     grupos = defaultdict(list)
     for i in range(n): grupos[find(i)].append(v_idx[i])
@@ -1094,7 +1163,6 @@ def agrupar_por_titulo_similar(titulos):
         for j in range(i + 1, len(norm)):
             if j in used or not norm[j]: continue
             if SequenceMatcher(None, norm[i], norm[j]).ratio() >= SIMILARITY_THRESHOLD_TITULOS:
-                grp.append(grp[-1] if grp else i) # Just maintaining simple union
                 grp.append(j)
                 used.add(j)
         if len(grp) >= 2:
@@ -1189,14 +1257,17 @@ class ClasificadorTono:
         sem = asyncio.Semaphore(CONCURRENT_REQUESTS)
         cids = list(reps.keys())
         
-        tasks = [self._clasificar_llm(reps[c], sem) for c in cids]
-        rl = []
+        async def _clasificar_con_cid(cid):
+            return cid, await self._clasificar_llm(reps[cid], sem)
+
+        tasks = [_clasificar_con_cid(c) for c in cids]
+        rpg = {}
         
         for i, f in enumerate(asyncio.as_completed(tasks)):
-            rl.append(await f)
+            cid, r = await f
+            rpg[cid] = r
             pbar.progress(0.1 + 0.85 * (i + 1) / len(tasks), f"Evaluando Reputación {i + 1}/{len(tasks)}")
             
-        rpg = {cids[i]: r for i, r in enumerate(rl)}
         final = [None] * n
         
         for cid, idxs in grupos.items():
@@ -1294,13 +1365,26 @@ class ClasificadorSubtema:
                         np.array(ea).reshape(1, -1),
                         np.array(eb).reshape(1, -1)
                     )[0][0]
-                    if sim >= sim_min: dsu.union(ia, ib)
+                    if sim >= sim_min and not _hay_conflicto_accion(str(titulos[ia]), str(titulos[ib])):
+                        dsu.union(ia, ib)
 
     def _paso3(self, et, ae, dsu, pbar, ps):
         umbral_cluster = self._umbrales.get('subtema', UMBRAL_SUBTEMA)
         sim_min = self._umbrales.get('sim_minima_agrupacion', SIM_MINIMA_AGRUPACION_SUBTEMA)
         n = len(et)
         if n < 2: return
+
+        def _puede_unir(i, j):
+            if _hay_conflicto_accion(et[i], et[j]):
+                return False
+            if _overlap_distintivo(et[i], et[j]) >= 0.12:
+                return True
+            return SequenceMatcher(
+                None,
+                normalize_title_for_comparison(et[i]),
+                normalize_title_for_comparison(et[j])
+            ).ratio() >= SIMILARITY_THRESHOLD_TITULOS
+
         B = 500
         if n <= B:
             pbar.progress(ps, "Clustering semántico...")
@@ -1323,7 +1407,9 @@ class ClasificadorSubtema:
                 sims_al_centroid = cosine_similarity(vecs, centroid.reshape(1, -1)).flatten()
                 todos_ok = all(s >= sim_min for s in sims_al_centroid)
                 if todos_ok:
-                    for j in cl[1:]: dsu.union(cl[0], j)
+                    for j in cl[1:]:
+                        if _puede_unir(cl[0], j):
+                            dsu.union(cl[0], j)
                 else:
                     mejor_idx = int(np.argmax(sims_al_centroid))
                     repr_vec = np.array(ae[cl[mejor_idx]]).reshape(1, -1)
@@ -1332,7 +1418,8 @@ class ClasificadorSubtema:
                         sim_vs_repr = cosine_similarity(
                             np.array(ae[i_global]).reshape(1, -1), repr_vec
                         )[0][0]
-                        if sim_vs_repr >= sim_min: dsu.union(cl[mejor_idx], i_global)
+                        if sim_vs_repr >= sim_min and _puede_unir(cl[mejor_idx], i_global):
+                            dsu.union(cl[mejor_idx], i_global)
             pbar.progress(ps + 0.18, "Clustering completado")
             return
 
@@ -1360,7 +1447,8 @@ class ClasificadorSubtema:
                 for k_local, i_global in enumerate(cl):
                     if ae[i_global] is None: continue
                     s = cosine_similarity(np.array(ae[i_global]).reshape(1, -1), repr_vec)[0][0]
-                    if s >= sim_min: dsu.union(cl[mejor_idx], i_global)
+                    if s >= sim_min and _puede_unir(cl[mejor_idx], i_global):
+                        dsu.union(cl[mejor_idx], i_global)
             pbar.progress(ps + 0.15 * (bn_ + 1) / tb, f"Clustering {bn_ + 1}/{tb}...")
 
         pbar.progress(ps + 0.16, "Unificando...")
@@ -1392,8 +1480,18 @@ class ClasificadorSubtema:
             for _, i, j in pairs:
                 ri, rj = grupos[vg[i]][0], grupos[vg[j]][0]
                 if dsu.find(ri) != dsu.find(rj):
-                    dsu.union(ri, rj)
-                    fus += 1
+                    textos_i = [textos[k] for k in grupos[vg[i]][:20]]
+                    textos_j = [textos[k] for k in grupos[vg[j]][:20]]
+                    if _grupos_contenido_compatibles(
+                        textos_i,
+                        textos_j,
+                        "",
+                        "",
+                        min_sim=umbral_efectivo,
+                        min_overlap=0.16,
+                    ):
+                        dsu.union(ri, rj)
+                        fus += 1
             pbar.progress(min(ps + 0.04 * (it + 1), 0.52), f"Fusión {it + 1}: {fus}")
             if fus == 0: break
 
@@ -1406,7 +1504,8 @@ class ClasificadorSubtema:
 
     def _generar_etiqueta(self, textos_grp, titulos_grp, resumenes_grp, subtemas_existentes=None):
         tn = sorted(set(normalize_title_for_comparison(t) for t in titulos_grp if t))
-        ck = hashlib.md5(("|".join(tn[:12]) + f"#{len(titulos_grp)}").encode()).hexdigest()
+        existentes_key = "|".join(sorted(string_norm_label(s) for s in (subtemas_existentes or []))[:20])
+        ck = hashlib.md5(("|".join(tn[:12]) + f"#{len(titulos_grp)}#{existentes_key}").encode()).hexdigest()
         if ck in self._cache: return self._cache[ck]
 
         tm = list(dict.fromkeys(t[:130] for t in titulos_grp if t))[:6]
@@ -1683,6 +1782,38 @@ class ClasificadorSubtema:
         mapa = {}
         sg = sorted(gf.items(), key=lambda x: -len(x[1]))
         subtemas_aprobados = [] 
+        textos_por_subtema_aprobado = defaultdict(list)
+
+        def _generar_etiqueta_segura(idxs):
+            textos_grp = [textos[i] for i in idxs]
+            titulos_grp = [titulos[i] for i in idxs]
+            resumenes_grp = [resumenes[i] for i in idxs]
+            etiqueta = self._generar_etiqueta(
+                textos_grp,
+                titulos_grp,
+                resumenes_grp,
+                subtemas_existentes=subtemas_aprobados
+            )
+            if etiqueta in textos_por_subtema_aprobado:
+                previos = textos_por_subtema_aprobado.get(etiqueta, [])
+                if not _grupos_contenido_compatibles(
+                    textos_grp,
+                    previos,
+                    etiqueta,
+                    etiqueta,
+                    min_sim=max(u['sim_minima_agrupacion'], 0.88),
+                    min_overlap=0.24,
+                ):
+                    etiqueta = self._generar_etiqueta(
+                        textos_grp,
+                        titulos_grp,
+                        resumenes_grp,
+                        subtemas_existentes=None
+                    )
+            if etiqueta not in subtemas_aprobados:
+                subtemas_aprobados.append(etiqueta)
+            textos_por_subtema_aprobado[etiqueta].extend(textos_grp[:MAX_GRUPO_ETIQUETA])
+            return etiqueta
 
         for k, (lid, idxs) in enumerate(sg):
             if k % 10 == 0: pbar.progress(0.55 + 0.25 * (k / max(ng, 1)), f"Etiquetando {k + 1}/{ng}...")
@@ -1690,22 +1821,10 @@ class ClasificadorSubtema:
             if len(idxs) > MAX_GRUPO_ETIQUETA:
                 subgrupos = [idxs[i:i + MAX_GRUPO_ETIQUETA] for i in range(0, len(idxs), MAX_GRUPO_ETIQUETA)]
                 for sg_ in subgrupos:
-                    e = self._generar_etiqueta(
-                        [textos[i] for i in sg_],
-                        [titulos[i] for i in sg_],
-                        [resumenes[i] for i in sg_],
-                        subtemas_existentes=subtemas_aprobados
-                    )
-                    if e not in subtemas_aprobados: subtemas_aprobados.append(e)
+                    e = _generar_etiqueta_segura(sg_)
                     for i in sg_: mapa[i] = e
             else:
-                e = self._generar_etiqueta(
-                    [textos[i] for i in idxs],
-                    [titulos[i] for i in idxs],
-                    [resumenes[i] for i in idxs],
-                    subtemas_existentes=subtemas_aprobados
-                )
-                if e not in subtemas_aprobados: subtemas_aprobados.append(e)
+                e = _generar_etiqueta_segura(idxs)
                 for i in idxs: mapa[i] = e
 
         subtemas = [mapa.get(i, "Varios") for i in range(n)]
@@ -1766,7 +1885,26 @@ class ClasificadorSubtema:
         unicos_finales = list(dict.fromkeys(subtemas))
         if 1 < len(unicos_finales) <= 50:
             mapa_sinonimos = self._consolidar_sinonimos_llm(unicos_finales)
-            subtemas = [mapa_sinonimos.get(s, s) for s in subtemas]
+            textos_por_sub_final = defaultdict(list)
+            for i, s in enumerate(subtemas):
+                textos_por_sub_final[s].append(textos[i])
+            mapa_seguro = {}
+            for origen, destino in mapa_sinonimos.items():
+                if origen == destino:
+                    mapa_seguro[origen] = destino
+                    continue
+                if destino not in textos_por_sub_final:
+                    continue
+                if _grupos_contenido_compatibles(
+                    textos_por_sub_final.get(origen, []),
+                    textos_por_sub_final.get(destino, []),
+                    origen,
+                    destino,
+                    min_sim=max(u['fusion_subtemas'], 0.88),
+                    min_overlap=0.24,
+                ):
+                    mapa_seguro[origen] = destino
+            subtemas = [mapa_seguro.get(s, s) for s in subtemas]
 
         subtemas = [capitalizar_etiqueta(s) for s in subtemas]
         nf = len(set(subtemas))
@@ -1972,11 +2110,33 @@ def consolidar_temas(subtemas, textos, pbar):
         n_clusters=None, distance_threshold=1 - umbral_tema,
         metric='precomputed', linkage=linkage_temas
     ).fit(dist_matrix)
-    if len(set(cl.labels_)) > num_temas_max:
-        cl = AgglomerativeClustering(n_clusters=num_temas_max, metric='precomputed', linkage=linkage_temas).fit(dist_matrix)
 
     clusters = defaultdict(list)
     for i, lbl in enumerate(cl.labels_): clusters[lbl].append(vs[i])
+    clusters_validados = {}
+    next_cluster_id = 0
+    for _, subs_cluster in clusters.items():
+        if len(subs_cluster) <= 1:
+            clusters_validados[next_cluster_id] = subs_cluster
+            next_cluster_id += 1
+            continue
+        dsu_tema = DSU(len(subs_cluster))
+        for i in range(len(subs_cluster)):
+            for j in range(i + 1, len(subs_cluster)):
+                sa, sb = subs_cluster[i], subs_cluster[j]
+                if _grupos_contenido_compatibles(
+                    textos_por_subtema.get(sa, []),
+                    textos_por_subtema.get(sb, []),
+                    sa,
+                    sb,
+                    min_sim=max(umbral_tema, 0.82),
+                    min_overlap=0.16,
+                ):
+                    dsu_tema.union(i, j)
+        for miembros in dsu_tema.grupos(len(subs_cluster)).values():
+            clusters_validados[next_cluster_id] = [subs_cluster[i] for i in miembros]
+            next_cluster_id += 1
+    clusters = clusters_validados
     uc = [s for s in us if s not in vs]
     mt = {}
     tc = len(clusters)
@@ -2069,15 +2229,11 @@ def _fusionar_temas_contenidos(temas: List[str]) -> Dict[str, str]:
         for tb in unique[i + 1:]:
             na, nb = normed[ta], normed[tb]
             if not na or not nb: continue
-            if (f" {na} " in f" {nb} ") or nb == na or nb.startswith(na + " ") or nb.endswith(" " + na):
+            if na == nb or SequenceMatcher(None, na, nb).ratio() >= 0.92:
                 canon = tb if len(tb) >= len(ta) else ta
                 reemplazar = ta if canon == tb else tb
                 mapa[reemplazar] = canon
-            elif (f" {nb} " in f" {na} ") or na.startswith(nb + " ") or na.endswith(" " + nb):
-                canon = ta if len(ta) >= len(tb) else tb
-                reemplazar = tb if canon == ta else ta
-                mapa[reemplazar] = canon
-    umbral_relajado = 0.70
+    umbral_relajado = 0.88
     candidatos = [(t, normed[t]) for t in unique if len(t.split()) <= 3 and t not in mapa]
     if len(candidatos) >= 2:
         textos_c = [t for t, _ in candidatos]
@@ -2091,9 +2247,7 @@ def _fusionar_temas_contenidos(temas: List[str]) -> Dict[str, str]:
                     if sim[i][j] >= umbral_relajado:
                         ta, tb = etqs[i], etqs[j]
                         if ta in mapa or tb in mapa: continue
-                        words_a = set(normed[ta].split())
-                        words_b = set(normed[tb].split())
-                        if words_a & words_b:
+                        if _etiquetas_compatibles(ta, tb, min_overlap=0.60):
                             freq = Counter(temas)
                             canon = ta if freq.get(ta, 0) >= freq.get(tb, 0) else tb
                             reemplazar = tb if canon == ta else ta
