@@ -44,8 +44,8 @@ OPENAI_MODEL_EMBEDDING     = "text-embedding-3-small"
 OPENAI_MODEL_CLASIFICACION = "gpt-4.1-nano-2025-04-14"
 
 CONCURRENT_REQUESTS          = 50
-SIMILARITY_THRESHOLD_TONO    = 0.88
-SIMILARITY_THRESHOLD_TITULOS = 0.93
+SIMILARITY_THRESHOLD_TONO    = 0.96  # El tono solo se hereda entre republicaciones casi idénticas.
+SIMILARITY_THRESHOLD_TITULOS = 0.94
 
 # ── Umbrales base (corpus grande ≥ 20 noticias) ──────────────────────────────
 UMBRAL_SUBTEMA = 0.78
@@ -65,7 +65,7 @@ UMBRAL_COHERENCIA_ETIQUETA   = 0.35
 MAX_GRUPO_ETIQUETA           = 40
 
 # ── Umbrales mínimos de similitud REAL para agrupar ──────────────────────────
-SIM_MINIMA_AGRUPACION_SUBTEMA = 0.87   
+SIM_MINIMA_AGRUPACION_SUBTEMA = 0.90
 SIM_MINIMA_KEYWORDS_RARAS     = 0.86   
 SIM_MINIMA_FUSION_INTER       = 0.90   
 
@@ -867,6 +867,17 @@ def texto_para_embedding(titulo, resumen, max_len=1800):
     r = str(resumen or "").strip()
     return f"{t}. {t}. {t}. {r}"[:max_len]
 
+def _normalizar_mencion(texto: str) -> str:
+    """Normalización conservadora para buscar nombres de marca completos."""
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", unidecode(str(texto).lower()))).strip()
+
+def _coincide_nombre_completo(texto: str, nombre: str) -> bool:
+    nombre = _normalizar_mencion(nombre)
+    # Evita que alias cortos como "ara" o "red" coincidan dentro de otra palabra.
+    if len(nombre) < 3:
+        return False
+    return bool(re.search(rf"(?<![a-z0-9]){re.escape(nombre)}(?![a-z0-9])", texto))
+
 def _validar_etiqueta_completa(etiqueta, titulos_grp=None, resumenes_grp=None, marca="", aliases=None, fallback_fn=None):
     if not etiqueta or etiqueta.strip().lower() in ("sin tema", "varios", "n/a"):
         if fallback_fn: return fallback_fn(titulos_grp or [])
@@ -1187,11 +1198,11 @@ class ClasificadorTono:
     def __init__(self, marca, aliases):
         self.marca = marca.strip()
         self.aliases = [a.strip() for a in (aliases or []) if a.strip()]
-        self._all_names = [self.marca.lower()] + [a.lower() for a in self.aliases]
+        self._all_names = [self.marca] + self.aliases
 
     def _menciona_marca(self, texto):
-        t = unidecode(texto.lower())
-        return any(m in t for m in self._all_names)
+        t = _normalizar_mencion(texto)
+        return any(_coincide_nombre_completo(t, nombre) for nombre in self._all_names)
 
     async def _clasificar_llm(self, texto, sem):
         async with sem:
@@ -1204,16 +1215,18 @@ class ClasificadorTono:
                 f"Tu tarea es evaluar el impacto reputacional DIRECTO de la siguiente noticia sobre la marca '{self.marca}'{aliases_str}.\n\n"
                 f"TEXTO A EVALUAR:\n{texto[:1600]}\n\n"
                 f"REGLAS DE CLASIFICACIÓN ESTRICTAS:\n"
-                f"🔴 NEGATIVO: La marca '{self.marca}' es CULPABLE o VÍCTIMA DIRECTA de algo malo. Ejemplos: "
-                f"demandas, multas, fraudes corporativos, fallas operativas graves, quejas de usuarios, o investigaciones en su contra.\n"
-                f"🟢 POSITIVO: La marca '{self.marca}' LOGRA algo bueno. Ejemplos: lanza un servicio, gana un premio, "
-                f"reporta ganancias, lidera una iniciativa positiva, hace donaciones o expansiones.\n"
+                f"🔴 NEGATIVO: un hecho perjudica, cuestiona o expone directamente a '{self.marca}' "
+                f"(demandas, multas, fraudes, fallas propias, quejas, investigaciones, pérdidas o retiro de productos).\n"
+                f"🟢 POSITIVO: el hecho acredita directamente un logro, mejora o aporte verificable de '{self.marca}' "
+                f"(premio, crecimiento, lanzamiento exitoso, inversión realizada, innovación, expansión o reconocimiento).\n"
                 f"⚪ NEUTRO: La marca se menciona SIN impacto a su imagen. Ejemplos:\n"
                 f"  - La noticia habla de una crisis del sector/país, pero la marca solo es mencionada informando o adaptándose.\n"
                 f"  - Se menciona a la marca como patrocinador menor o en una lista de empresas.\n"
-                f"  - Emite un comunicado regular sin connotaciones de crisis ni éxito rotundo.\n\n"
+                f"  - Una persona, autoridad, proveedor o tercero es quien recibe el efecto positivo o negativo.\n"
+                f"  - Emite un comunicado regular sin evidencia de crisis ni logro relevante.\n\n"
                 f"⚠️ ATENCIÓN: Ignora si la noticia es trágica a nivel general (ej. una pandemia o accidente de terceros). "
-                f"Evalúa ÚNICAMENTE si la reputación corporativa de '{self.marca}' mejora (Positivo), empeora (Negativo) o se mantiene (Neutro).\n\n"
+                f"No infieras tono por palabras emocionales ni por el tono del sector. Evalúa ÚNICAMENTE cómo el hecho afecta "
+                f"la reputación corporativa de '{self.marca}': mejora (Positivo), empeora (Negativo) o no cambia (Neutro).\n\n"
                 f'Responde ÚNICAMENTE con JSON en este formato: {{"tono": "Positivo|Negativo|Neutro"}}'
             )
 
@@ -1247,9 +1260,24 @@ class ClasificadorTono:
         txts_emb = [texto_para_embedding(str(titulos.iloc[i]), str(resumenes.iloc[i])) for i in range(n)]
         dsu = DSU(n)
         
-        for g in [agrupar_textos_similares(txts_emb, SIMILARITY_THRESHOLD_TONO), agrupar_por_titulo_similar(titulos.tolist())]:
-            for _, idxs in g.items():
-                for j in idxs[1:]: dsu.union(idxs[0], j)
+        # Agrupar para ahorrar llamadas solo cuando se trate de la misma pieza. Una
+        # similitud temática no basta: noticias del mismo asunto pueden afectar a la
+        # marca de forma distinta.
+        embs = get_embeddings_batch(txts_emb)
+        candidatos = agrupar_textos_similares(txts_emb, SIMILARITY_THRESHOLD_TONO)
+        candidatos.update({len(candidatos) + k: v for k, v in agrupar_por_titulo_similar(titulos.tolist()).items()})
+        for idxs in candidatos.values():
+            for pos, i in enumerate(idxs):
+                for j in idxs[pos + 1:]:
+                    ti, tj = normalize_title_for_comparison(titulos.iloc[i]), normalize_title_for_comparison(titulos.iloc[j])
+                    titulo_casi_igual = SequenceMatcher(None, ti, tj).ratio() >= 0.96
+                    contenido_casi_igual = (
+                        embs[i] is not None and embs[j] is not None
+                        and cosine_similarity(np.array(embs[i]).reshape(1, -1), np.array(embs[j]).reshape(1, -1))[0][0] >= SIMILARITY_THRESHOLD_TONO
+                        and _overlap_distintivo(txts_emb[i], txts_emb[j]) >= 0.45
+                    )
+                    if (titulo_casi_igual or contenido_casi_igual) and not _hay_conflicto_accion(txts_emb[i], txts_emb[j]):
+                        dsu.union(i, j)
                 
         grupos = dsu.grupos(n)
         reps = {cid: seleccionar_representante(idxs, txts)[1] for cid, idxs in grupos.items()}
@@ -1312,7 +1340,10 @@ class ClasificadorSubtema:
         for i, (ti, re_) in enumerate(zip(titulos, resumenes)):
             a, b = nt(ti, 40), nt(re_, 15)
             if a: bt[hashlib.md5(a.encode()).hexdigest()].append(i)
-            if b: br[hashlib.md5(b.encode()).hexdigest()].append(i)
+            # Quince palabras iniciales suelen ser un boilerplate de agencia. Solo
+            # consideramos duplicado el inicio sustancialmente idéntico.
+            b = nt(re_, 120)
+            if len(b.split()) >= 25: br[hashlib.md5(b.encode()).hexdigest()].append(i)
         for bk in (bt, br):
             for idxs in bk.values():
                 for j in idxs[1:]: dsu.union(idxs[0], j)
@@ -1324,7 +1355,9 @@ class ClasificadorSubtema:
             if not norm[i]: continue
             for j in range(i + 1, n):
                 if not norm[j] or dsu.find(i) == dsu.find(j): continue
-                if SequenceMatcher(None, norm[i], norm[j]).ratio() >= SIMILARITY_THRESHOLD_TITULOS:
+                ratio = SequenceMatcher(None, norm[i], norm[j]).ratio()
+                comparte_asunto = _overlap_distintivo(norm[i], norm[j]) >= 0.40
+                if ratio >= SIMILARITY_THRESHOLD_TITULOS and comparte_asunto and not _hay_conflicto_accion(norm[i], norm[j]):
                     dsu.union(i, j)
 
     def _paso2b_keywords(self, titulos, dsu, ae):
@@ -1369,21 +1402,21 @@ class ClasificadorSubtema:
                         dsu.union(ia, ib)
 
     def _paso3(self, et, ae, dsu, pbar, ps):
-        umbral_cluster = self._umbrales.get('subtema', UMBRAL_SUBTEMA)
-        sim_min = self._umbrales.get('sim_minima_agrupacion', SIM_MINIMA_AGRUPACION_SUBTEMA)
+        umbral_cluster = max(self._umbrales.get('subtema', UMBRAL_SUBTEMA), 0.82)
+        sim_min = max(self._umbrales.get('sim_minima_agrupacion', SIM_MINIMA_AGRUPACION_SUBTEMA), 0.90)
         n = len(et)
         if n < 2: return
 
         def _puede_unir(i, j):
             if _hay_conflicto_accion(et[i], et[j]):
                 return False
-            if _overlap_distintivo(et[i], et[j]) >= 0.12:
+            if _overlap_distintivo(et[i], et[j]) >= 0.30:
                 return True
             return SequenceMatcher(
                 None,
                 normalize_title_for_comparison(et[i]),
                 normalize_title_for_comparison(et[j])
-            ).ratio() >= SIMILARITY_THRESHOLD_TITULOS
+            ).ratio() >= 0.96
 
         B = 500
         if n <= B:
@@ -1701,7 +1734,7 @@ class ClasificadorSubtema:
             return self._fallback([])
 
     def _fallback(self, titulos):
-        if not titulos: return "Cobertura informativa general"
+        if not titulos: return "Cobertura de información relevante"
         palabras = []
         for t in titulos[:5]:
             for w in string_norm_label(t).split():
@@ -1711,9 +1744,9 @@ class ClasificadorSubtema:
             if len(top) >= 2:
                 frase = f"{top[0]} de {top[1]}"
                 if _frase_esta_completa(frase): return capitalizar_etiqueta(frase)
-                return capitalizar_etiqueta(f"{top[0]} {top[1]}")
-            return capitalizar_etiqueta(top[0])
-        return "Cobertura informativa general"
+                return capitalizar_etiqueta(f"Asuntos de {top[0]} y {top[1]}")
+            return capitalizar_etiqueta(f"Asuntos relacionados con {top[0]}")
+        return "Cobertura de información relevante"
 
     def _consolidar_sinonimos_llm(self, subtemas_unicos):
         if len(subtemas_unicos) <= 1:
@@ -1974,7 +2007,7 @@ def _construir_representacion_grupo(subtema, textos_grupo, max_textos=30):
 
 def _validar_estructura_tema(tema: str) -> bool:
     if not tema or len(tema.split()) < 2: return False
-    if len(tema.split()) > 4: return False
+    if len(tema.split()) > 5: return False
     if re.match(r'^[0-9]', tema): return False
     num_palabras = re.compile(
         r'^(uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|'
@@ -1983,6 +2016,15 @@ def _validar_estructura_tema(tema: str) -> bool:
     if num_palabras.match(tema): return False
     if _PATRON_TITULAR.match(tema): return False
     if _PATRON_ESTADO.search(tema): return False
+    # Una sección de una sola palabra suele borrar el asunto real de la noticia.
+    # Se permiten categorías compuestas como "Regulación financiera", no rótulos
+    # vacíos como "Economía" o "Actualidad".
+    genericos = {
+        "economia", "politica", "tecnologia", "seguridad", "justicia",
+        "actualidad", "nacional", "internacional", "empresas", "sociedad",
+        "negocios", "informacion", "noticias", "varios", "general",
+    }
+    if string_norm_label(tema) in genericos: return False
     return True
 
 def _tema_es_igual_a_subtema(tema: str, subtemas_grupo: list) -> bool:
@@ -2004,17 +2046,17 @@ def _generar_nombre_tema_llm(subtemas_grupo, textos_muestra, titulos_muestra):
     kw = ", ".join(w for w, _ in Counter(palabras).most_common(6))
     tit_muestra = "\n".join(f"  · {t[:100]}" for t in list(dict.fromkeys(titulos_muestra))[:5])
     prompt = (
-        "Eres editor jefe de un periódico. Crea UNA sección editorial (2-4 palabras) que agrupe estos subtemas.\n\n"
+        "Eres editor jefe. Crea UN tema editorial preciso (2-5 palabras) que agrupe estos subtemas.\n\n"
         "SUBTEMAS:\n" + subs_list + "\n\nTÍTULOS DE REFERENCIA:\n" + tit_muestra +
         f"\n\nKEYWORDS: {kw}\n\n"
         "REGLAS ESTRICTAS:\n"
-        "  1. Piensa en secciones de periódico: 'Política', 'Economía', 'Tecnología', 'Seguridad', 'Justicia', 'Medio Ambiente'.\n"
-        "  2. Más GENERAL y ABSTRACTO que los subtemas — nunca repitas un subtema ni copies fragmentos de titular.\n"
+        "  1. Conserva el asunto común que diferencia este grupo; NO uses secciones vagas de una palabra.\n"
+        "  2. Debe ser más general que los subtemas, pero no abstracto: nunca copies un titular ni repitas un subtema.\n"
         "  3. NUNCA incluyas números, cantidades ni nombres propios.\n"
-        "  4. 2-4 palabras. Sustantivo + adjetivo o sustantivo solo.\n"
+        "  4. 2-5 palabras, sustantivo + complemento/adjetivo.\n"
         "  5. Tildes y ñ correctas.\n\n"
-        "CORRECTO: 'Política', 'Gestión legislativa', 'Justicia penal', 'Regulación financiera'\n"
-        "INCORRECTO: 'Cinco congresistas con líos', 'Congresistas electos', 'Investigación disciplinaria congreso', 'Nuevo acuerdo'\n\n"
+        "CORRECTO: 'Regulación financiera', 'Movilidad urbana', 'Infraestructura vial', 'Salud pública territorial'\n"
+        "INCORRECTO: 'Economía', 'Política', 'Actualidad', 'Cinco congresistas con líos', 'Nuevo acuerdo'\n\n"
         'JSON: {"tema":"..."}'
     )
     try:
@@ -2037,8 +2079,8 @@ def _regenerar_tema_diferente(subtemas_grupo, titulos_muestra, intento=0):
     subs_list = ", ".join(subtemas_grupo[:8])
     prompt = (
         f"Subtemas: {subs_list}\n\n"
-        "Genera UNA categoría GENERAL (2-3 palabras), diferente a los subtemas. "
-        "Piensa en sección de periódico (Economía, Política, Tecnología, Infraestructura, Cultura, Deportes…). "
+        "Genera UNA categoría precisa (2-5 palabras), diferente a los subtemas. "
+        "Conserva el asunto común; no respondas una sección vaga de una palabra como Economía, Política o Actualidad. "
         "Tildes y ñ correctas, terminar en sustantivo/adjetivo.\n"
         'JSON: {"tema":"..."}'
     )
@@ -2051,7 +2093,8 @@ def _regenerar_tema_diferente(subtemas_grupo, titulos_muestra, intento=0):
             temperature=0.2 + intento * 0.1,
             response_format={"type": "json_object"}
         )
-        return limpiar_tema(json.loads(resp.choices[0].message.content).get("tema", "").strip().replace('"', '').replace('.', ''))
+        nombre = limpiar_tema(json.loads(resp.choices[0].message.content).get("tema", "").strip().replace('"', '').replace('.', ''))
+        return nombre if _validar_estructura_tema(nombre) else None
     except:
         return None
 
