@@ -172,7 +172,7 @@ _TILDE_MAP = {
     "movil":"móvil","moviles":"móviles","codigo":"código","informatica":"informática",
     "electronica":"electrónica","robotica":"robótica","ciberseguridad":"ciberseguridad",
     "trafico":"tráfico","transito":"tránsito","aereo":"aéreo","maritimo":"marítimo",
-    "turistica":"turística","turistico":"turístico","gastronomia":"gastrónomía",
+    "turistica":"turística","turistico":"turístico","gastronomia":"gastronomía",
     "academica":"académica","academico":"académico","pedagogica":"pedagógica",
     "cientifica":"científica","cientifico":"científico","juridica":"jurídica",
     "juridico":"jurídico","constitucion":"constitución","resolucion":"resolución",
@@ -195,12 +195,12 @@ _ENIE_MAP = {
     "danino":"dañino","danina":"dañina","montana":"montaña","montanas":"montañas",
     "espana":"España","espanol":"español","espanola":"española","espanoles":"españoles",
     "companero":"compañero","companera":"compañera","companeros":"compañeros","companeras":"compañeras",
-    "compania":"compañía","companias":"compañías","acompanamiento":"acompanamiento",
+    "compania":"compañía","companias":"compañías","acompanamiento":"acompañamiento",
     "cana":"caña","canas":"cañas","banio":"baño","banios":"baños","bano":"baño","banos":"baños",
     "pena":"peña","penas":"peñas","penon":"peñón","senor":"señor","senora":"señora",
     "senores":"señores","senoras":"señoras","senal":"señal","senales":"señales",
     "senalizacion":"señalización","pequeno":"pequeño","pequena":"pequeña",
-    "pequenos":"pequeños","pequenas":"peñas","sueno":"sueño","suenos":"sueños",
+    "pequenos":"pequeños","pequenas":"pequeñas","sueno":"sueño","suenos":"sueños",
     "dueno":"dueño","duena":"dueña","duenos":"dueños","duenas":"dueñas",
     "otono":"otoño","punio":"puño","punios":"puños","puno":"puño",
     "canon":"cañón","canones":"cañones","manana":"mañana","mananas":"mañanas",
@@ -1206,6 +1206,142 @@ def seleccionar_representante(indices, textos):
     centro = np.mean(M, axis=0, keepdims=True)
     best = int(np.argmax(cosine_similarity(np.array(M), centro)))
     return idxs[best], textos[idxs[best]]
+
+
+# ======================================
+# Consistencia cruzada Título ↔ Cuerpo (post-procesamiento final)
+# ======================================
+# Objetivo puntual pedido: si dos o más filas tienen el Título prácticamente
+# idéntico (aunque el Cuerpo/"CuerpoEs" difiera), o el Cuerpo prácticamente
+# idéntico (aunque el Título difiera), deben terminar con el MISMO Tono IA,
+# Tema y Subtema. Esto se ejecuta una sola vez, al final, sobre TODO el
+# corpus ya clasificado — no reemplaza el clustering interno de Tono/Subtema,
+# lo complementa cerrando los casos donde ese clustering, por trabajar en
+# lotes/pasos distintos, dejó pequeñas inconsistencias entre sí.
+#
+# Salvaguardas para NO generalizar de más (no fusionar noticias que no se
+# relacionan):
+#   1) Nunca se une un par si _hay_conflicto_accion detecta polaridad opuesta
+#      (ej. "aprueba" vs "rechaza", "aumento" vs "caída").
+#   2) Para coincidencias de Cuerpo (sin apoyo del título) se exige, además
+#      del umbral alto de similitud semántica, un solape mínimo de palabras
+#      distintivas (MIN_OVERLAP_CONSISTENCIA) — evita unir textos que solo
+#      comparten redacción/plantilla genérica.
+#   3) Los grupos que propone el clustering aglomerativo se re-verifican
+#      contra su centroide (umbral estricto) antes de aceptarlos, para
+#      neutralizar el efecto "cadena" del linkage promedio.
+#   4) Si un grupo detectado ya es consistente (mismo Tono/Tema/Subtema en
+#      todas sus filas) no se toca nada.
+
+UMBRAL_CUERPO_CONSISTENCIA = 0.94   # similitud semántica mínima entre Cuerpos para considerarlos "la misma noticia"
+MIN_OVERLAP_CONSISTENCIA   = 0.28   # solape mínimo de palabras clave distintivas entre Cuerpos
+
+def _votar_valor_dominante(valores):
+    """
+    Devuelve el valor más frecuente de un grupo (moda). En caso de empate,
+    se queda con el más largo/descriptivo (suele ser el subtema/tema mejor
+    redactado, en vez de una versión recortada o genérica).
+    """
+    limpios = [v for v in valores if v is not None and str(v).strip() and str(v).strip().lower() != "nan"]
+    if not limpios:
+        return valores[0] if valores else ""
+    cnt = Counter(limpios)
+    max_freq = max(cnt.values())
+    candidatos = [v for v, f in cnt.items() if f == max_freq]
+    if len(candidatos) == 1:
+        return candidatos[0]
+    return max(candidatos, key=lambda v: len(str(v)))
+
+def _grupos_verificados_por_centroide(indices, embeddings, umbral):
+    """
+    Verifica que TODOS los miembros de un grupo propuesto por clustering
+    estén realmente cerca entre sí (similitud vs. centroide >= umbral).
+    Evita que el efecto "cadena" del linkage promedio cuele en un mismo
+    grupo noticias que solo son parecidas de a pares, pero no como conjunto.
+    """
+    vecs = [(i, embeddings[i]) for i in indices if embeddings[i] is not None]
+    if len(vecs) < 2:
+        return []
+    idxs, M = zip(*vecs)
+    M = np.array(M)
+    centroid = np.mean(M, axis=0, keepdims=True)
+    sims = cosine_similarity(M, centroid).flatten()
+    aceptados = [idxs[k] for k, s in enumerate(sims) if s >= umbral]
+    return aceptados if len(aceptados) >= 2 else []
+
+def unificar_consistencia_titulo_cuerpo(df, col_titulo, col_resumen, col_subtema, col_tema, col_tono, pbar=None):
+    """
+    Post-procesamiento final sobre el DataFrame ya clasificado (Tono IA,
+    Tema y Subtema ya asignados a cada fila). Agrupa filas por:
+      (a) Título casi idéntico entre sí (aunque el Cuerpo difiera), y
+      (b) Cuerpo casi idéntico entre sí (aunque el Título difiera),
+    y fuerza que cada grupo comparta el mismo Tono IA, Tema y Subtema
+    (por voto de mayoría), respetando las salvaguardas contra conflicto
+    de polaridad y contra similitud puramente genérica/plantilla.
+
+    Modifica `df` in-place (usa .at, requiere índice 0..n-1) y también lo
+    retorna por comodidad.
+    """
+    n = len(df)
+    if n < 2:
+        return df
+
+    titulos   = df[col_titulo].fillna("").astype(str).tolist()
+    resumenes = df[col_resumen].fillna("").astype(str).tolist()
+
+    dsu = DSU(n)
+
+    # --- (a) Título casi idéntico ---
+    grupos_titulo = agrupar_por_titulo_similar(titulos)
+    for idxs in grupos_titulo.values():
+        base = idxs[0]
+        for j in idxs[1:]:
+            if not _hay_conflicto_accion(titulos[base], titulos[j]):
+                dsu.union(base, j)
+
+    # --- (b) Cuerpo casi idéntico ---
+    cuerpo_textos = [r[:2000] if r.strip() else "" for r in resumenes]
+    embeddings_cuerpo = get_embeddings_batch(cuerpo_textos)
+    candidatos_cuerpo = agrupar_textos_similares(cuerpo_textos, UMBRAL_CUERPO_CONSISTENCIA)
+    for idxs in candidatos_cuerpo.values():
+        verificados = _grupos_verificados_por_centroide(idxs, embeddings_cuerpo, UMBRAL_CUERPO_CONSISTENCIA)
+        if len(verificados) < 2:
+            continue
+        base = verificados[0]
+        for j in verificados[1:]:
+            if dsu.find(base) == dsu.find(j):
+                continue
+            if not resumenes[base].strip() or not resumenes[j].strip():
+                continue
+            if _hay_conflicto_accion(resumenes[base], resumenes[j]):
+                continue
+            if _overlap_distintivo(resumenes[base], resumenes[j]) < MIN_OVERLAP_CONSISTENCIA:
+                continue
+            dsu.union(base, j)
+
+    grupos = dsu.grupos(n)
+    n_unificados = 0
+    for idxs in grupos.values():
+        if len(idxs) < 2:
+            continue
+        subtemas_grp = [df.at[i, col_subtema] for i in idxs]
+        temas_grp    = [df.at[i, col_tema] for i in idxs]
+        tonos_grp    = [df.at[i, col_tono] for i in idxs]
+        # Grupo ya consistente: no tocar nada
+        if len(set(subtemas_grp)) <= 1 and len(set(temas_grp)) <= 1 and len(set(tonos_grp)) <= 1:
+            continue
+        subtema_final = _votar_valor_dominante(subtemas_grp)
+        tema_final    = _votar_valor_dominante(temas_grp)
+        tono_final    = _votar_valor_dominante(tonos_grp)
+        for i in idxs:
+            df.at[i, col_subtema] = subtema_final
+            df.at[i, col_tema]    = tema_final
+            df.at[i, col_tono]    = tono_final
+        n_unificados += 1
+
+    if pbar:
+        pbar.progress(1.0, f"Consistencia Título/Cuerpo: {n_unificados} grupos unificados")
+    return df
 
 
 # ======================================
@@ -2773,7 +2909,19 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
             else:
                 df[km["tema"]] = temas
             s.update(label="✓ Paso 4 · Clasificación", state="complete")
-            
+
+        # Paso 4.5 · Consistencia cruzada Título ↔ Cuerpo (garantiza que noticias
+        # con Título casi idéntico o Cuerpo casi idéntico compartan el mismo
+        # Tono IA, Tema y Subtema). Se omite si el corpus quedó sin clasificar
+        # (modo "Solo Modelos PKL" sin modelo de temas cargado).
+        if not df[km["subtema"]].astype(str).eq("N/A").all():
+            with st.status("Paso 4.5 · Consistencia Título/Cuerpo", expanded=True) as s:
+                pb = st.progress(0)
+                unificar_consistencia_titulo_cuerpo(
+                    df, km["titulo"], km["resumen"], km["subtema"], km["tema"], km["tonoiai"], pb
+                )
+                s.update(label="✓ Paso 4.5 · Consistencia Título/Cuerpo", state="complete")
+
         # Re-mapeo usando expanded_index para garantizar unicidad al indexar
         rm2 = df.set_index("expanded_index").to_dict("index")
         for idx, row in enumerate(rows):
@@ -2817,6 +2965,10 @@ async def run_quick_async(df, tc, sc, bn, al):
         temas = consolidar_temas(subtemas, df["_txt"].tolist(), pb)
         df['Tema'] = temas
         s.update(label="✓ Clasificación", state="complete")
+    with st.status("Consistencia Título/Cuerpo", expanded=True) as s:
+        pb = st.progress(0)
+        unificar_consistencia_titulo_cuerpo(df, tc, sc, 'Subtema', 'Tema', 'Tono IA', pb)
+        s.update(label="✓ Consistencia Título/Cuerpo", state="complete")
     df.drop(columns=['_txt'], inplace=True)
     ci = (st.session_state['tokens_input']     / 1e6) * PRICE_INPUT_1M
     co = (st.session_state['tokens_output']    / 1e6) * PRICE_OUTPUT_1M
@@ -2908,7 +3060,7 @@ def main():
         <div class="app-header-icon">◈</div>
         <div class="app-header-text">
             <div class="app-header-title">Análisis de Noticias - API</div>
-            <div class="app-header-version">v18.2 · 😼 Realizado por Johnathan Cortés 🕵️‍♂️ </div>
+            <div class="app-header-version">v18.3 · 😼 Realizado por Johnathan Cortés 🕵️‍♂️ </div>
         </div>
         <div class="app-header-badge">IA</div>
     </div>""", unsafe_allow_html=True)
@@ -2974,7 +3126,8 @@ def main():
                     f'· Dedup={UMBRAL_DEDUP_LABEL} · MinSub={UMBRAL_MIN_PERTENENCIA_SUBTEMA} '
                     f'· MinTema={UMBRAL_MIN_PERTENENCIA_TEMA} · MaxGrupo={MAX_GRUPO_ETIQUETA} · '
                     f'<b>Coherencia={UMBRAL_COHERENCIA_ETIQUETA}</b> · '
-                    f'<b>SimMin={SIM_MINIMA_AGRUPACION_SUBTEMA}</b> (adaptativos según n)'
+                    f'<b>SimMin={SIM_MINIMA_AGRUPACION_SUBTEMA}</b> · '
+                    f'<b>Consistencia Cuerpo={UMBRAL_CUERPO_CONSISTENCIA}</b> (adaptativos según n)'
                     f'</div>',
                     unsafe_allow_html=True
                 )
@@ -3040,7 +3193,7 @@ def main():
         render_quick_tab()
 
     st.markdown(
-        '<div class="footer">v18.2 · Análisis de Noticias con IA · Johnathan Cortés ©</div>',
+        '<div class="footer">v18.3 · Análisis de Noticias con IA · Johnathan Cortés ©</div>',
         unsafe_allow_html=True
     )
 
