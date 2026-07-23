@@ -14,7 +14,7 @@
  \____|_| \_\___|_____|_____/_/   \_\_|  |___|
 ```
 
-**Grill-API** es un motor de procesamiento y visualización interactiva para el análisis de noticias en tiempo real. La plataforma ingiere información de múltiples fuentes RSS, portales digitales y web APIs, aplicando técnicas de Procesamiento de Lenguaje Natural (NLP) para evaluar el sentimiento, extraer entidades nombradas y detectar tendencias informativas de forma automatizada.
+**Grill-API** es un motor de procesamiento y visualización interactiva para el análisis de noticias generando un tono, tema y subtema. La plataforma ingiere información del admin Grill de GlobalNews Group, aplicando técnicas de Procesamiento de Lenguaje Natural (NLP) para evaluar el sentimiento, extraer entidades nombradas y detectar tendencias informativas de forma automatizada agrupando noticias similares en mismos temas y subtemas y enfocando el tono al impacto de la marca analizada y no al conjunto total de la noticia.
 
 ---
 
