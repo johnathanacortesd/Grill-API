@@ -69,19 +69,6 @@ SIM_MINIMA_AGRUPACION_SUBTEMA = 0.90
 SIM_MINIMA_KEYWORDS_RARAS     = 0.86   
 SIM_MINIMA_FUSION_INTER       = 0.90   
 
-# ── Consistencia ultra-precisa entre republicaciones / coberturas casi idénticas ─────────────
-# Estos umbrales son INDEPENDIENTES de los de agrupación temática: solo sirven para detectar
-# cuando dos o más noticias son, en la práctica, LA MISMA noticia (o una republicación/versión
-# casi idéntica de un mismo hecho), ya sea porque comparten Título muy similar, CuerpoEs muy
-# similar, o ambos (incluso si el otro campo difiere). Al ser independientes de los umbrales de
-# agrupación temática, permiten forzar Tono/Tema/Subtema consistentes sin arriesgar que se junten
-# hechos distintos solo por pertenecer al mismo tema general.
-UMBRAL_SIM_TITULO_CONSIST = 0.92   # SequenceMatcher sobre título normalizado
-UMBRAL_SIM_CUERPO_CONSIST = 0.90   # SequenceMatcher sobre cuerpo normalizado (primeros ~600 car.)
-UMBRAL_EMB_TITULO_CONSIST = 0.95   # coseno embeddings de SOLO título (no combinado con cuerpo)
-UMBRAL_EMB_CUERPO_CONSIST = 0.93   # coseno embeddings de SOLO cuerpo (no combinado con título)
-MIN_LEN_CUERPO_CONSIST    = 60     # caracteres mínimos del cuerpo para compararlo (evita falsos positivos con textos muy cortos)
-
 PRICE_INPUT_1M     = 0.10
 PRICE_OUTPUT_1M    = 0.40
 PRICE_EMBEDDING_1M = 0.02
@@ -1221,245 +1208,6 @@ def seleccionar_representante(indices, textos):
     return idxs[best], textos[idxs[best]]
 
 
-# ==========================================================================================
-# MOTOR DE CONSISTENCIA ULTRA-PRECISA (Título y/o CuerpoEs) — NUEVO
-# ==========================================================================================
-# Objetivo: garantizar que dos o más noticias que en realidad son "la misma noticia"
-# (republicación, sindicación, misma nota replicada por varios medios, etc.) reciban
-# EXACTAMENTE el mismo Tono, Tema y Subtema — incluso si el resto del pipeline temático
-# (pensado para agrupar HECHOS relacionados, no textos idénticos) las hubiera etiquetado
-# de forma levemente distinta.
-#
-# Este motor es DELIBERADAMENTE independiente del agrupamiento por subtema/tema:
-#   • Compara Título contra Título y CuerpoEs contra CuerpoEs por separado (nunca mezclados),
-#     tanto de forma literal (SequenceMatcher sobre texto normalizado) como semántica
-#     (embeddings de SOLO ese campo).
-#   • Basta con que UNO de los dos campos sea muy similar (Título muy similar aunque el
-#     Cuerpo difiera, o Cuerpo muy similar aunque el Título difiera) para considerarlas
-#     "la misma noticia".
-#   • Usa umbrales muy altos (>=0.90) y bloqueo de conflicto semántico (_hay_conflicto_accion)
-#     para evitar falsos positivos: dos noticias del mismo sector pero de hechos distintos
-#     NUNCA deben unirse aquí.
-# ==========================================================================================
-
-def _normalizar_cuerpo_para_comparacion(texto, max_chars=600):
-    """Normaliza el CuerpoEs/Resumen para comparación literal: minúsculas, sin tildes,
-    sin HTML/URLs, sin puntuación, colapsando espacios. Se compara solo el inicio del
-    cuerpo (donde suele estar el lead/entradilla, la parte más estable entre republicaciones)."""
-    if not isinstance(texto, str) or not texto.strip():
-        return ""
-    t = unidecode(texto.lower())
-    t = re.sub(r'<[^>]+>', ' ', t)
-    t = re.sub(r'https?://\S+', ' ', t)
-    t = re.sub(r'[^a-z0-9\s]', ' ', t)
-    t = re.sub(r'\s+', ' ', t).strip()
-    return t[:max_chars]
-
-def construir_grupos_consistencia(titulos, resumenes, pbar=None, ps=0.0):
-    """
-    Construye clases de equivalencia de noticias 'iguales o casi idénticas' comparando
-    Título contra Título y CuerpoEs contra CuerpoEs de forma INDEPENDIENTE. Devuelve un
-    dict {id_grupo: [indices]} vía Union-Find (DSU), donde cada grupo representa la MISMA
-    noticia (o una republicación/versión casi idéntica de la misma).
-    """
-    n = len(titulos)
-    dsu = DSU(n)
-    if n < 2:
-        return dsu.grupos(n)
-
-    titulos_norm = [normalize_title_for_comparison(t) for t in titulos]
-    cuerpos_norm = [_normalizar_cuerpo_para_comparacion(r) for r in resumenes]
-
-    # --- Bloque 1: coincidencia literal casi exacta de TÍTULO ---------------------------
-    bt = defaultdict(list)
-    for i, tn in enumerate(titulos_norm):
-        if len(tn) >= 12:
-            bt[tn[:60]].append(i)  # bloqueo grueso por prefijo para acotar comparaciones
-    for idxs in bt.values():
-        for a in range(len(idxs)):
-            for b in range(a + 1, len(idxs)):
-                i, j = idxs[a], idxs[b]
-                if dsu.find(i) == dsu.find(j): continue
-                ratio = SequenceMatcher(None, titulos_norm[i], titulos_norm[j]).ratio()
-                if ratio >= UMBRAL_SIM_TITULO_CONSIST and not _hay_conflicto_accion(titulos_norm[i], titulos_norm[j]):
-                    dsu.union(i, j)
-
-    # --- Bloque 2: coincidencia literal casi exacta de CUERPO (lead/entradilla) ----------
-    bc = defaultdict(list)
-    for i, cn in enumerate(cuerpos_norm):
-        if len(cn) >= MIN_LEN_CUERPO_CONSIST:
-            bc[cn[:80]].append(i)
-    for idxs in bc.values():
-        for a in range(len(idxs)):
-            for b in range(a + 1, len(idxs)):
-                i, j = idxs[a], idxs[b]
-                if dsu.find(i) == dsu.find(j): continue
-                ratio = SequenceMatcher(None, cuerpos_norm[i], cuerpos_norm[j]).ratio()
-                if ratio >= UMBRAL_SIM_CUERPO_CONSIST and not _hay_conflicto_accion(cuerpos_norm[i], cuerpos_norm[j]):
-                    dsu.union(i, j)
-
-    stop_local = STOPWORDS_ES | {"dice", "dijo", "informo", "según", "segun", "tras", "luego"}
-
-    # --- Bloque 3: similitud SEMÁNTICA de SOLO el título (embeddings de título puro) ----
-    if pbar: pbar.progress(ps, "Consistencia · comparando títulos (semántico)...")
-    emb_titulos = get_embeddings_batch([t if t else "" for t in titulos])
-    palabras_idx_t = defaultdict(list)
-    for i, tn in enumerate(titulos_norm):
-        vistos = set()
-        for w in tn.split():
-            if len(w) >= 5 and w not in stop_local and w not in vistos:
-                palabras_idx_t[w].append(i)
-                vistos.add(w)
-    candidatos_t = set()
-    for idxs in palabras_idx_t.values():
-        if 2 <= len(idxs) <= 40:
-            for a in range(len(idxs)):
-                for b in range(a + 1, len(idxs)):
-                    i, j = idxs[a], idxs[b]
-                    if dsu.find(i) != dsu.find(j):
-                        candidatos_t.add((min(i, j), max(i, j)))
-    for i, j in candidatos_t:
-        if dsu.find(i) == dsu.find(j): continue
-        if emb_titulos[i] is None or emb_titulos[j] is None: continue
-        sim_t = cosine_similarity(
-            np.array(emb_titulos[i]).reshape(1, -1),
-            np.array(emb_titulos[j]).reshape(1, -1)
-        )[0][0]
-        if sim_t >= UMBRAL_EMB_TITULO_CONSIST and not _hay_conflicto_accion(titulos_norm[i], titulos_norm[j]):
-            dsu.union(i, j)
-
-    # --- Bloque 4: similitud SEMÁNTICA de SOLO el cuerpo (embeddings de cuerpo puro) ----
-    if pbar: pbar.progress(min(ps + 0.02, 1.0), "Consistencia · comparando cuerpos (semántico)...")
-    idx_cuerpo_validos = [i for i, c in enumerate(cuerpos_norm) if len(c) >= MIN_LEN_CUERPO_CONSIST]
-    if len(idx_cuerpo_validos) >= 2:
-        textos_cuerpo = [str(resumenes[i])[:1200] if resumenes[i] else "" for i in idx_cuerpo_validos]
-        emb_cuerpos_sub = get_embeddings_batch(textos_cuerpo)
-        emb_cuerpos = {idx_cuerpo_validos[k]: emb_cuerpos_sub[k] for k in range(len(idx_cuerpo_validos))}
-        palabras_idx_c = defaultdict(list)
-        for i in idx_cuerpo_validos:
-            vistos = set()
-            for w in cuerpos_norm[i].split():
-                if len(w) >= 6 and w not in stop_local and w not in vistos:
-                    palabras_idx_c[w].append(i)
-                    vistos.add(w)
-        candidatos_c = set()
-        for idxs in palabras_idx_c.values():
-            if 2 <= len(idxs) <= 40:
-                for a in range(len(idxs)):
-                    for b in range(a + 1, len(idxs)):
-                        i, j = idxs[a], idxs[b]
-                        if dsu.find(i) != dsu.find(j):
-                            candidatos_c.add((min(i, j), max(i, j)))
-        for i, j in candidatos_c:
-            if dsu.find(i) == dsu.find(j): continue
-            ei, ej = emb_cuerpos.get(i), emb_cuerpos.get(j)
-            if ei is None or ej is None: continue
-            sim_c = cosine_similarity(np.array(ei).reshape(1, -1), np.array(ej).reshape(1, -1))[0][0]
-            if sim_c >= UMBRAL_EMB_CUERPO_CONSIST and not _hay_conflicto_accion(cuerpos_norm[i], cuerpos_norm[j]):
-                dsu.union(i, j)
-
-    if pbar: pbar.progress(min(ps + 0.03, 1.0), "Grupos de consistencia listos")
-    return dsu.grupos(n)
-
-
-def _votar_valor_mayoritario(valores, embeddings=None, textos=None):
-    """
-    Devuelve el valor mayoritario de una lista (ignorando None/vacíos/'N/A'/'-').
-    En caso de empate entre 2+ valores igual de frecuentes, desempata eligiendo el valor
-    del elemento más 'central' según embeddings (más representativo del grupo), para no
-    depender del orden arbitrario de las filas.
-    """
-    limpios = [v for v in valores if v and str(v).strip() and str(v).strip().lower() not in ("n/a", "-", "nan", "none")]
-    if not limpios:
-        return None
-    conteo = Counter(limpios)
-    max_freq = max(conteo.values())
-    empatados = [v for v, c in conteo.items() if c == max_freq]
-    if len(empatados) == 1:
-        return empatados[0]
-    if embeddings is not None:
-        vecs = [e for e in embeddings if e is not None]
-        if len(vecs) >= 2:
-            centro = np.mean(np.array(vecs), axis=0, keepdims=True)
-            mejor_val, mejor_sim = empatados[0], -1.0
-            for idx, val in enumerate(valores):
-                if val in empatados and idx < len(embeddings) and embeddings[idx] is not None:
-                    sim = cosine_similarity(np.array(embeddings[idx]).reshape(1, -1), centro)[0][0]
-                    if sim > mejor_sim:
-                        mejor_sim = sim
-                        mejor_val = val
-            return mejor_val
-    return empatados[0]
-
-
-def aplicar_consistencia_intergrupo(df, km_tono, km_tema, km_subtema, km_titulo, km_resumen, pbar=None):
-    """
-    PASO DE ULTRA-PRECISIÓN: fuerza que noticias iguales o muy similares (mismo Título o
-    mismo CuerpoEs, aunque el otro campo difiera) reciban EXACTAMENTE el mismo Tono, Tema
-    y Subtema. Opera sobre grupos de consistencia calculados de forma independiente del
-    agrupamiento temático (construir_grupos_consistencia), por lo que NO generaliza ni
-    junta noticias sin relación real: solo actúa dentro de clases de equivalencia ya
-    validadas como "la misma noticia" por título y/o cuerpo, con umbrales altos.
-    """
-    n = len(df)
-    if n < 2:
-        return df
-
-    df = df.reset_index(drop=True)
-    titulos = df[km_titulo].fillna("").astype(str).tolist() if km_titulo in df.columns else [""] * n
-    resumenes = df[km_resumen].fillna("").astype(str).tolist() if km_resumen in df.columns else [""] * n
-
-    if pbar: pbar.progress(0.0, "Detectando republicaciones / coberturas casi idénticas...")
-    grupos = construir_grupos_consistencia(titulos, resumenes, pbar, ps=0.0)
-
-    emb_combinado = get_embeddings_batch([texto_para_embedding(titulos[i], resumenes[i]) for i in range(n)])
-
-    tonos = df[km_tono].tolist() if km_tono in df.columns else [None] * n
-    temas = df[km_tema].tolist() if km_tema in df.columns else [None] * n
-    subtemas = df[km_subtema].tolist() if km_subtema in df.columns else [None] * n
-
-    grupos_multiples = {gid: idxs for gid, idxs in grupos.items() if len(idxs) >= 2}
-    total_g = len(grupos_multiples)
-    unificados = 0
-    for k, (gid, idxs) in enumerate(grupos_multiples.items()):
-        if pbar and total_g:
-            pbar.progress(min(0.05 + 0.9 * (k / total_g), 0.95), f"Unificando republicaciones {k + 1}/{total_g}...")
-
-        embs_grupo = [emb_combinado[i] for i in idxs]
-
-        if km_tono in df.columns:
-            tono_grupo = [tonos[i] for i in idxs]
-            tono_final = _votar_valor_mayoritario(tono_grupo, embs_grupo)
-            if tono_final is not None:
-                for i in idxs: tonos[i] = tono_final
-
-        if km_subtema in df.columns:
-            subtema_grupo = [subtemas[i] for i in idxs]
-            subtema_final = _votar_valor_mayoritario(subtema_grupo, embs_grupo)
-            if subtema_final is not None:
-                for i in idxs: subtemas[i] = subtema_final
-
-        if km_tema in df.columns:
-            tema_grupo = [temas[i] for i in idxs]
-            tema_final = _votar_valor_mayoritario(tema_grupo, embs_grupo)
-            if tema_final is not None:
-                for i in idxs: temas[i] = tema_final
-
-        unificados += len(idxs)
-
-    if km_tono in df.columns: df[km_tono] = tonos
-    if km_tema in df.columns: df[km_tema] = temas
-    if km_subtema in df.columns: df[km_subtema] = subtemas
-
-    if pbar: pbar.progress(1.0, "Consistencia entre republicaciones aplicada")
-    if total_g:
-        st.caption(
-            f"🔗 Consistencia: **{total_g}** grupos de republicaciones/coberturas casi idénticas "
-            f"detectados (**{unificados}** noticias) → Tono/Tema/Subtema unificados por voto mayoritario."
-        )
-    return df
-
-
 # ======================================
 # TONO (Sistema Reputacional por IA)
 # ======================================
@@ -1805,7 +1553,7 @@ class ClasificadorSubtema:
         ck = hashlib.md5(("|".join(tn[:12]) + f"#{len(titulos_grp)}#{existentes_key}").encode()).hexdigest()
         if ck in self._cache: return self._cache[ck]
 
-        tm = list(dict.fromkeys(str(t)[:130] for t in titulos_grp if t and not (isinstance(t, float) and t != t)))[:6]
+        tm = list(dict.fromkeys(t[:130] for t in titulos_grp if t))[:6]
         rm = [str(r)[:200] for r in resumenes_grp[:3] if r and len(str(r)) > 20]
 
         kw_list = self._extraer_keywords_titulos(titulos_grp, top_n=8)
@@ -2986,10 +2734,6 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
     
     if ta:
         df = pd.DataFrame(ta)
-        # Blindaje: evita NaN/float colándose como "título" o "resumen" en cualquier
-        # punto del pipeline (tono, subtemas, temas, consistencia).
-        df[km["titulo"]]  = df[km["titulo"]].fillna("").astype(str)
-        df[km["resumen"]] = df[km["resumen"]].fillna("").astype(str)
         df["_txt"] = df.apply(
             lambda r: texto_para_embedding(str(r.get(km["titulo"], "")), str(r.get(km["resumen"], ""))),
             axis=1
@@ -3029,16 +2773,6 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
             else:
                 df[km["tema"]] = temas
             s.update(label="✓ Paso 4 · Clasificación", state="complete")
-
-        with st.status("Paso 4b · Consistencia entre republicaciones (Título/CuerpoEs)", expanded=True) as s:
-            pb = st.progress(0)
-            df = aplicar_consistencia_intergrupo(
-                df,
-                km_tono=km["tonoiai"], km_tema=km["tema"], km_subtema=km["subtema"],
-                km_titulo=km["titulo"], km_resumen=km["resumen"],
-                pbar=pb
-            )
-            s.update(label="✓ Paso 4b · Tono/Tema/Subtema unificados en republicaciones", state="complete")
             
         # Re-mapeo usando expanded_index para garantizar unicidad al indexar
         rm2 = df.set_index("expanded_index").to_dict("index")
@@ -3067,9 +2801,6 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
 async def run_quick_async(df, tc, sc, bn, al):
     st.session_state.update({'tokens_input': 0, 'tokens_output': 0, 'tokens_embedding': 0})
     get_embedding_cache().clear()
-    # Blindaje: mismo motivo que en run_full_process_async
-    df[tc] = df[tc].fillna("").astype(str)
-    df[sc] = df[sc].fillna("").astype(str)
     df['_txt'] = df.apply(lambda r: texto_para_embedding(str(r.get(tc, "")), str(r.get(sc, ""))), axis=1)
     with st.status("Embeddings...", expanded=True) as s:
         _ = get_embeddings_batch(df['_txt'].tolist())
@@ -3086,13 +2817,6 @@ async def run_quick_async(df, tc, sc, bn, al):
         temas = consolidar_temas(subtemas, df["_txt"].tolist(), pb)
         df['Tema'] = temas
         s.update(label="✓ Clasificación", state="complete")
-    with st.status("Consistencia entre republicaciones (Título/CuerpoEs)", expanded=True) as s:
-        pb = st.progress(0)
-        df = aplicar_consistencia_intergrupo(
-            df, km_tono='Tono IA', km_tema='Tema', km_subtema='Subtema',
-            km_titulo=tc, km_resumen=sc, pbar=pb
-        )
-        s.update(label="✓ Consistencia aplicada", state="complete")
     df.drop(columns=['_txt'], inplace=True)
     ci = (st.session_state['tokens_input']     / 1e6) * PRICE_INPUT_1M
     co = (st.session_state['tokens_output']    / 1e6) * PRICE_OUTPUT_1M
@@ -3184,7 +2908,7 @@ def main():
         <div class="app-header-icon">◈</div>
         <div class="app-header-text">
             <div class="app-header-title">Análisis de Noticias - API</div>
-            <div class="app-header-version">v18.3 · Consistencia ultra-precisa Título/CuerpoEs · 😼 Realizado por Johnathan Cortés 🕵️‍♂️ </div>
+            <div class="app-header-version">v18.2 · 😼 Realizado por Johnathan Cortés 🕵️‍♂️ </div>
         </div>
         <div class="app-header-badge">IA</div>
     </div>""", unsafe_allow_html=True)
@@ -3250,9 +2974,7 @@ def main():
                     f'· Dedup={UMBRAL_DEDUP_LABEL} · MinSub={UMBRAL_MIN_PERTENENCIA_SUBTEMA} '
                     f'· MinTema={UMBRAL_MIN_PERTENENCIA_TEMA} · MaxGrupo={MAX_GRUPO_ETIQUETA} · '
                     f'<b>Coherencia={UMBRAL_COHERENCIA_ETIQUETA}</b> · '
-                    f'<b>SimMin={SIM_MINIMA_AGRUPACION_SUBTEMA}</b> (adaptativos según n) · '
-                    f'<b>Consistencia Título={UMBRAL_SIM_TITULO_CONSIST}/{UMBRAL_EMB_TITULO_CONSIST}</b> · '
-                    f'<b>Consistencia Cuerpo={UMBRAL_SIM_CUERPO_CONSIST}/{UMBRAL_EMB_CUERPO_CONSIST}</b>'
+                    f'<b>SimMin={SIM_MINIMA_AGRUPACION_SUBTEMA}</b> (adaptativos según n)'
                     f'</div>',
                     unsafe_allow_html=True
                 )
@@ -3318,7 +3040,7 @@ def main():
         render_quick_tab()
 
     st.markdown(
-        '<div class="footer">v18.3 · Análisis de Noticias con IA · Consistencia ultra-precisa · Johnathan Cortés ©</div>',
+        '<div class="footer">v18.2 · Análisis de Noticias con IA · Johnathan Cortés ©</div>',
         unsafe_allow_html=True
     )
 
