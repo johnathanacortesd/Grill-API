@@ -1,43 +1,68 @@
-# 🥩 Grill API
+# 📰 Grill-API — Análisis de Noticias
 
+[![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://grill-api.streamlit.app/)
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/johnathanacortesd/Grill-API)
+[![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/johnathanacortesd/Grill-API)
 
-> **API RESTful de alto rendimiento para la gestión de restaurantes/asaderos, control de pedidos, menú, inventario y monitoreo de parrillas en tiempo real.**
+> **Plataforma y API de Procesamiento y Análisis de Noticias en Tiempo Real impulsada por Streamlit y Procesamiento de Lenguaje Natural (NLP).**
 
 ---
 
-## 🎨 Logotipo ASCII
+## 🎨 Logotipo ASCII (Corregido)
 
 ```text
-               .---.
-              /     \
-             | () () |     ______   ______   _____  _        _           ___  ______ _____
-              \  ^  /     / _____| |  ____| |_   _|| |      | |         /   ||  ____|_   _|
-               |||||     | |  __   | |__      | |  | |      | |        / /| || |__    | |
-               |||||     | | |_ |  |  __|     | |  | |      | |       / /_| ||  __|   | |
-               `---'     | |__| |  | |____   _| |_ | |____  | |____  / ___  || |     _| |_
-                          \______| |______| |_____||______| |______|/_/   |_||_|    |_____|
+  ____ ____  ___ _     _        _    ____ ___ 
+ / ___|  _ \|_ _| |   | |      / \  |  _ \_ _|
+| |  _| |_) || || |   | |     / _ \ | |_) | | 
+| |_| |  _ < | || |___| |___ / ___ \|  __/| | 
+ \____|_| \_\___|_____|_____/_/   \_\_|  |___|
+
+================================================
+     [ ANÁLISIS DE NOTICIAS & NLP API ]
 ```
+
+---
+
+## 🌐 Demo En Vivo
+
+Puedes probar la aplicación e interfaz interactiva directamente en Streamlit Cloud:
+
+👉 **[👑 Abrir Grill-API en Streamlit](https://grill-api.streamlit.app/)** 🎈
+
+---
+
+## 🔑 Clave de Acceso y Uso (*API Key*)
+
+Para poder realizar consultas, procesar feeds de noticias y utilizar todas las funciones de análisis dentro de la plataforma, **se requiere una clave de acceso (Key)**.
+
+### ¿Cómo ingresar la clave?
+1. **En la Web (Streamlit):** Ingresa tu clave en la barra lateral (*Sidebar*) de la aplicación en el campo titulado **`Ingresar Clave / API Key`**.
+2. **En Desarrollo Local:** Define la clave en tu archivo `.env` antes de iniciar la aplicación:
+
+```env
+GRILL_API_KEY=tu_clave_de_acceso_aqui
+```
+
+> ⚠️ *Sin una clave válida, las llamadas a los servicios de extracción y procesamiento de noticias estarán restringidas.*
 
 ---
 
 ## 🚀 Descripción General
 
-**Grill API** es un servicio backend diseñado para centralizar las operaciones de un restaurante o parrilla. Proporciona puntos de enlace (*endpoints*) seguros y eficientes para gestionar usuarios, roles, catálogo de cortes y platillos, estado de comandas y reservas.
+**Grill-API** es una herramienta desarrollada para la ingesta, filtrado, extracción de métricas, procesamiento de sentimiento y visualización interactiva de noticias procedentes de múltiples fuentes digitales.
+
+Diseñada con **Python** y **Streamlit**, permite a periodistas, analistas de datos y desarrolladores examinar tendencias, palabras clave y polaridad de medios informativos de manera rápida e intuitiva.
 
 ---
 
 ## ✨ Características Principales
 
-- 🔐 **Autenticación y Autorización:** Seguridad basada en JWT (JSON Web Tokens) y control de acceso basado en roles (RBAC: Admin, Chef, Mesero, Cliente).
-- 🥩 **Gestión del Menú:** CRUD completo de cortes de carne, términos de cocción, guarniciones y bebidas.
-- 📜 **Control de Pedidos / Comandas:** Flujo de estados en tiempo real (*Pendiente ➔ En Parrilla ➔ Listo ➔ Entregado*).
-- 🌡️ **Monitoreo de Parrillas:** Registro de disponibilidad y temperatura óptima de cocción.
-- ⚡ **Caché y Rendimiento:** Integración con Redis para optimizar lecturas frecuentes.
-- 🐳 **Contenerización:** Listo para desplegar con Docker y Docker Compose.
+- 🔍 **Búsqueda y Filtrado de Noticias:** Filtrado por palabras clave, fechas, categoría y medio informativo.
+- 📊 **Análisis de Sentimiento:** Clasificación de noticias en tono *Positivo*, *Neutro* o *Negativo*.
+- 🏷️ **Extracción de Entidades & Palabras Clave:** Identificación de personajes, organizaciones y lugares clave.
+- 🎈 **Interfaz Interactiva:** Visualizaciones con gráficos dinámicos integrados en Streamlit.
+- ⚡ **API Rest/Endpoints Integrados:** Servicios listos para consultar datos estructurados en JSON.
 
 ---
 
@@ -45,88 +70,39 @@
 
 ```text
 +-----------------------------------------------------------------------+
-|                               CLIENTES                                |
-|    [ Web Dashboard ]       [ Mobile App ]       [ IoT Probe Sensor ]  |
+|                         FUENTES DE NOTICIAS                           |
+|            [ RSS Feeds ]     [ Web Portals ]     [ APIs ]             |
 +-----------------------------------------------------------------------+
-                                  |
-                                  v
+                                   |
+                                   v
 +-----------------------------------------------------------------------+
-|                            API GATEWAY                                |
-|                    (Nginx / SSL / Rate Limiting)                      |
-+-----------------------------------------------------------------------+
-                                  |
-                                  v
-+-----------------------------------------------------------------------+
-|                             GRILL API                                 |
+|                              GRILL-API                                |
 |  +-------------------+  +--------------------+  +-------------------+ |
-|  | Auth & Users      |  | Menu & Inventory   |  | Orders & Kitchen  | |
-|  | (JWT Module)      |  | (Catalog Module)   |  | (State Engine)    | |
+|  | Extractor / Scraper|  | Validador de Clave |  | Módulo NLP /      | |
+|  | (Ingesta)         |  | (Auth API Key)     |  | Sentimientos      | |
 |  +-------------------+  +--------------------+  +-------------------+ |
 +-----------------------------------------------------------------------+
-           |                        |                       |
-           v                        v                       v
-+--------------------+   +--------------------+   +--------------------+
-|   Base de Datos    |   |    Redis Cache     |   | WebSockets / MQTT  |
-|  (PostgreSQL/Mongo)|   |  (Session / Cache) |   | (Real-time Events) |
-+--------------------+   +--------------------+   +--------------------+
-```
-
----
-
-## 🗄️ Modelo de Datos / ERD (ASCII Diagram)
-
-```text
-+--------------------+            1:N            +--------------------+
-|       USERS        |--------------------------->|       ORDERS       |
-+--------------------+                           +--------------------+
-| id (PK)            |                           | id (PK)            |
-| name, email, pass  |                           | user_id (FK)       |
-| role (ADMIN/STAFF) |                           | status, total      |
-+--------------------+                           | created_at         |
-                                                 +--------------------+
-                                                           |
-                                                           | 1:N
-                                                           v
-+--------------------+            1:N            +--------------------+
-|       GRILLS       |-------------------------->|    ORDER_ITEMS     |
-+--------------------+                           +--------------------+
-| id (PK)            |                           | id (PK)            |
-| name, location     |                           | order_id (FK)      |
-| status, temp       |                           | menu_item_id (FK)  |
-+--------------------+                           | quantity, price    |
-                                                 +--------------------+
-                                                           |
-                                                           | N:1
-                                                           v
-                                                 +--------------------+
-                                                 |     MENU_ITEMS     |
-                                                 +--------------------+
-                                                 | id (PK)            |
-                                                 | name, description  |
-                                                 | price, category    |
-                                                 +--------------------+
+                                   |
+                                   v
++-----------------------------------------------------------------------+
+|                          INTERFAZ STREAMLIT                           |
+|        [ Dashboard Web ]  <--->  https://grill-api.streamlit.app/     |
++-----------------------------------------------------------------------+
 ```
 
 ---
 
 ## 🛠️ Tecnologías Utilizadas
 
-- **Lenguaje / Framework:** Node.js / Express *(o NestJS / Python FastAPI según la implementación)*
-- **Base de Datos:** PostgreSQL / MongoDB
-- **Caché:** Redis
-- **Autenticación:** JWT (JSON Web Tokens) & Bcrypt
-- **Documentación API:** Swagger / Open API 3.0
+- **Lenguaje:** Python 3.10+
+- **Frontend / Dashboard:** [Streamlit](https://streamlit.io/) 🎈
+- **Análisis de Datos:** Pandas, NumPy
+- **Visualización:** Plotly / Altair
+- **NLP / Ingesta:** NLTK / TextBlob / Requests
 
 ---
 
 ## ⚙️ Instalación y Configuración Local
-
-### Prerrequisitos
-
-Asegúrate de tener instalado en tu sistema:
-- [Node.js](https://nodejs.org/) (v18.x o superior)
-- [Git](https://git-scm.com/)
-- [Docker & Docker Compose](https://www.docker.com/) *(Opcional para despliegue rápido)*
 
 ### 1. Clonar el repositorio
 
@@ -135,115 +111,57 @@ git clone https://github.com/johnathanacortesd/Grill-API.git
 cd Grill-API
 ```
 
-### 2. Variables de Entorno
-
-Crea un archivo `.env` en la raíz del proyecto basándote en el ejemplo:
+### 2. Crear entorno virtual e instalar dependencias
 
 ```bash
-cp .env.example .env
+# Crear entorno virtual
+python -m venv venv
+
+# Activar entorno virtual
+# En Linux/macOS:
+source venv/bin/activate
+# En Windows:
+# venv\Scripts\activate
+
+# Instalar librerías
+pip install -r requirements.txt
 ```
 
-Configura tu `.env`:
+### 3. Configurar la Clave de Uso
 
-```env
-PORT=3000
-NODE_ENV=development
-
-# Database Config
-DB_HOST=localhost
-DB_PORT=5432
-DB_USER=grill_user
-DB_PASSWORD=grill_password
-DB_NAME=grill_db
-
-# Security
-JWT_SECRET=tu_clave_secreta_super_segura
-JWT_EXPIRES_IN=24h
-```
-
-### 3. Instalar Dependencias y Ejecutar
-
-**Opción A: Ejecución Local**
+Crea un archivo `.env` en la raíz del proyecto:
 
 ```bash
-# Instalar dependencias
-npm install
-
-# Ejecutar migraciones / semillas (si aplica)
-npm run db:migrate
-
-# Iniciar servidor en modo desarrollo
-npm run dev
+GRILL_API_KEY=tu_clave_de_acceso_aqui
 ```
 
-**Opción B: Con Docker Compose**
+### 4. Ejecutar la App en Streamlit
 
 ```bash
-docker-compose up --build -d
+streamlit run app.py
 ```
 
-La API estará disponible en: `http://localhost:3000`
-
----
-
-## 📌 Principales Endpoints (API Reference)
-
-### 🔑 Autenticación (`/api/v1/auth`)
-
-| Método | Endpoint | Descripción | Acceso |
-| :--- | :--- | :--- | :--- |
-| `POST` | `/auth/register` | Registrar un nuevo usuario | Público |
-| `POST` | `/auth/login` | Iniciar sesión y obtener Token JWT | Público |
-
-### 🥩 Menú (`/api/v1/menu`)
-
-| Método | Endpoint | Descripción | Acceso |
-| :--- | :--- | :--- | :--- |
-| `GET` | `/menu` | Obtener el catálogo completo de cortes/platillos | Público |
-| `POST` | `/menu` | Crear un nuevo platillo/corte | Admin |
-| `PUT` | `/menu/:id` | Actualizar precio o disponibilidad | Admin / Staff |
-
-### 🛒 Pedidos (`/api/v1/orders`)
-
-| Método | Endpoint | Descripción | Acceso |
-| :--- | :--- | :--- | :--- |
-| `GET` | `/orders` | Listar pedidos activos | Staff |
-| `POST` | `/orders` | Crear un nuevo pedido/comanda | Autenticado |
-| `PATCH`| `/orders/:id/status` | Cambiar estado (*En Parrilla / Listo*) | Chef / Admin |
-
----
-
-## 🧪 Pruebas (Testing)
-
-Ejecuta el conjunto de pruebas unitarias y de integración:
-
-```bash
-# Ejecutar tests
-npm run test
-
-# Ver cobertura de código
-npm run test:coverage
-```
+Accede desde tu navegador en: `http://localhost:8501`
 
 ---
 
 ## 🤝 Contribución
 
-1. Haz un **Fork** de este repositorio.
-2. Crea una rama para tu característica (`git checkout -b feature/NuevaCaracteristica`).
-3. Realiza tus cambios y haz Commit (`git commit -m 'Add: Nueva Característica'`).
-4. Sube la rama (`git push origin feature/NuevaCaracteristica`).
+1. Haz un **Fork** de este proyecto.
+2. Crea una rama para tus mejoras (`git checkout -b feature/NuevaMejora`).
+3. Guarda tus cambios (`git commit -m 'Añade nueva funcionalidad'`).
+4. Envía los cambios a tu repositorio (`git push origin feature/NuevaMejora`).
 5. Abre un **Pull Request**.
 
 ---
 
 ## 📄 Licencia
 
-Este proyecto está bajo la Licencia **MIT**. Consulta el archivo [LICENSE](LICENSE) para más detalles.
+Este proyecto está bajo la Licencia **MIT**. Consulta el archivo `LICENSE` para más detalles.
 
 ---
 
-<p center>
-  Desarrollado con ❤️ por <a href="https://github.com/johnathanacortesd">Johnathan A. Cortés D.</a>
+<p align="center">
+  Creado por <a href="https://github.com/johnathanacortesd">Johnathan A. Cortés D.</a> — Desplegado con 🎈 Streamlit
 </p>
 ```
