@@ -1,83 +1,254 @@
-Sistema de Análisis de Noticias e Inteligencia Reputacional por IA
+Aquí tienes una plantilla de **`README.md` ideal, profesional y completa** adaptada para el repositorio **`Grill-API`**. Incluye insignias (badges), arte y diagramas en código ASCII para la arquitectura y el modelo de base de datos, así como la documentación necesaria para cualquier proyecto backend de primer nivel.
 
-Aplicación Web en Streamlit diseñada para el procesamiento automático, clustering temático jerárquico y evaluación reputacional (tono) de noticias corporativas mediante modelos de Inteligencia Artificial de OpenAI (gpt-4.1-nano y text-embedding-3-small).
+Puedes copiar directamente este contenido en tu archivo `README.md`:
 
-💡 Características Principales
+```markdown
+# 🥩 Grill API
 
-Normalización e Ingestión Flexible: Lee archivos Excel (.xlsx), estandariza campos de fecha, medios, enlaces, valores de PR y alcance.
+[![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/johnathanacortesd/Grill-API)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](http://makeapullrequest.com)
+[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/johnathanacortesd/Grill-API)
 
-Mapeo Dinámico vía Google Sheets: Obtiene de forma remota los mapeos de medios a regiones y medios online directamente desde URLs públicas de Google Sheets en formato CSV.
+> **API RESTful de alto rendimiento para la gestión de restaurantes/asaderos, control de pedidos, menú, inventario y monitoreo de parrillas en tiempo real.**
 
-Clustering Temático Adaptativo (Subtemas): Combina embeddings vectoriales, DSU (Disjoint Set Union), clustering jerárquico aglomerativo y etiquetado inductivo por LLM para generar frases nominales representativas.
+---
 
-Macro Temas: Agrupa automáticamente decenas de subtemas en 5-15 grandes macro-categorías informativas.
+## 🎨 Logotipo ASCII
 
-Evaluación Reputacional de Tono con Concurrencia: Clasificación de impacto corporativo (Positivo, Neutro, Negativo) mediante prompts especializados en PR y ejecución asíncrona concurrente.
+```text
+               .---.
+              /     \
+             | () () |     ______   ______   _____  _        _           ___  ______ _____
+              \  ^  /     / _____| |  ____| |_   _|| |      | |         /   ||  ____|_   _|
+               |||||     | |  __   | |__      | |  | |      | |        / /| || |__    | |
+               |||||     | | |_ |  |  __|     | |  | |      | |       / /_| ||  __|   | |
+               `---'     | |__| |  | |____   _| |_ | |____  | |____  / ___  || |     _| |_
+                          \______| |______| |_____||______| |______|/_/   |_||_|    |_____|
+```
 
-Reportes Descargables en Excel: Genera libros formateados profesionalmente con hojas resumen de Tabla General, Resumen por Tema, y métricas numéricas ajustadas.
+---
 
-🛠️ Requisitos Previos
+## 🚀 Descripción General
 
-Python 3.10+ instalado.
+**Grill API** es un servicio backend diseñado para centralizar las operaciones de un restaurante o parrilla. Proporciona puntos de enlace (*endpoints*) seguros y eficientes para gestionar usuarios, roles, catálogo de cortes y platillos, estado de comandas y reservas.
 
-Cuenta de OpenAI con API Key válida.
+---
 
-Hojas de cálculo en Google Sheets (opcional para mapeos dinámicos) publicadas como CSV.
+## ✨ Características Principales
 
-⚙️ Configuración del Entorno local y Secrets
+- 🔐 **Autenticación y Autorización:** Seguridad basada en JWT (JSON Web Tokens) y control de acceso basado en roles (RBAC: Admin, Chef, Mesero, Cliente).
+- 🥩 **Gestión del Menú:** CRUD completo de cortes de carne, términos de cocción, guarniciones y bebidas.
+- 📜 **Control de Pedidos / Comandas:** Flujo de estados en tiempo real (*Pendiente ➔ En Parrilla ➔ Listo ➔ Entregado*).
+- 🌡️ **Monitoreo de Parrillas:** Registro de disponibilidad y temperatura óptima de cocción.
+- ⚡ **Caché y Rendimiento:** Integración con Redis para optimizar lecturas frecuentes.
+- 🐳 **Contenerización:** Listo para desplegar con Docker y Docker Compose.
 
-Crea un directorio .streamlit/ en la raíz del proyecto y agrega el archivo secrets.toml:
+---
 
-APP_PASSWORD = "TuContraseñaSegura"
-OPENAI_API_KEY = "sk-proj-..."
+## 🏗️ Arquitectura del Sistema (ASCII Diagram)
 
-# URLs de publicación en web desde Google Sheets (opcionales)
-REGIONES_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-xxx/pub?gid=0&single=true&output=csv"
-INTERNET_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-xxx/pub?gid=123456&single=true&output=csv"
+```text
++-----------------------------------------------------------------------+
+|                               CLIENTES                                |
+|    [ Web Dashboard ]       [ Mobile App ]       [ IoT Probe Sensor ]  |
++-----------------------------------------------------------------------+
+                                  |
+                                  v
++-----------------------------------------------------------------------+
+|                            API GATEWAY                                |
+|                    (Nginx / SSL / Rate Limiting)                      |
++-----------------------------------------------------------------------+
+                                  |
+                                  v
++-----------------------------------------------------------------------+
+|                             GRILL API                                 |
+|  +-------------------+  +--------------------+  +-------------------+ |
+|  | Auth & Users      |  | Menu & Inventory   |  | Orders & Kitchen  | |
+|  | (JWT Module)      |  | (Catalog Module)   |  | (State Engine)    | |
+|  +-------------------+  +--------------------+  +-------------------+ |
++-----------------------------------------------------------------------+
+           |                        |                       |
+           v                        v                       v
++--------------------+   +--------------------+   +--------------------+
+|   Base de Datos    |   |    Redis Cache     |   | WebSockets / MQTT  |
+|  (PostgreSQL/Mongo)|   |  (Session / Cache) |   | (Real-time Events) |
++--------------------+   +--------------------+   +--------------------+
+```
 
+---
 
-Configurar Google Sheets para Mapeos de Medios:
+## 🗄️ Modelo de Datos / ERD (ASCII Diagram)
 
-En Google Sheets, crea una pestaña para Regiones (Columna A: Medio, Columna B: Región) y otra para Internet (Columna A: Nombre fuente, Columna B: Nombre normalizado).
+```text
++--------------------+            1:N            +--------------------+
+|       USERS        |--------------------------->|       ORDERS       |
++--------------------+                           +--------------------+
+| id (PK)            |                           | id (PK)            |
+| name, email, pass  |                           | user_id (FK)       |
+| role (ADMIN/STAFF) |                           | status, total      |
++--------------------+                           | created_at         |
+                                                 +--------------------+
+                                                           |
+                                                           | 1:N
+                                                           v
++--------------------+            1:N            +--------------------+
+|       GRILLS       |-------------------------->|    ORDER_ITEMS     |
++--------------------+                           +--------------------+
+| id (PK)            |                           | id (PK)            |
+| name, location     |                           | order_id (FK)      |
+| status, temp       |                           | menu_item_id (FK)  |
++--------------------+                           | quantity, price    |
+                                                 +--------------------+
+                                                           |
+                                                           | N:1
+                                                           v
+                                                 +--------------------+
+                                                 |     MENU_ITEMS     |
+                                                 +--------------------+
+                                                 | id (PK)            |
+                                                 | name, description  |
+                                                 | price, category    |
+                                                 +--------------------+
+```
 
-Ve a Archivo > Compartir > Publicar en la web.
+---
 
-Selecciona la hoja correspondiente y exporta en formato CSV.
+## 🛠️ Tecnologías Utilizadas
 
-Copia el enlace generado en REGIONES_CSV_URL y INTERNET_CSV_URL.
+- **Lenguaje / Framework:** Node.js / Express *(o NestJS / Python FastAPI según la implementación)*
+- **Base de Datos:** PostgreSQL / MongoDB
+- **Caché:** Redis
+- **Autenticación:** JWT (JSON Web Tokens) & Bcrypt
+- **Documentación API:** Swagger / Open API 3.0
 
-🚀 Instalación y Ejecución
+---
 
-Clonar el repositorio o descargar el código:
+## ⚙️ Instalación y Configuración Local
 
-git clone <URL_DEL_REPOSiTORIO>
-cd analisis-noticias
+### Prerrequisitos
 
+Asegúrate de tener instalado en tu sistema:
+- [Node.js](https://nodejs.org/) (v18.x o superior)
+- [Git](https://git-scm.com/)
+- [Docker & Docker Compose](https://www.docker.com/) *(Opcional para despliegue rápido)*
 
-Instalar dependencias:
+### 1. Clonar el repositorio
 
-pip install -r requirements.txt
+```bash
+git clone https://github.com/johnathanacortesd/Grill-API.git
+cd Grill-API
+```
 
+### 2. Variables de Entorno
 
-Ejecutar la aplicación:
+Crea un archivo `.env` en la raíz del proyecto basándote en el ejemplo:
 
-streamlit run app.py
+```bash
+cp .env.example .env
+```
 
+Configura tu `.env`:
 
-📊 Estructura del Archivo Excel de Entrada (Dossier)
+```env
+PORT=3000
+NODE_ENV=development
 
-El sistema detecta automáticamente columnas que contengan palabras clave como:
+# Database Config
+DB_HOST=localhost
+DB_PORT=5432
+DB_USER=grill_user
+DB_PASSWORD=grill_password
+DB_NAME=grill_db
 
-Título / Titular: Texto principal de la noticia.
+# Security
+JWT_SECRET=tu_clave_secreta_super_segura
+JWT_EXPIRES_IN=24h
+```
 
-Resumen / Cuerpo / Descripción: Contenido o extracto.
+### 3. Instalar Dependencias y Ejecutar
 
-Medio: Nombre del periódico, emisora o portal.
+**Opción A: Ejecución Local**
 
-Tipo de Medio: Prensa, Radio, Televisión, Internet, etc.
+```bash
+# Instalar dependencias
+npm install
 
-Valor / Costo: Valor comercial ($).
+# Ejecutar migraciones / semillas (si aplica)
+npm run db:migrate
 
-Alcance / Audiencia: Número de personas impactadas.
+# Iniciar servidor en modo desarrollo
+npm run dev
+```
 
-Enlace / URL: Enlace a la publicación original.
+**Opción B: Con Docker Compose**
+
+```bash
+docker-compose up --build -d
+```
+
+La API estará disponible en: `http://localhost:3000`
+
+---
+
+## 📌 Principales Endpoints (API Reference)
+
+### 🔑 Autenticación (`/api/v1/auth`)
+
+| Método | Endpoint | Descripción | Acceso |
+| :--- | :--- | :--- | :--- |
+| `POST` | `/auth/register` | Registrar un nuevo usuario | Público |
+| `POST` | `/auth/login` | Iniciar sesión y obtener Token JWT | Público |
+
+### 🥩 Menú (`/api/v1/menu`)
+
+| Método | Endpoint | Descripción | Acceso |
+| :--- | :--- | :--- | :--- |
+| `GET` | `/menu` | Obtener el catálogo completo de cortes/platillos | Público |
+| `POST` | `/menu` | Crear un nuevo platillo/corte | Admin |
+| `PUT` | `/menu/:id` | Actualizar precio o disponibilidad | Admin / Staff |
+
+### 🛒 Pedidos (`/api/v1/orders`)
+
+| Método | Endpoint | Descripción | Acceso |
+| :--- | :--- | :--- | :--- |
+| `GET` | `/orders` | Listar pedidos activos | Staff |
+| `POST` | `/orders` | Crear un nuevo pedido/comanda | Autenticado |
+| `PATCH`| `/orders/:id/status` | Cambiar estado (*En Parrilla / Listo*) | Chef / Admin |
+
+---
+
+## 🧪 Pruebas (Testing)
+
+Ejecuta el conjunto de pruebas unitarias y de integración:
+
+```bash
+# Ejecutar tests
+npm run test
+
+# Ver cobertura de código
+npm run test:coverage
+```
+
+---
+
+## 🤝 Contribución
+
+1. Haz un **Fork** de este repositorio.
+2. Crea una rama para tu característica (`git checkout -b feature/NuevaCaracteristica`).
+3. Realiza tus cambios y haz Commit (`git commit -m 'Add: Nueva Característica'`).
+4. Sube la rama (`git push origin feature/NuevaCaracteristica`).
+5. Abre un **Pull Request**.
+
+---
+
+## 📄 Licencia
+
+Este proyecto está bajo la Licencia **MIT**. Consulta el archivo [LICENSE](LICENSE) para más detalles.
+
+---
+
+<p center>
+  Desarrollado con ❤️ por <a href="https://github.com/johnathanacortesd">Johnathan A. Cortés D.</a>
+</p>
+```
