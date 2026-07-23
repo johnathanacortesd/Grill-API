@@ -5,11 +5,11 @@
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-> **Plataforma y API de Procesamiento y Análisis de Noticias en Tiempo Real impulsada por Streamlit y Procesamiento de Lenguaje Natural (NLP).**
+> **Plataforma y API de Procesamiento, Extracción y Análisis de Noticias en Tiempo Real impulsada por Streamlit y Procesamiento de Lenguaje Natural (NLP).**
 
 ---
 
-## 🎨 Logotipo ASCII (Corregido)
+## 🎨 Logotipo ASCII
 
 ```text
   ____ ____  ___ _     _        _    ____ ___ 
@@ -26,43 +26,51 @@
 
 ## 🌐 Demo En Vivo
 
-Puedes probar la aplicación e interfaz interactiva directamente en Streamlit Cloud:
+Puedes acceder a la plataforma interactiva desplegada en Streamlit Cloud:
 
 👉 **[👑 Abrir Grill-API en Streamlit](https://grill-api.streamlit.app/)** 🎈
 
 ---
 
-## 🔑 Clave de Acceso y Uso (*API Key*)
+## 🔐 Acceso a la App (Contraseña / Auth)
 
-Para poder realizar consultas, procesar feeds de noticias y utilizar todas las funciones de análisis dentro de la plataforma, **se requiere una clave de acceso (Key)**.
+La aplicación web alojada en **[grill-api.streamlit.app](https://grill-api.streamlit.app/)** está **protegida por contraseña** para controlar el acceso y proteger los recursos de consulta.
 
-### ¿Cómo ingresar la clave?
-1. **En la Web (Streamlit):** Ingresa tu clave en la barra lateral (*Sidebar*) de la aplicación en el campo titulado **`Ingresar Clave / API Key`**.
-2. **En Desarrollo Local:** Define la clave en tu archivo `.env` antes de iniciar la aplicación:
-
-```env
-GRILL_API_KEY=tu_clave_de_acceso_aqui
+```text
++-------------------------------------------------------------+
+|                     📰 GRILL-API LOGIN                      |
+|                                                             |
+|   🔒 Acceso Restringido - Ingrese su Contraseña             |
+|   Contraseña: [ ************ ]  [ 🔓 Ingresar ]             |
+|                                                             |
++-------------------------------------------------------------+
 ```
 
-> ⚠️ *Sin una clave válida, las llamadas a los servicios de extracción y procesamiento de noticias estarán restringidas.*
+### 🔑 ¿Cómo ingresar?
+1. Entra al enlace [https://grill-api.streamlit.app/](https://grill-api.streamlit.app/).
+2. Escribe la **contraseña de acceso** en el cuadro de texto del formulario inicial o barra lateral.
+3. Haz clic en **Ingresar / Login** para desbloquear el panel de control de noticias.
+
+> 📌 **Solicitud de Acceso:**  
+> Si necesitas acceso a la demostración o una clave de prueba, ponte en contacto con el creador del repositorio: **[@johnathanacortesd](https://github.com/johnathanacortesd)**.
 
 ---
 
 ## 🚀 Descripción General
 
-**Grill-API** es una herramienta desarrollada para la ingesta, filtrado, extracción de métricas, procesamiento de sentimiento y visualización interactiva de noticias procedentes de múltiples fuentes digitales.
+**Grill-API** es un sistema diseñado para centralizar la ingesta, filtrado, extracción de métricas, evaluación de sentimiento y visualización interactiva de noticias procedentes de diversas fuentes informativas.
 
-Diseñada con **Python** y **Streamlit**, permite a periodistas, analistas de datos y desarrolladores examinar tendencias, palabras clave y polaridad de medios informativos de manera rápida e intuitiva.
+Construida con **Python** y **Streamlit**, permite examinar tendencias, temas emergentes, palabras clave y polaridad de medios de comunicación de forma ágil y visual.
 
 ---
 
 ## ✨ Características Principales
 
-- 🔍 **Búsqueda y Filtrado de Noticias:** Filtrado por palabras clave, fechas, categoría y medio informativo.
-- 📊 **Análisis de Sentimiento:** Clasificación de noticias en tono *Positivo*, *Neutro* o *Negativo*.
-- 🏷️ **Extracción de Entidades & Palabras Clave:** Identificación de personajes, organizaciones y lugares clave.
-- 🎈 **Interfaz Interactiva:** Visualizaciones con gráficos dinámicos integrados en Streamlit.
-- ⚡ **API Rest/Endpoints Integrados:** Servicios listos para consultar datos estructurados en JSON.
+- 🔍 **Búsqueda y Filtrado de Noticias:** Búsquedas por palabras clave, fechas y fuentes de medios.
+- 📊 **Análisis de Sentimiento (NLP):** Clasificación de noticias en tono *Positivo*, *Neutro* o *Negativo*.
+- 🏷️ **Extracción de Entidades:** Identificación de entidades clave, personajes y organizaciones.
+- 🎈 **Dashboard Interactivo:** Gráficos dinámicos e indicadores métricos en Streamlit.
+- ⚡ **API Rest / Ingesta:** Módulos listos para consultar y estructurar datos en formato JSON.
 
 ---
 
@@ -78,8 +86,8 @@ Diseñada con **Python** y **Streamlit**, permite a periodistas, analistas de da
 +-----------------------------------------------------------------------+
 |                              GRILL-API                                |
 |  +-------------------+  +--------------------+  +-------------------+ |
-|  | Extractor / Scraper|  | Validador de Clave |  | Módulo NLP /      | |
-|  | (Ingesta)         |  | (Auth API Key)     |  | Sentimientos      | |
+|  | Extractor / Scraper|  | Módulo de Auth     |  | Módulo NLP /      | |
+|  | (Ingesta)         |  | (Contraseña / Auth)|  | Sentimientos      | |
 |  +-------------------+  +--------------------+  +-------------------+ |
 +-----------------------------------------------------------------------+
                                    |
@@ -95,10 +103,10 @@ Diseñada con **Python** y **Streamlit**, permite a periodistas, analistas de da
 ## 🛠️ Tecnologías Utilizadas
 
 - **Lenguaje:** Python 3.10+
-- **Frontend / Dashboard:** [Streamlit](https://streamlit.io/) 🎈
+- **Interfaz Web / Dashboard:** [Streamlit](https://streamlit.io/) 🎈
 - **Análisis de Datos:** Pandas, NumPy
 - **Visualización:** Plotly / Altair
-- **NLP / Ingesta:** NLTK / TextBlob / Requests
+- **Procesamiento de Lenguaje Natural (NLP):** NLTK / TextBlob / Requests
 
 ---
 
@@ -127,15 +135,18 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3. Configurar la Clave de Uso
+### 3. Configurar la Contraseña de Acceso (Secrets)
 
-Crea un archivo `.env` en la raíz del proyecto:
+Para definir la contraseña en desarrollo local, crea un archivo `.streamlit/secrets.toml` en la raíz del proyecto:
 
-```bash
-GRILL_API_KEY=tu_clave_de_acceso_aqui
+```toml
+# .streamlit/secrets.toml
+password = "tu_contraseña_aqui"
 ```
 
-### 4. Ejecutar la App en Streamlit
+*Si despliegas en **Streamlit Cloud**, añade esta variable dentro de la sección **Settings ➔ Secrets** de tu panel.*
+
+### 4. Ejecutar la App
 
 ```bash
 streamlit run app.py
@@ -147,10 +158,10 @@ Accede desde tu navegador en: `http://localhost:8501`
 
 ## 🤝 Contribución
 
-1. Haz un **Fork** de este proyecto.
-2. Crea una rama para tus mejoras (`git checkout -b feature/NuevaMejora`).
+1. Haz un **Fork** de este repositorio.
+2. Crea una rama para tu característica (`git checkout -b feature/NuevaCaracteristica`).
 3. Guarda tus cambios (`git commit -m 'Añade nueva funcionalidad'`).
-4. Envía los cambios a tu repositorio (`git push origin feature/NuevaMejora`).
+4. Sube la rama (`git push origin feature/NuevaCaracteristica`).
 5. Abre un **Pull Request**.
 
 ---
