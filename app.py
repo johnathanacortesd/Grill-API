@@ -1805,7 +1805,7 @@ class ClasificadorSubtema:
         ck = hashlib.md5(("|".join(tn[:12]) + f"#{len(titulos_grp)}#{existentes_key}").encode()).hexdigest()
         if ck in self._cache: return self._cache[ck]
 
-        tm = list(dict.fromkeys(t[:130] for t in titulos_grp if t))[:6]
+        tm = list(dict.fromkeys(str(t)[:130] for t in titulos_grp if t and not (isinstance(t, float) and t != t)))[:6]
         rm = [str(r)[:200] for r in resumenes_grp[:3] if r and len(str(r)) > 20]
 
         kw_list = self._extraer_keywords_titulos(titulos_grp, top_n=8)
@@ -2986,6 +2986,10 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
     
     if ta:
         df = pd.DataFrame(ta)
+        # Blindaje: evita NaN/float colándose como "título" o "resumen" en cualquier
+        # punto del pipeline (tono, subtemas, temas, consistencia).
+        df[km["titulo"]]  = df[km["titulo"]].fillna("").astype(str)
+        df[km["resumen"]] = df[km["resumen"]].fillna("").astype(str)
         df["_txt"] = df.apply(
             lambda r: texto_para_embedding(str(r.get(km["titulo"], "")), str(r.get(km["resumen"], ""))),
             axis=1
@@ -3063,6 +3067,9 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
 async def run_quick_async(df, tc, sc, bn, al):
     st.session_state.update({'tokens_input': 0, 'tokens_output': 0, 'tokens_embedding': 0})
     get_embedding_cache().clear()
+    # Blindaje: mismo motivo que en run_full_process_async
+    df[tc] = df[tc].fillna("").astype(str)
+    df[sc] = df[sc].fillna("").astype(str)
     df['_txt'] = df.apply(lambda r: texto_para_embedding(str(r.get(tc, "")), str(r.get(sc, ""))), axis=1)
     with st.status("Embeddings...", expanded=True) as s:
         _ = get_embeddings_batch(df['_txt'].tolist())
