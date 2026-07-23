@@ -1,8 +1,3 @@
-Aquí tienes una plantilla de **`README.md` ideal, profesional y completa** adaptada para el repositorio **`Grill-API`**. Incluye insignias (badges), arte y diagramas en código ASCII para la arquitectura y el modelo de base de datos, así como la documentación necesaria para cualquier proyecto backend de primer nivel.
-
-Puedes copiar directamente este contenido en tu archivo `README.md`:
-
-```markdown
 # 🥩 Grill API
 
 [![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](https://github.com/johnathanacortesd/Grill-API)
