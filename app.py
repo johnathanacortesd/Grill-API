@@ -66,8 +66,8 @@ MAX_GRUPO_ETIQUETA           = 40
 
 # ── Umbrales mínimos de similitud REAL para agrupar ──────────────────────────
 SIM_MINIMA_AGRUPACION_SUBTEMA = 0.90
-SIM_MINIMA_KEYWORDS_RARAS     = 0.86   
-SIM_MINIMA_FUSION_INTER       = 0.90   
+SIM_MINIMA_KEYWORDS_RARAS     = 0.86
+SIM_MINIMA_FUSION_INTER       = 0.90
 
 # ── Consistencia ultra-precisa entre republicaciones / coberturas casi idénticas ─────────────
 # Estos umbrales son INDEPENDIENTES de los de agrupación temática: solo sirven para detectar
@@ -76,11 +76,21 @@ SIM_MINIMA_FUSION_INTER       = 0.90
 # similar, o ambos (incluso si el otro campo difiere). Al ser independientes de los umbrales de
 # agrupación temática, permiten forzar Tono/Tema/Subtema consistentes sin arriesgar que se junten
 # hechos distintos solo por pertenecer al mismo tema general.
-UMBRAL_SIM_TITULO_CONSIST = 0.92   # SequenceMatcher sobre título normalizado
-UMBRAL_SIM_CUERPO_CONSIST = 0.90   # SequenceMatcher sobre cuerpo normalizado (primeros ~600 car.)
-UMBRAL_EMB_TITULO_CONSIST = 0.95   # coseno embeddings de SOLO título (no combinado con cuerpo)
-UMBRAL_EMB_CUERPO_CONSIST = 0.93   # coseno embeddings de SOLO cuerpo (no combinado con título)
-MIN_LEN_CUERPO_CONSIST    = 60     # caracteres mínimos del cuerpo para compararlo (evita falsos positivos con textos muy cortos)
+UMBRAL_SIM_TITULO_CONSIST = 0.90   # SequenceMatcher sobre título normalizado
+UMBRAL_SIM_CUERPO_CONSIST = 0.88   # SequenceMatcher sobre cuerpo normalizado (primeros ~700 car.)
+UMBRAL_EMB_TITULO_CONSIST = 0.935  # coseno embeddings de SOLO título
+UMBRAL_EMB_CUERPO_CONSIST = 0.915  # coseno embeddings de SOLO cuerpo
+UMBRAL_PREF_TITULO_CONSIST = 0.93  # similitud de prefijo (primeras palabras del título)
+MIN_LEN_CUERPO_CONSIST    = 50     # caracteres mínimos del cuerpo para compararlo
+MIN_PALABRAS_PREF_TITULO  = 6      # mínimo de palabras significativas para validar prefijo
+
+# ── Unificación post-etiqueta (subtemas levemente distintos del mismo hecho) ─
+# Más estricto que la agrupación inicial: solo fusiona si etiqueta + contenido son
+# compatibles. Evita generalizar hechos distintos del mismo sector.
+UMBRAL_FUSION_ETIQUETA_POST   = 0.90   # similitud de etiquetas (texto/emb)
+UMBRAL_FUSION_CONTENIDO_POST  = 0.905  # similitud de contenido del grupo
+UMBRAL_OVERLAP_POST           = 0.28   # overlap de tokens distintivos
+UMBRAL_NEAR_DUP_CONTENT       = 0.93   # contenido casi idéntico → forzar misma etiqueta
 
 PRICE_INPUT_1M     = 0.10
 PRICE_OUTPUT_1M    = 0.40
@@ -213,7 +223,7 @@ _ENIE_MAP = {
     "pena":"peña","penas":"peñas","penon":"peñón","senor":"señor","senora":"señora",
     "senores":"señores","senoras":"señoras","senal":"señal","senales":"señales",
     "senalizacion":"señalización","pequeno":"pequeño","pequena":"pequeña",
-    "pequenos":"pequeños","pequenas":"peñas","sueno":"sueño","suenos":"sueños",
+    "pequenos":"pequeños","pequenas":"pequeñas","sueno":"sueño","suenos":"sueños",
     "dueno":"dueño","duena":"dueña","duenos":"dueños","duenas":"dueñas",
     "otono":"otoño","punio":"puño","punios":"puños","puno":"puño",
     "canon":"cañón","canones":"cañones","manana":"mañana","mananas":"mañanas",
@@ -497,19 +507,7 @@ def get_embedding_cache():
 # ======================================
 # Configuración vía Google Sheets (CSV público)
 # ======================================
-# En Google Sheets: Archivo > Compartir > Publicar en la web > eliges la hoja
-# "Regiones" (o "Internet") > formato CSV > copias la URL resultante y la
-# guardas en .streamlit/secrets.toml (o en la config de Secrets de Streamlit
-# Cloud) así:
-#
-# REGIONES_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-xxxx/pub?gid=0&single=true&output=csv"
-# INTERNET_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-xxxx/pub?gid=123456&single=true&output=csv"
-#
-# Cada hoja debe tener 2 columnas: la primera con el nombre del medio y la
-# segunda con el valor mapeado (región o nombre normalizado de internet).
-# Mantiene el mismo orden de columnas que ya usaba el Configuracion.xlsx anterior.
-
-CONFIG_CACHE_TTL = 300  # segundos; súbelo si tu Sheet cambia poco, bájalo si necesitas ver cambios casi al instante
+CONFIG_CACHE_TTL = 300
 
 @st.cache_data(ttl=CONFIG_CACHE_TTL, show_spinner=False)
 def _fetch_map_from_csv(csv_url: str) -> dict:
@@ -523,10 +521,6 @@ def _fetch_map_from_csv(csv_url: str) -> dict:
     return mapping
 
 def load_config_from_sheets():
-    """
-    Carga los mapeos de Región e Internet directamente desde Google Sheets.
-    Requiere REGIONES_CSV_URL e INTERNET_CSV_URL en st.secrets.
-    """
     regiones_url = st.secrets.get("REGIONES_CSV_URL")
     internet_url = st.secrets.get("INTERNET_CSV_URL")
 
@@ -547,7 +541,6 @@ def load_config_from_sheets():
     return region_map, internet_map
 
 def refresh_config_cache():
-    """Limpia la cache para forzar una relectura inmediata del Sheets."""
     _fetch_map_from_csv.clear()
 
 
@@ -815,22 +808,37 @@ def clean_cuerpo(text):
 def normalize_title_for_comparison(title):
     """
     Normaliza el título para comparaciones y detección de duplicados.
-    Evita falsos duplicados en noticias que inician con prefijos comunes de lugar, tag o categoría 
-    (ej: "Cundinamarca: ...") al conservar y comparar la sección principal del titular.
+    Conserva el núcleo del titular y elimina prefijos de sección/lugar tipo
+    "Cundinamarca: ..." o colas de medio " | El Tiempo".
     """
-    if not isinstance(title, str): 
+    if not isinstance(title, str):
         return ""
-    
+
     cleaned = re.sub(r"\s+[\|–—-]\s+[^\|–—-]+$", "", title).strip()
-    
+
     if ":" in cleaned:
         parts = cleaned.split(":", 1)
         prefix = parts[0].strip()
         suffix = parts[1].strip()
-        if len(suffix) >= 10:
+        # Si el prefijo es corto (lugar/sección) y el sufijo es el titular real
+        if len(suffix) >= 10 and len(prefix.split()) <= 4:
             cleaned = suffix
-            
-    return re.sub(r"\W+", " ", cleaned).lower().strip()
+
+    cleaned = unidecode(cleaned.lower())
+    cleaned = re.sub(r"[^a-z0-9\s]", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def _prefijo_titulo_significativo(title_norm: str, max_words: int = 10) -> str:
+    """Primeras palabras significativas del título (para detectar inicios iguales)."""
+    if not title_norm:
+        return ""
+    stop = STOPWORDS_ES | {"dice", "dijo", "tras", "luego", "segun", "según"}
+    words = [w for w in title_norm.split() if len(w) >= 3 and w not in stop]
+    if len(words) < MIN_PALABRAS_PREF_TITULO:
+        words = title_norm.split()
+    return " ".join(words[:max_words])
 
 
 def clean_title_for_output(title):
@@ -857,7 +865,6 @@ def normalizar_tipo_medio(tipo_raw):
     }.get(t, str(tipo_raw).strip().title() or "Otro")
 
 def parse_numeric(val):
-    """Limpia y analiza valores numéricos que puedan venir como cadenas con coma decimal, separador de miles o formato científico."""
     if val is None:
         return None
     if isinstance(val, (int, float)):
@@ -899,7 +906,6 @@ def texto_para_embedding(titulo, resumen, max_len=1800):
     return f"{t}. {t}. {t}. {r}"[:max_len]
 
 def _normalizar_mencion(texto: str) -> str:
-    """Normalización conservadora para buscar nombres de marca completos."""
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", unidecode(str(texto).lower()))).strip()
 
 def _coincide_nombre_completo(texto: str, nombre: str) -> bool:
@@ -980,7 +986,7 @@ def dedup_labels(etiquetas, umbral=UMBRAL_DEDUP_LABEL):
             if SequenceMatcher(None, normed[i], normed[j]).ratio() >= max(umbral, 0.88):
                 if _es_fusion_segura(normed[i], normed[j]):
                     union(i, j)
-                    
+
     for i in range(n):
         if not normed[i]: continue
         tokens_i = set(normed[i].split())
@@ -994,7 +1000,7 @@ def dedup_labels(etiquetas, umbral=UMBRAL_DEDUP_LABEL):
             if menor > 0 and len(interseccion) / menor >= 0.78:
                 if _es_fusion_segura(normed[i], normed[j]):
                     union(i, j)
-                    
+
     le = get_embeddings_batch(unique)
     vp = [(i, le[i]) for i in range(n) if le[i] is not None]
     if len(vp) >= 2:
@@ -1070,7 +1076,7 @@ def _fusionar_subtemas_semanticos(subtemas, textos_por_subtema, marca, aliases, 
                 min_overlap=0.22,
             ):
                 union(i, j)
-            
+
     grupos = defaultdict(list)
     for i in range(n): grupos[find(i)].append(v_idx[i])
     freq = Counter(subtemas)
@@ -1222,30 +1228,9 @@ def seleccionar_representante(indices, textos):
 
 
 # ==========================================================================================
-# MOTOR DE CONSISTENCIA ULTRA-PRECISA (Título y/o CuerpoEs) — NUEVO
+# MOTOR DE CONSISTENCIA ULTRA-PRECISA (Título y/o CuerpoEs) — MEJORADO
 # ==========================================================================================
-# Objetivo: garantizar que dos o más noticias que en realidad son "la misma noticia"
-# (republicación, sindicación, misma nota replicada por varios medios, etc.) reciban
-# EXACTAMENTE el mismo Tono, Tema y Subtema — incluso si el resto del pipeline temático
-# (pensado para agrupar HECHOS relacionados, no textos idénticos) las hubiera etiquetado
-# de forma levemente distinta.
-#
-# Este motor es DELIBERADAMENTE independiente del agrupamiento por subtema/tema:
-#   • Compara Título contra Título y CuerpoEs contra CuerpoEs por separado (nunca mezclados),
-#     tanto de forma literal (SequenceMatcher sobre texto normalizado) como semántica
-#     (embeddings de SOLO ese campo).
-#   • Basta con que UNO de los dos campos sea muy similar (Título muy similar aunque el
-#     Cuerpo difiera, o Cuerpo muy similar aunque el Título difiera) para considerarlas
-#     "la misma noticia".
-#   • Usa umbrales muy altos (>=0.90) y bloqueo de conflicto semántico (_hay_conflicto_accion)
-#     para evitar falsos positivos: dos noticias del mismo sector pero de hechos distintos
-#     NUNCA deben unirse aquí.
-# ==========================================================================================
-
-def _normalizar_cuerpo_para_comparacion(texto, max_chars=600):
-    """Normaliza el CuerpoEs/Resumen para comparación literal: minúsculas, sin tildes,
-    sin HTML/URLs, sin puntuación, colapsando espacios. Se compara solo el inicio del
-    cuerpo (donde suele estar el lead/entradilla, la parte más estable entre republicaciones)."""
+def _normalizar_cuerpo_para_comparacion(texto, max_chars=700):
     if not isinstance(texto, str) or not texto.strip():
         return ""
     t = unidecode(texto.lower())
@@ -1255,12 +1240,89 @@ def _normalizar_cuerpo_para_comparacion(texto, max_chars=600):
     t = re.sub(r'\s+', ' ', t).strip()
     return t[:max_chars]
 
+
+def _sim_texto(a: str, b: str) -> float:
+    if not a or not b:
+        return 0.0
+    return SequenceMatcher(None, a, b).ratio()
+
+
+def _son_misma_noticia_signals(
+    tit_i, tit_j, cue_i, cue_j,
+    emb_t_i=None, emb_t_j=None,
+    emb_c_i=None, emb_c_j=None,
+    pref_i="", pref_j="",
+):
+    """
+    Decide si i y j son la misma noticia / republicación.
+    Basta UN canal fuerte (título O cuerpo), con validaciones anti-falso-positivo.
+    """
+    # Conflicto semántico duro → nunca unir
+    if tit_i and tit_j and _hay_conflicto_accion(tit_i, tit_j):
+        return False
+    if cue_i and cue_j and len(cue_i) >= MIN_LEN_CUERPO_CONSIST and len(cue_j) >= MIN_LEN_CUERPO_CONSIST:
+        if _hay_conflicto_accion(cue_i, cue_j):
+            return False
+
+    # 1) Título literal
+    sim_tit = _sim_texto(tit_i, tit_j) if tit_i and tit_j else 0.0
+    if sim_tit >= UMBRAL_SIM_TITULO_CONSIST:
+        return True
+
+    # 2) Prefijo de título (empiezan igual o casi igual)
+    if pref_i and pref_j and len(pref_i.split()) >= MIN_PALABRAS_PREF_TITULO:
+        sim_pref = _sim_texto(pref_i, pref_j)
+        if sim_pref >= UMBRAL_PREF_TITULO_CONSIST:
+            # Preferible con algo de soporte de cuerpo o overlap
+            ov = _overlap_distintivo(tit_i, tit_j)
+            if ov >= 0.35 or sim_tit >= 0.82:
+                return True
+            # Si el prefijo es muy largo y casi idéntico, basta
+            if sim_pref >= 0.97 and len(pref_i.split()) >= 8:
+                return True
+
+    # 3) Cuerpo literal (lead)
+    if cue_i and cue_j and len(cue_i) >= MIN_LEN_CUERPO_CONSIST and len(cue_j) >= MIN_LEN_CUERPO_CONSIST:
+        sim_cue = _sim_texto(cue_i, cue_j)
+        if sim_cue >= UMBRAL_SIM_CUERPO_CONSIST:
+            return True
+        # Lead casi igual + títulos relacionados
+        if sim_cue >= 0.84 and sim_tit >= 0.75 and _overlap_distintivo(tit_i, tit_j) >= 0.30:
+            return True
+
+    # 4) Embedding solo título
+    if emb_t_i is not None and emb_t_j is not None and tit_i and tit_j:
+        sim_et = cosine_similarity(
+            np.array(emb_t_i).reshape(1, -1),
+            np.array(emb_t_j).reshape(1, -1)
+        )[0][0]
+        if sim_et >= UMBRAL_EMB_TITULO_CONSIST and _overlap_distintivo(tit_i, tit_j) >= 0.25:
+            return True
+        # Título emb alto + prefijo parecido
+        if sim_et >= 0.92 and pref_i and pref_j and _sim_texto(pref_i, pref_j) >= 0.88:
+            return True
+
+    # 5) Embedding solo cuerpo
+    if emb_c_i is not None and emb_c_j is not None and cue_i and cue_j:
+        if len(cue_i) >= MIN_LEN_CUERPO_CONSIST and len(cue_j) >= MIN_LEN_CUERPO_CONSIST:
+            sim_ec = cosine_similarity(
+                np.array(emb_c_i).reshape(1, -1),
+                np.array(emb_c_j).reshape(1, -1)
+            )[0][0]
+            if sim_ec >= UMBRAL_EMB_CUERPO_CONSIST and _overlap_distintivo(cue_i, cue_j) >= 0.22:
+                return True
+            # Cuerpo muy similar + algo de título
+            if sim_ec >= 0.90 and sim_tit >= 0.70:
+                return True
+
+    return False
+
+
 def construir_grupos_consistencia(titulos, resumenes, pbar=None, ps=0.0):
     """
-    Construye clases de equivalencia de noticias 'iguales o casi idénticas' comparando
-    Título contra Título y CuerpoEs contra CuerpoEs de forma INDEPENDIENTE. Devuelve un
-    dict {id_grupo: [indices]} vía Union-Find (DSU), donde cada grupo representa la MISMA
-    noticia (o una republicación/versión casi idéntica de la misma).
+    Clases de equivalencia de noticias iguales/casi idénticas.
+    Compara Título↔Título y CuerpoEs↔CuerpoEs de forma independiente.
+    También detecta títulos que EMPIEZAN igual y leads casi iguales.
     """
     n = len(titulos)
     dsu = DSU(n)
@@ -1269,39 +1331,59 @@ def construir_grupos_consistencia(titulos, resumenes, pbar=None, ps=0.0):
 
     titulos_norm = [normalize_title_for_comparison(t) for t in titulos]
     cuerpos_norm = [_normalizar_cuerpo_para_comparacion(r) for r in resumenes]
+    prefijos = [_prefijo_titulo_significativo(t) for t in titulos_norm]
 
-    # --- Bloque 1: coincidencia literal casi exacta de TÍTULO ---------------------------
+    stop_local = STOPWORDS_ES | {"dice", "dijo", "informo", "segun", "segun", "tras", "luego"}
+
+    # --- Bloque 1: título literal + prefijo (bloqueo por hash de primeras palabras) ------
+    if pbar: pbar.progress(ps, "Consistencia · títulos literales / prefijos...")
     bt = defaultdict(list)
+    bp = defaultdict(list)
     for i, tn in enumerate(titulos_norm):
-        if len(tn) >= 12:
-            bt[tn[:60]].append(i)  # bloqueo grueso por prefijo para acotar comparaciones
-    for idxs in bt.values():
-        for a in range(len(idxs)):
-            for b in range(a + 1, len(idxs)):
-                i, j = idxs[a], idxs[b]
-                if dsu.find(i) == dsu.find(j): continue
-                ratio = SequenceMatcher(None, titulos_norm[i], titulos_norm[j]).ratio()
-                if ratio >= UMBRAL_SIM_TITULO_CONSIST and not _hay_conflicto_accion(titulos_norm[i], titulos_norm[j]):
+        if len(tn) >= 10:
+            bt[tn[:50]].append(i)
+        pref = prefijos[i]
+        if pref and len(pref.split()) >= 4:
+            bp[" ".join(pref.split()[:5])].append(i)
+
+    for bucket in list(bt.values()) + list(bp.values()):
+        if len(bucket) > 80:
+            continue
+        for a in range(len(bucket)):
+            for b in range(a + 1, len(bucket)):
+                i, j = bucket[a], bucket[b]
+                if dsu.find(i) == dsu.find(j):
+                    continue
+                if _son_misma_noticia_signals(
+                    titulos_norm[i], titulos_norm[j],
+                    cuerpos_norm[i], cuerpos_norm[j],
+                    pref_i=prefijos[i], pref_j=prefijos[j],
+                ):
                     dsu.union(i, j)
 
-    # --- Bloque 2: coincidencia literal casi exacta de CUERPO (lead/entradilla) ----------
+    # --- Bloque 2: cuerpo literal (lead) ------------------------------------------------
+    if pbar: pbar.progress(min(ps + 0.01, 1.0), "Consistencia · cuerpos literales...")
     bc = defaultdict(list)
     for i, cn in enumerate(cuerpos_norm):
         if len(cn) >= MIN_LEN_CUERPO_CONSIST:
-            bc[cn[:80]].append(i)
+            bc[cn[:70]].append(i)
     for idxs in bc.values():
+        if len(idxs) > 80:
+            continue
         for a in range(len(idxs)):
             for b in range(a + 1, len(idxs)):
                 i, j = idxs[a], idxs[b]
-                if dsu.find(i) == dsu.find(j): continue
-                ratio = SequenceMatcher(None, cuerpos_norm[i], cuerpos_norm[j]).ratio()
-                if ratio >= UMBRAL_SIM_CUERPO_CONSIST and not _hay_conflicto_accion(cuerpos_norm[i], cuerpos_norm[j]):
+                if dsu.find(i) == dsu.find(j):
+                    continue
+                if _son_misma_noticia_signals(
+                    titulos_norm[i], titulos_norm[j],
+                    cuerpos_norm[i], cuerpos_norm[j],
+                    pref_i=prefijos[i], pref_j=prefijos[j],
+                ):
                     dsu.union(i, j)
 
-    stop_local = STOPWORDS_ES | {"dice", "dijo", "informo", "según", "segun", "tras", "luego"}
-
-    # --- Bloque 3: similitud SEMÁNTICA de SOLO el título (embeddings de título puro) ----
-    if pbar: pbar.progress(ps, "Consistencia · comparando títulos (semántico)...")
+    # --- Bloque 3: embeddings de título -------------------------------------------------
+    if pbar: pbar.progress(min(ps + 0.02, 1.0), "Consistencia · embeddings de título...")
     emb_titulos = get_embeddings_batch([t if t else "" for t in titulos])
     palabras_idx_t = defaultdict(list)
     for i, tn in enumerate(titulos_norm):
@@ -1312,25 +1394,27 @@ def construir_grupos_consistencia(titulos, resumenes, pbar=None, ps=0.0):
                 vistos.add(w)
     candidatos_t = set()
     for idxs in palabras_idx_t.values():
-        if 2 <= len(idxs) <= 40:
+        if 2 <= len(idxs) <= 50:
             for a in range(len(idxs)):
                 for b in range(a + 1, len(idxs)):
                     i, j = idxs[a], idxs[b]
                     if dsu.find(i) != dsu.find(j):
                         candidatos_t.add((min(i, j), max(i, j)))
     for i, j in candidatos_t:
-        if dsu.find(i) == dsu.find(j): continue
-        if emb_titulos[i] is None or emb_titulos[j] is None: continue
-        sim_t = cosine_similarity(
-            np.array(emb_titulos[i]).reshape(1, -1),
-            np.array(emb_titulos[j]).reshape(1, -1)
-        )[0][0]
-        if sim_t >= UMBRAL_EMB_TITULO_CONSIST and not _hay_conflicto_accion(titulos_norm[i], titulos_norm[j]):
+        if dsu.find(i) == dsu.find(j):
+            continue
+        if _son_misma_noticia_signals(
+            titulos_norm[i], titulos_norm[j],
+            cuerpos_norm[i], cuerpos_norm[j],
+            emb_t_i=emb_titulos[i], emb_t_j=emb_titulos[j],
+            pref_i=prefijos[i], pref_j=prefijos[j],
+        ):
             dsu.union(i, j)
 
-    # --- Bloque 4: similitud SEMÁNTICA de SOLO el cuerpo (embeddings de cuerpo puro) ----
-    if pbar: pbar.progress(min(ps + 0.02, 1.0), "Consistencia · comparando cuerpos (semántico)...")
+    # --- Bloque 4: embeddings de cuerpo -------------------------------------------------
+    if pbar: pbar.progress(min(ps + 0.03, 1.0), "Consistencia · embeddings de cuerpo...")
     idx_cuerpo_validos = [i for i, c in enumerate(cuerpos_norm) if len(c) >= MIN_LEN_CUERPO_CONSIST]
+    emb_cuerpos = {}
     if len(idx_cuerpo_validos) >= 2:
         textos_cuerpo = [str(resumenes[i])[:1200] if resumenes[i] else "" for i in idx_cuerpo_validos]
         emb_cuerpos_sub = get_embeddings_batch(textos_cuerpo)
@@ -1344,31 +1428,29 @@ def construir_grupos_consistencia(titulos, resumenes, pbar=None, ps=0.0):
                     vistos.add(w)
         candidatos_c = set()
         for idxs in palabras_idx_c.values():
-            if 2 <= len(idxs) <= 40:
+            if 2 <= len(idxs) <= 50:
                 for a in range(len(idxs)):
                     for b in range(a + 1, len(idxs)):
                         i, j = idxs[a], idxs[b]
                         if dsu.find(i) != dsu.find(j):
                             candidatos_c.add((min(i, j), max(i, j)))
         for i, j in candidatos_c:
-            if dsu.find(i) == dsu.find(j): continue
-            ei, ej = emb_cuerpos.get(i), emb_cuerpos.get(j)
-            if ei is None or ej is None: continue
-            sim_c = cosine_similarity(np.array(ei).reshape(1, -1), np.array(ej).reshape(1, -1))[0][0]
-            if sim_c >= UMBRAL_EMB_CUERPO_CONSIST and not _hay_conflicto_accion(cuerpos_norm[i], cuerpos_norm[j]):
+            if dsu.find(i) == dsu.find(j):
+                continue
+            if _son_misma_noticia_signals(
+                titulos_norm[i], titulos_norm[j],
+                cuerpos_norm[i], cuerpos_norm[j],
+                emb_t_i=emb_titulos[i], emb_t_j=emb_titulos[j],
+                emb_c_i=emb_cuerpos.get(i), emb_c_j=emb_cuerpos.get(j),
+                pref_i=prefijos[i], pref_j=prefijos[j],
+            ):
                 dsu.union(i, j)
 
-    if pbar: pbar.progress(min(ps + 0.03, 1.0), "Grupos de consistencia listos")
+    if pbar: pbar.progress(min(ps + 0.04, 1.0), "Grupos de consistencia listos")
     return dsu.grupos(n)
 
 
 def _votar_valor_mayoritario(valores, embeddings=None, textos=None):
-    """
-    Devuelve el valor mayoritario de una lista (ignorando None/vacíos/'N/A'/'-').
-    En caso de empate entre 2+ valores igual de frecuentes, desempata eligiendo el valor
-    del elemento más 'central' según embeddings (más representativo del grupo), para no
-    depender del orden arbitrario de las filas.
-    """
     limpios = [v for v in valores if v and str(v).strip() and str(v).strip().lower() not in ("n/a", "-", "nan", "none")]
     if not limpios:
         return None
@@ -1389,17 +1471,14 @@ def _votar_valor_mayoritario(valores, embeddings=None, textos=None):
                         mejor_sim = sim
                         mejor_val = val
             return mejor_val
-    return empatados[0]
+    # Desempate: etiqueta más completa / más larga
+    return max(empatados, key=lambda x: (len(str(x).split()), len(str(x))))
 
 
 def aplicar_consistencia_intergrupo(df, km_tono, km_tema, km_subtema, km_titulo, km_resumen, pbar=None):
     """
-    PASO DE ULTRA-PRECISIÓN: fuerza que noticias iguales o muy similares (mismo Título o
-    mismo CuerpoEs, aunque el otro campo difiera) reciban EXACTAMENTE el mismo Tono, Tema
-    y Subtema. Opera sobre grupos de consistencia calculados de forma independiente del
-    agrupamiento temático (construir_grupos_consistencia), por lo que NO generaliza ni
-    junta noticias sin relación real: solo actúa dentro de clases de equivalencia ya
-    validadas como "la misma noticia" por título y/o cuerpo, con umbrales altos.
+    Fuerza mismo Tono/Tema/Subtema en noticias iguales o casi idénticas
+    (mismo título y/o mismo cuerpo, aunque el otro campo difiera).
     """
     n = len(df)
     if n < 2:
@@ -1423,25 +1502,22 @@ def aplicar_consistencia_intergrupo(df, km_tono, km_tema, km_subtema, km_titulo,
     unificados = 0
     for k, (gid, idxs) in enumerate(grupos_multiples.items()):
         if pbar and total_g:
-            pbar.progress(min(0.05 + 0.9 * (k / total_g), 0.95), f"Unificando republicaciones {k + 1}/{total_g}...")
+            pbar.progress(min(0.05 + 0.85 * (k / total_g), 0.90), f"Unificando republicaciones {k + 1}/{total_g}...")
 
         embs_grupo = [emb_combinado[i] for i in idxs]
 
         if km_tono in df.columns:
-            tono_grupo = [tonos[i] for i in idxs]
-            tono_final = _votar_valor_mayoritario(tono_grupo, embs_grupo)
+            tono_final = _votar_valor_mayoritario([tonos[i] for i in idxs], embs_grupo)
             if tono_final is not None:
                 for i in idxs: tonos[i] = tono_final
 
         if km_subtema in df.columns:
-            subtema_grupo = [subtemas[i] for i in idxs]
-            subtema_final = _votar_valor_mayoritario(subtema_grupo, embs_grupo)
+            subtema_final = _votar_valor_mayoritario([subtemas[i] for i in idxs], embs_grupo)
             if subtema_final is not None:
                 for i in idxs: subtemas[i] = subtema_final
 
         if km_tema in df.columns:
-            tema_grupo = [temas[i] for i in idxs]
-            tema_final = _votar_valor_mayoritario(tema_grupo, embs_grupo)
+            tema_final = _votar_valor_mayoritario([temas[i] for i in idxs], embs_grupo)
             if tema_final is not None:
                 for i in idxs: temas[i] = tema_final
 
@@ -1451,12 +1527,287 @@ def aplicar_consistencia_intergrupo(df, km_tono, km_tema, km_subtema, km_titulo,
     if km_tema in df.columns: df[km_tema] = temas
     if km_subtema in df.columns: df[km_subtema] = subtemas
 
-    if pbar: pbar.progress(1.0, "Consistencia entre republicaciones aplicada")
+    if pbar: pbar.progress(0.92, "Republicaciones unificadas")
     if total_g:
         st.caption(
-            f"🔗 Consistencia: **{total_g}** grupos de republicaciones/coberturas casi idénticas "
-            f"detectados (**{unificados}** noticias) → Tono/Tema/Subtema unificados por voto mayoritario."
+            f"🔗 Consistencia republicaciones: **{total_g}** grupos "
+            f"(**{unificados}** noticias) → Tono/Tema/Subtema unificados."
         )
+    return df
+
+
+# ==========================================================================================
+# UNIFICACIÓN POST-ETIQUETA: subtemas levemente distintos del MISMO hecho
+# ==========================================================================================
+def _repr_grupo_para_fusion(etiqueta, textos, titulos, max_n=25):
+    muestra_t = [str(t) for t in titulos[:12] if str(t).strip()]
+    muestra_x = [str(t) for t in textos[:max_n] if str(t).strip()]
+    palabras = []
+    for t in muestra_t + muestra_x[:10]:
+        for w in string_norm_label(t).split():
+            if len(w) > 3:
+                palabras.append(w)
+    kw = " ".join(w for w, _ in Counter(palabras).most_common(12))
+    return f"{etiqueta}. {etiqueta}. {' | '.join(muestra_t[:6])}. {kw}"[:900]
+
+
+def unificar_subtemas_similares_post(
+    df,
+    km_subtema,
+    km_tema,
+    km_tono,
+    km_titulo,
+    km_resumen,
+    marca="",
+    aliases=None,
+    pbar=None,
+):
+    """
+    Paso crítico anti-'subtemas levemente distintos':
+    1) Noticias con contenido casi idéntico → misma etiqueta (aunque el LLM haya variado).
+    2) Subtemas con etiquetas muy parecidas + contenido compatible → una sola etiqueta canónica.
+    3) Propaga Tema (y Tono si hay near-dup) de forma consistente.
+    NO generaliza: exige umbrales altos + overlap + sin conflicto de acción.
+    """
+    n = len(df)
+    if n < 2 or km_subtema not in df.columns:
+        return df
+
+    df = df.reset_index(drop=True)
+    titulos = df[km_titulo].fillna("").astype(str).tolist() if km_titulo in df.columns else [""] * n
+    resumenes = df[km_resumen].fillna("").astype(str).tolist() if km_resumen in df.columns else [""] * n
+    subtemas = [capitalizar_etiqueta(str(s)) if pd.notna(s) else "Sin tema" for s in df[km_subtema].tolist()]
+    temas = df[km_tema].tolist() if km_tema in df.columns else ["Sin tema"] * n
+    tonos = df[km_tono].tolist() if km_tono in df.columns else [None] * n
+
+    textos_emb = [texto_para_embedding(titulos[i], resumenes[i]) for i in range(n)]
+    if pbar: pbar.progress(0.05, "Post-unificación · embeddings de contenido...")
+    emb_txt = get_embeddings_batch(textos_emb)
+
+    # ── A) Near-duplicates de CONTENIDO (mismo hecho, redacción distinta) ──────────────
+    if pbar: pbar.progress(0.15, "Post-unificación · near-duplicates de contenido...")
+    dsu = DSU(n)
+    # Candidatos por tokens raros del título + subtema actual
+    stop_local = STOPWORDS_ES | {"dice", "dijo", "informo", "segun"}
+    idx_kw = defaultdict(list)
+    for i, t in enumerate(titulos):
+        tn = normalize_title_for_comparison(t)
+        vistos = set()
+        for w in tn.split():
+            if len(w) >= 5 and w not in stop_local and w not in vistos:
+                idx_kw[w].append(i)
+                vistos.add(w)
+        sn = string_norm_label(subtemas[i])
+        for w in sn.split():
+            if len(w) >= 5:
+                idx_kw[f"sub::{w}"].append(i)
+
+    candidatos = set()
+    for idxs in idx_kw.values():
+        if 2 <= len(idxs) <= 40:
+            for a in range(len(idxs)):
+                for b in range(a + 1, len(idxs)):
+                    i, j = idxs[a], idxs[b]
+                    candidatos.add((min(i, j), max(i, j)))
+
+    for i, j in candidatos:
+        if dsu.find(i) == dsu.find(j):
+            continue
+        if emb_txt[i] is None or emb_txt[j] is None:
+            continue
+        if _hay_conflicto_accion(textos_emb[i], textos_emb[j]):
+            continue
+        sim = cosine_similarity(
+            np.array(emb_txt[i]).reshape(1, -1),
+            np.array(emb_txt[j]).reshape(1, -1)
+        )[0][0]
+        if sim < UMBRAL_NEAR_DUP_CONTENT:
+            continue
+        ov = _overlap_distintivo(textos_emb[i], textos_emb[j])
+        # También aceptar si etiquetas ya son compatibles y contenido alto
+        labels_ok = _etiquetas_compatibles(subtemas[i], subtemas[j], min_overlap=0.40)
+        tit_sim = _sim_texto(normalize_title_for_comparison(titulos[i]), normalize_title_for_comparison(titulos[j]))
+        if ov >= 0.30 or labels_ok or tit_sim >= 0.88 or sim >= 0.96:
+            dsu.union(i, j)
+
+    # Unificar etiquetas dentro de cada componente de near-dup
+    for idxs in dsu.grupos(n).values():
+        if len(idxs) < 2:
+            continue
+        embs_g = [emb_txt[i] for i in idxs]
+        sub_final = _votar_valor_mayoritario([subtemas[i] for i in idxs], embs_g)
+        tema_final = _votar_valor_mayoritario([temas[i] for i in idxs], embs_g) if km_tema in df.columns else None
+        tono_final = _votar_valor_mayoritario([tonos[i] for i in idxs], embs_g) if km_tono in df.columns else None
+        for i in idxs:
+            if sub_final:
+                subtemas[i] = capitalizar_etiqueta(sub_final)
+            if tema_final is not None:
+                temas[i] = tema_final
+            if tono_final is not None:
+                tonos[i] = tono_final
+
+    # ── B) Fusión de ETIQUETAS de subtema similares con contenido compatible ───────────
+    if pbar: pbar.progress(0.45, "Post-unificación · fusión de subtemas afines...")
+    textos_por_sub = defaultdict(list)
+    titulos_por_sub = defaultdict(list)
+    idxs_por_sub = defaultdict(list)
+    for i, s in enumerate(subtemas):
+        textos_por_sub[s].append(textos_emb[i])
+        titulos_por_sub[s].append(titulos[i])
+        idxs_por_sub[s].append(i)
+
+    unique_subs = list(idxs_por_sub.keys())
+    if len(unique_subs) >= 2:
+        reprs = [
+            _repr_grupo_para_fusion(s, textos_por_sub[s], titulos_por_sub[s])
+            for s in unique_subs
+        ]
+        emb_repr = get_embeddings_batch(reprs)
+        emb_lab = get_embeddings_batch(unique_subs)
+
+        m = len(unique_subs)
+        parent = list(range(m))
+
+        def find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a, b):
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[rb] = ra
+
+        # Matriz de similitud de representaciones
+        valid = [(i, emb_repr[i]) for i in range(m) if emb_repr[i] is not None]
+        if len(valid) >= 2:
+            vi, vv = zip(*valid)
+            sm = cosine_similarity(np.array(vv))
+            pos = {vi[k]: k for k in range(len(vi))}
+            for a in range(m):
+                for b in range(a + 1, m):
+                    if find(a) == find(b):
+                        continue
+                    sa, sb = unique_subs[a], unique_subs[b]
+                    if _hay_conflicto_accion(sa, sb):
+                        continue
+
+                    # Similitud de etiqueta (texto)
+                    na, nb = string_norm_label(sa), string_norm_label(sb)
+                    sim_txt = SequenceMatcher(None, na, nb).ratio() if na and nb else 0.0
+                    sim_lab = 0.0
+                    if emb_lab[a] is not None and emb_lab[b] is not None:
+                        sim_lab = cosine_similarity(
+                            np.array(emb_lab[a]).reshape(1, -1),
+                            np.array(emb_lab[b]).reshape(1, -1)
+                        )[0][0]
+                    sim_repr = 0.0
+                    if a in pos and b in pos:
+                        sim_repr = sm[pos[a]][pos[b]]
+
+                    # Criterios de fusión segura (cualquiera fuerte + validación contenido)
+                    etiquetas_cercanas = (
+                        sim_txt >= UMBRAL_FUSION_ETIQUETA_POST
+                        or sim_lab >= UMBRAL_FUSION_ETIQUETA_POST
+                        or (sim_txt >= 0.82 and sim_lab >= 0.88)
+                        or _etiquetas_compatibles(sa, sb, min_overlap=0.55)
+                    )
+                    contenido_cercano = sim_repr >= UMBRAL_FUSION_CONTENIDO_POST
+
+                    if not (etiquetas_cercanas and contenido_cercano):
+                        # Caso especial: etiquetas casi idénticas
+                        if not (sim_txt >= 0.94 or sim_lab >= 0.95):
+                            continue
+                        if sim_repr < 0.88:
+                            continue
+
+                    if not _grupos_contenido_compatibles(
+                        textos_por_sub[sa],
+                        textos_por_sub[sb],
+                        sa,
+                        sb,
+                        min_sim=max(UMBRAL_FUSION_CONTENIDO_POST - 0.02, 0.88),
+                        min_overlap=UMBRAL_OVERLAP_POST,
+                    ):
+                        continue
+                    union(a, b)
+
+        # Canonizar
+        freq = Counter(subtemas)
+        grupos_lab = defaultdict(list)
+        for i in range(m):
+            grupos_lab[find(i)].append(i)
+        mapa = {}
+        for members in grupos_lab.values():
+            cands = [unique_subs[i] for i in members]
+            if len(cands) == 1:
+                mapa[cands[0]] = cands[0]
+                continue
+            vc = [c for c in cands if c.lower() not in ("sin tema", "varios") and _frase_esta_completa(c)]
+            best = max(vc or cands, key=lambda c: (freq.get(c, 0), len(c.split()), len(c)))
+            # Intentar unificar con LLM si hay 2-4 variantes
+            if 2 <= len(cands) <= 4:
+                textos_map = {c: textos_por_sub.get(c, []) for c in cands}
+                unified = _unificar_subtemas_llm(cands, textos_map, marca, aliases or [])
+                if unified and _frase_esta_completa(unified) and _validar_estructura_subtema(unified):
+                    best = unified
+            best = capitalizar_etiqueta(best)
+            for c in cands:
+                mapa[c] = best
+
+        subtemas = [mapa.get(s, s) for s in subtemas]
+
+    # ── C) Dedup final de etiquetas + unificar tema por subtema ───────────────────────
+    if pbar: pbar.progress(0.75, "Post-unificación · dedup final y temas...")
+    subtemas = dedup_labels(subtemas, max(UMBRAL_DEDUP_LABEL, 0.86))
+    subtemas = [capitalizar_etiqueta(s) for s in subtemas]
+
+    # Todo subtema debe mapear a UN solo tema (mayoría)
+    if km_tema in df.columns:
+        sub_to_temas = defaultdict(list)
+        for s, t in zip(subtemas, temas):
+            if t and str(t).strip() and str(t).lower() not in ("n/a", "-", "nan"):
+                sub_to_temas[s].append(t)
+        sub_to_best_tema = {}
+        for s, tlist in sub_to_temas.items():
+            sub_to_best_tema[s] = Counter(tlist).most_common(1)[0][0]
+        temas = [sub_to_best_tema.get(s, t) for s, t in zip(subtemas, temas)]
+
+    # ── D) Segunda pasada ligera de consistencia título/cuerpo ────────────────────────
+    if pbar: pbar.progress(0.88, "Post-unificación · refuerzo consistencia...")
+    grupos2 = construir_grupos_consistencia(titulos, resumenes, pbar=None, ps=0.0)
+    for idxs in grupos2.values():
+        if len(idxs) < 2:
+            continue
+        embs_g = [emb_txt[i] for i in idxs]
+        sf = _votar_valor_mayoritario([subtemas[i] for i in idxs], embs_g)
+        tf = _votar_valor_mayoritario([temas[i] for i in idxs], embs_g) if km_tema in df.columns else None
+        nf = _votar_valor_mayoritario([tonos[i] for i in idxs], embs_g) if km_tono in df.columns else None
+        for i in idxs:
+            if sf: subtemas[i] = capitalizar_etiqueta(sf)
+            if tf is not None: temas[i] = tf
+            if nf is not None: tonos[i] = nf
+
+    # Re-forzar 1 tema por subtema
+    if km_tema in df.columns:
+        sub_to_temas = defaultdict(list)
+        for s, t in zip(subtemas, temas):
+            if t and str(t).strip() and str(t).lower() not in ("n/a", "-", "nan"):
+                sub_to_temas[s].append(t)
+        sub_to_best_tema = {s: Counter(tlist).most_common(1)[0][0] for s, tlist in sub_to_temas.items() if tlist}
+        temas = [sub_to_best_tema.get(s, t) for s, t in zip(subtemas, temas)]
+
+    df[km_subtema] = subtemas
+    if km_tema in df.columns:
+        df[km_tema] = temas
+    if km_tono in df.columns:
+        df[km_tono] = tonos
+
+    n_subs = len(set(subtemas))
+    n_temas = len(set(str(t) for t in temas))
+    if pbar: pbar.progress(1.0, f"Post-unificación lista · {n_subs} subtemas / {n_temas} temas")
+    st.caption(f"🎯 Post-unificación: **{n_subs}** subtemas · **{n_temas}** temas (variantes leves fusionadas con validación de contenido).")
     return df
 
 
@@ -1508,15 +1859,15 @@ class ClasificadorTono:
                     temperature=0.0,
                     response_format={"type": "json_object"}
                 )
-                
+
                 u = resp.get('usage', {}) if isinstance(resp, dict) else getattr(resp, 'usage', {})
                 if u:
                     st.session_state['tokens_input'] += (u.get('prompt_tokens') if isinstance(u, dict) else getattr(u, 'prompt_tokens', 0)) or 0
                     st.session_state['tokens_output'] += (u.get('completion_tokens') if isinstance(u, dict) else getattr(u, 'completion_tokens', 0)) or 0
-                
+
                 resultado = json.loads(resp.choices[0].message.content)
                 tono = str(resultado.get("tono", "Neutro")).strip().title()
-                
+
                 return {"tono": tono if tono in ("Positivo", "Negativo", "Neutro") else "Neutro"}
             except Exception as e:
                 return {"tono": "Neutro"}
@@ -1525,49 +1876,67 @@ class ClasificadorTono:
         n = len(textos)
         txts = textos.tolist()
         pbar.progress(0.05, "Agrupando noticias para análisis de tono...")
-        
+
         txts_emb = [texto_para_embedding(str(titulos.iloc[i]), str(resumenes.iloc[i])) for i in range(n)]
         dsu = DSU(n)
-        
+
         embs = get_embeddings_batch(txts_emb)
+
+        # 1) Agrupación clásica por similitud alta de contenido/título
         candidatos = agrupar_textos_similares(txts_emb, SIMILARITY_THRESHOLD_TONO)
         candidatos.update({len(candidatos) + k: v for k, v in agrupar_por_titulo_similar(titulos.tolist()).items()})
         for idxs in candidatos.values():
             for pos, i in enumerate(idxs):
                 for j in idxs[pos + 1:]:
                     ti, tj = normalize_title_for_comparison(titulos.iloc[i]), normalize_title_for_comparison(titulos.iloc[j])
-                    titulo_casi_igual = SequenceMatcher(None, ti, tj).ratio() >= 0.96
+                    titulo_casi_igual = SequenceMatcher(None, ti, tj).ratio() >= 0.94
+                    pref_i, pref_j = _prefijo_titulo_significativo(ti), _prefijo_titulo_significativo(tj)
+                    pref_casi_igual = pref_i and pref_j and SequenceMatcher(None, pref_i, pref_j).ratio() >= 0.95
                     contenido_casi_igual = (
                         embs[i] is not None and embs[j] is not None
                         and cosine_similarity(np.array(embs[i]).reshape(1, -1), np.array(embs[j]).reshape(1, -1))[0][0] >= SIMILARITY_THRESHOLD_TONO
-                        and _overlap_distintivo(txts_emb[i], txts_emb[j]) >= 0.45
+                        and _overlap_distintivo(txts_emb[i], txts_emb[j]) >= 0.40
                     )
-                    if (titulo_casi_igual or contenido_casi_igual) and not _hay_conflicto_accion(txts_emb[i], txts_emb[j]):
+                    if (titulo_casi_igual or pref_casi_igual or contenido_casi_igual) and not _hay_conflicto_accion(txts_emb[i], txts_emb[j]):
                         dsu.union(i, j)
-                
+
+        # 2) Refuerzo con motor de consistencia título/cuerpo
+        pbar.progress(0.08, "Tono · detectando republicaciones...")
+        grupos_cons = construir_grupos_consistencia(
+            titulos.fillna("").astype(str).tolist(),
+            resumenes.fillna("").astype(str).tolist(),
+            pbar=None,
+        )
+        for idxs in grupos_cons.values():
+            if len(idxs) < 2:
+                continue
+            for k in range(1, len(idxs)):
+                dsu.union(idxs[0], idxs[k])
+
         grupos = dsu.grupos(n)
         reps = {cid: seleccionar_representante(idxs, txts)[1] for cid, idxs in grupos.items()}
-        
+
         sem = asyncio.Semaphore(CONCURRENT_REQUESTS)
         cids = list(reps.keys())
-        
+
         async def _clasificar_con_cid(cid):
             return cid, await self._clasificar_llm(reps[cid], sem)
 
         tasks = [_clasificar_con_cid(c) for c in cids]
         rpg = {}
-        
+
         for i, f in enumerate(asyncio.as_completed(tasks)):
             cid, r = await f
             rpg[cid] = r
-            pbar.progress(0.1 + 0.85 * (i + 1) / len(tasks), f"Evaluando Reputación {i + 1}/{len(tasks)}")
-            
+            pbar.progress(0.1 + 0.85 * (i + 1) / max(len(tasks), 1), f"Evaluando Reputación {i + 1}/{len(tasks)}")
+
         final = [None] * n
-        
+
         for cid, idxs in grupos.items():
             r = rpg.get(cid, {"tono": "Neutro"})
-            for i in idxs: final[i] = r
-            
+            for i in idxs:
+                final[i] = r
+
         pbar.progress(1.0, "Análisis de Tono completado")
         return final
 
@@ -1614,14 +1983,18 @@ class ClasificadorSubtema:
 
     def _paso2(self, titulos, dsu):
         norm = [normalize_title_for_comparison(t) for t in titulos]
+        prefs = [_prefijo_titulo_significativo(t) for t in norm]
         n = len(norm)
         for i in range(n):
             if not norm[i]: continue
             for j in range(i + 1, n):
                 if not norm[j] or dsu.find(i) == dsu.find(j): continue
                 ratio = SequenceMatcher(None, norm[i], norm[j]).ratio()
-                comparte_asunto = _overlap_distintivo(norm[i], norm[j]) >= 0.40
-                if ratio >= SIMILARITY_THRESHOLD_TITULOS and comparte_asunto and not _hay_conflicto_accion(norm[i], norm[j]):
+                pref_ratio = SequenceMatcher(None, prefs[i], prefs[j]).ratio() if prefs[i] and prefs[j] else 0.0
+                comparte_asunto = _overlap_distintivo(norm[i], norm[j]) >= 0.38
+                if ((ratio >= SIMILARITY_THRESHOLD_TITULOS and comparte_asunto)
+                        or (pref_ratio >= 0.95 and comparte_asunto and len(prefs[i].split()) >= MIN_PALABRAS_PREF_TITULO)
+                    ) and not _hay_conflicto_accion(norm[i], norm[j]):
                     dsu.union(i, j)
 
     def _paso2b_keywords(self, titulos, dsu, ae):
@@ -1665,6 +2038,15 @@ class ClasificadorSubtema:
                     if sim >= sim_min and not _hay_conflicto_accion(str(titulos[ia]), str(titulos[ib])):
                         dsu.union(ia, ib)
 
+    def _paso2c_consistencia(self, titulos, resumenes, dsu):
+        """Une de entrada las republicaciones detectadas por título/cuerpo."""
+        grupos = construir_grupos_consistencia(titulos, resumenes, pbar=None)
+        for idxs in grupos.values():
+            if len(idxs) < 2:
+                continue
+            for k in range(1, len(idxs)):
+                dsu.union(idxs[0], idxs[k])
+
     def _paso3(self, et, ae, dsu, pbar, ps):
         umbral_cluster = max(self._umbrales.get('subtema', UMBRAL_SUBTEMA), 0.82)
         sim_min = max(self._umbrales.get('sim_minima_agrupacion', SIM_MINIMA_AGRUPACION_SUBTEMA), 0.90)
@@ -1680,7 +2062,7 @@ class ClasificadorSubtema:
                 None,
                 normalize_title_for_comparison(et[i]),
                 normalize_title_for_comparison(et[j])
-            ).ratio() >= 0.96
+            ).ratio() >= 0.94
 
         B = 500
         if n <= B:
@@ -1838,9 +2220,11 @@ class ClasificadorSubtema:
         lista_existentes = ""
         if subtemas_existentes and len(subtemas_existentes) > 0:
             lista_existentes = (
-                "\n\nSUBTEMAS YA CREADOS (ÚSALOS SI APLICAN EXACTAMENTE):\n" +
-                ", ".join(f"'{s}'" for s in subtemas_existentes[:15]) +
-                "\nREGLA: Si este grupo de noticias trata EXACTAMENTE del mismo tema que uno de los subtemas ya creados, responde con ese subtema. Si es un tema distinto, crea uno nuevo."
+                "\n\nSUBTEMAS YA CREADOS (REUTILIZA SI ES EL MISMO ASUNTO):\n" +
+                ", ".join(f"'{s}'" for s in subtemas_existentes[:20]) +
+                "\nREGLA CRÍTICA: Si este grupo trata del MISMO hecho/asunto que uno ya creado "
+                "(aunque use palabras distintas), RESPONDE EXACTAMENTE con ese subtema existente. "
+                "Solo crea uno nuevo si es un asunto claramente distinto."
             )
 
         prompt = (
@@ -1861,7 +2245,8 @@ class ClasificadorSubtema:
             "  2. USA preposiciones (de, del, para, sobre, en, por) para conectar concepts.\n"
             "  3. SÉ ESPECÍFICO: describe el asunto real, no el actor.\n"
             "  4. Ciudades y regiones SÍ pueden aparecer si son relevantes al tema.\n"
-            "  5. Sin nombre de marcas privadas. Tildes y ñ correctas.\n\n"
+            "  5. Sin nombre de marcas privadas. Tildes y ñ correctas.\n"
+            "  6. Si el grupo es el mismo hecho que un subtema existente, COPIA ese subtema tal cual.\n\n"
             "EJEMPLOS CORRECTOS: 'Proyecto de terminal de transportes', "
             "'Operación del Canal del Dique', 'Plan de infraestructura vial', "
             "'Regulación de tarifas eléctricas', 'Inversión en salud pública'\n"
@@ -1901,6 +2286,17 @@ class ClasificadorSubtema:
 
             raw = json.loads(resp.choices[0].message.content).get("subtema", "Varios")
             et = limpiar_tema_geografico(limpiar_tema(raw), self.marca, self.aliases)
+
+            # Si el LLM devolvió algo muy cercano a un existente, reutilizar exacto
+            if subtemas_existentes:
+                et_norm = string_norm_label(et)
+                mejor_exist, mejor_r = None, 0.0
+                for ex in subtemas_existentes:
+                    r = SequenceMatcher(None, et_norm, string_norm_label(ex)).ratio()
+                    if r > mejor_r:
+                        mejor_r, mejor_exist = r, ex
+                if mejor_exist and mejor_r >= 0.88:
+                    et = mejor_exist
 
             if not et or et.strip().lower() == "sin tema":
                 et = self._refinar(tm, kw, rm, forzar_preposicion=True)
@@ -2015,15 +2411,17 @@ class ClasificadorSubtema:
     def _consolidar_sinonimos_llm(self, subtemas_unicos):
         if len(subtemas_unicos) <= 1:
             return {s: s for s in subtemas_unicos}
-            
+
         prompt = (
             "Eres un analista de datos. Tienes la siguiente lista de subtemas periodísticos:\n"
             f"{', '.join(subtemas_unicos)}\n\n"
-            "Tu tarea es encontrar SUBTEMAS SINÓNIMOS que signifiquen exactamente lo mismo "
-            "(aunque usen palabras ligeramente distintas) y unificarlos bajo el nombre más claro y representativo.\n"
+            "Tu tarea es encontrar SUBTEMAS SINÓNIMOS o variaciones leves del MISMO asunto "
+            "(aunque usen palabras ligeramente distintas) y unificarlos bajo el nombre más claro.\n"
             "REGLAS:\n"
-            "1. NO fusiones temas que sean distintos (ej. 'Inversión en vías' y 'Mantenimiento de vías' son distintos).\n"
-            "2. SÍ fusiona sinónimos (ej. 'Lanzamiento de plataforma web' y 'Estreno de portal digital').\n"
+            "1. NO fusiones temas que sean hechos distintos "
+            "(ej. 'Inversión en vías' y 'Mantenimiento de vías' son distintos).\n"
+            "2. SÍ fusiona sinónimos y reformulaciones del mismo hecho "
+            "(ej. 'Lanzamiento de plataforma web' y 'Estreno de portal digital').\n"
             "3. Devuelve un objeto JSON donde las claves sean los subtemas originales y el valor sea el subtema unificado.\n\n"
             'Ejemplo de salida:\n'
             '{"Tendencias de consumo de pollo": "Tendencias de consumo de pollo", "Hábitos de compra de aves": "Tendencias de consumo de pollo"}'
@@ -2056,29 +2454,32 @@ class ClasificadorSubtema:
 
         et = [texto_para_embedding(titulos[i], resumenes[i]) for i in range(n)]
 
-        pbar.progress(0.05, "Fase 1 · Idénticas...")
+        pbar.progress(0.04, "Fase 1 · Idénticas...")
         dsu = DSU(n)
         self._paso1(titulos, resumenes, dsu)
-        
-        pbar.progress(0.12, "Fase 2 · Títulos...")
+
+        pbar.progress(0.08, "Fase 1b · Consistencia título/cuerpo...")
+        self._paso2c_consistencia(titulos, resumenes, dsu)
+
+        pbar.progress(0.12, "Fase 2 · Títulos / prefijos...")
         self._paso2(titulos, dsu)
 
         pbar.progress(0.18, "Embeddings...")
         ae = get_embeddings_batch(et)
 
         if u['usar_paso2b']:
-            pbar.progress(0.15, "Fase 2b · Keywords raras (con validación semántica)...")
+            pbar.progress(0.20, "Fase 2b · Keywords raras (con validación semántica)...")
             self._paso2b_keywords(titulos, dsu, ae)
 
-        pbar.progress(0.20, "Fase 3 · Clustering...")
-        self._paso3(et, ae, dsu, pbar, 0.20)
+        pbar.progress(0.22, "Fase 3 · Clustering...")
+        self._paso3(et, ae, dsu, pbar, 0.22)
 
         gf = dsu.grupos(n)
         ng = len(gf)
         pbar.progress(0.55, f"Fase 4 · Etiquetando {ng} grupos...")
         mapa = {}
         sg = sorted(gf.items(), key=lambda x: -len(x[1]))
-        subtemas_aprobados = [] 
+        subtemas_aprobados = []
         textos_por_subtema_aprobado = defaultdict(list)
 
         def _generar_etiqueta_segura(idxs):
@@ -2107,6 +2508,20 @@ class ClasificadorSubtema:
                         resumenes_grp,
                         subtemas_existentes=None
                     )
+            # Reutilizar etiqueta existente si es casi igual
+            et_norm = string_norm_label(etiqueta)
+            for ex in subtemas_aprobados:
+                if SequenceMatcher(None, et_norm, string_norm_label(ex)).ratio() >= 0.90:
+                    if _grupos_contenido_compatibles(
+                        textos_grp,
+                        textos_por_subtema_aprobado.get(ex, []),
+                        etiqueta,
+                        ex,
+                        min_sim=0.88,
+                        min_overlap=0.22,
+                    ):
+                        etiqueta = ex
+                        break
             if etiqueta not in subtemas_aprobados:
                 subtemas_aprobados.append(etiqueta)
             textos_por_subtema_aprobado[etiqueta].extend(textos_grp[:MAX_GRUPO_ETIQUETA])
@@ -2114,7 +2529,7 @@ class ClasificadorSubtema:
 
         for k, (lid, idxs) in enumerate(sg):
             if k % 10 == 0: pbar.progress(0.55 + 0.25 * (k / max(ng, 1)), f"Etiquetando {k + 1}/{ng}...")
-            
+
             if len(idxs) > MAX_GRUPO_ETIQUETA:
                 subgrupos = [idxs[i:i + MAX_GRUPO_ETIQUETA] for i in range(0, len(idxs), MAX_GRUPO_ETIQUETA)]
                 for sg_ in subgrupos:
@@ -2177,7 +2592,7 @@ class ClasificadorSubtema:
 
         pbar.progress(0.97, "Fase 8 · Dedup final...")
         subtemas = dedup_labels(subtemas, u['dedup_label'])
-        
+
         pbar.progress(0.99, "Consolidación final IA de sinónimos...")
         unicos_finales = list(dict.fromkeys(subtemas))
         if 1 < len(unicos_finales) <= 50:
@@ -2259,7 +2674,7 @@ class ClasificadorSubtema:
         return r
 
 # ======================================
-# TEMAS  
+# TEMAS
 # ======================================
 def _construir_representacion_grupo(subtema, textos_grupo, max_textos=30):
     palabras = []
@@ -2608,7 +3023,7 @@ def detectar_duplicados_avanzado(rows, km):
         streaming_url_raw = row.get(km["link_streaming"])
         if isinstance(streaming_url_raw, dict):
             streaming_url_raw = streaming_url_raw.get("url")
-            
+
         if streaming_url_raw and mencion:
             streaming_url_norm = _normalizar_url(str(streaming_url_raw))
             if streaming_url_norm:
@@ -2688,7 +3103,7 @@ def read_and_normalize_dossier(sheet, region_map, internet_map):
         'aire': 'Televisión', 'cable': 'Televisión',
         'revista': 'Revistas', 'revistas': 'Revistas',
     }
-    
+
     if 'Tipo de Medio' in df.columns:
         df['Tipo de Medio'] = (
             df['Tipo de Medio'].astype(str).str.lower().str.strip()
@@ -2702,7 +3117,6 @@ def read_and_normalize_dossier(sheet, region_map, internet_map):
     is_grafica = df['Tipo de Medio'].isin(['Prensa', 'Internet', 'Revistas'])
     is_internet = df['Tipo de Medio'] == 'Internet'
 
-    # --- Buscarv Región (Antes de cambiar el nombre en Medio) ---
     if 'Medio' in df.columns:
         raw_medios_clean = df['Medio'].astype(str).str.lower().str.strip()
         df['Región'] = raw_medios_clean.map(region_map).fillna("N/A")
@@ -2710,7 +3124,6 @@ def read_and_normalize_dossier(sheet, region_map, internet_map):
         df['Medio'] = 'N/A'
         df['Región'] = 'N/A'
 
-    # --- Buscarv Internet sobre Medio (Una vez mapeada la región) ---
     if 'Medio' in df.columns:
         df.loc[is_internet, 'Medio'] = (
             df.loc[is_internet, 'Medio']
@@ -2723,12 +3136,12 @@ def read_and_normalize_dossier(sheet, region_map, internet_map):
     df['Fecha'] = pd.to_datetime(df.get('Fecha', pd.Series(dtype=str)), dayfirst=True, errors='coerce').dt.normalize()
     df['Hora'] = df.get('Hora', pd.Series(dtype=str))
     df['Sección - Programa'] = df.get('Sección - Programa', pd.Series(dtype=str)).astype(str).apply(clean_text)
-    
+
     titulo_col = 'Título' if 'Título' in df.columns else 'Titulo'
     df['Título'] = df.get(titulo_col, pd.Series(dtype=str)).astype(str).apply(clean_text)
     df['Autor - Conductor'] = df.get('Autor - Conductor', pd.Series(dtype=str)).astype(str).apply(clean_text)
     df['Nro. Pagina'] = df.get('Nro. Pagina', pd.Series(dtype=str))
-    
+
     dim_col = 'Dimensioncm2' if 'Dimensioncm2' in df.columns else 'Dimensión'
     df['Dimensión'] = df.get(dim_col, pd.Series(dtype=str))
     df['Duración - Nro. Caracteres'] = df.get('Duración - Nro. Caracteres', pd.Series(dtype=str))
@@ -2759,7 +3172,7 @@ def read_and_normalize_dossier(sheet, region_map, internet_map):
 
     url_nota_av = df.get('URL Nota AV', df.get('Link Nota AV', pd.Series([''] * len(df))))
     url_streaming = df.get('URL (Streaming - Imagen)', pd.Series([''] * len(df)))
-    
+
     link_nota_final = []
     for val_av, val_str, is_av_row in zip(url_nota_av, url_streaming, is_av):
         if is_av_row:
@@ -2774,7 +3187,7 @@ def read_and_normalize_dossier(sheet, region_map, internet_map):
                 link_nota_final.append(val_str)
             else:
                 link_nota_final.append({"value": "Link", "url": val_str if val_str else None})
-                
+
     df['Link Nota'] = link_nota_final
 
     url_nota_raw = df.get('URL Nota', pd.Series([''] * len(df)))
@@ -2787,7 +3200,7 @@ def read_and_normalize_dossier(sheet, region_map, internet_map):
                 link_stream_final.append({"value": "Link", "url": val_url if val_url else None})
         else:
             link_stream_final.append(None)
-            
+
     df['Link (Streaming - Imagen)'] = link_stream_final
 
     menciones_av = df.get('Menciones - Empresa', pd.Series([''] * len(df))).fillna('').astype(str).apply(clean_text)
@@ -2810,29 +3223,29 @@ def generate_output_excel(rows, km):
     ]
     NUM = {"ID Noticia", "Nro. Pagina", "Dimensión", "Duración - Nro. Caracteres", "CPE", "Tier", "Audiencia"}
     ws.append(ORDER)
-    
+
     font_hyperlink = Font(color="000000", underline=None)
     align_left = Alignment(horizontal='left')
     font_header = Font(bold=True)
-    
+
     for i, col_name in enumerate(ORDER, start=1):
         cell = ws.cell(row=1, column=i)
         cell.font = font_header
 
     col_idx_map = {name: ORDER.index(name) + 1 for name in ORDER}
-        
+
     for row in rows:
         tk = km.get("titulo")
         if tk and tk in row: row[tk] = clean_title_for_output(row.get(tk))
         rk = km.get("resumen")
         if rk and rk in row: row[rk] = corregir_texto(row.get(rk))
-        
+
         out, links = [], {}
         for ci, h in enumerate(ORDER, start=1):
             dk = km.get(norm_key(h), norm_key(h))
             val = row.get(h)
             cv = None
-            
+
             if h == 'Fecha' and pd.notna(val):
                 if isinstance(val, pd.Timestamp):
                     cv = val.to_pydatetime()
@@ -2853,19 +3266,19 @@ def generate_output_excel(rows, km):
                     cv = str(val)
             out.append(cv)
         ws.append(out)
-        
+
         current_row = ws.max_row
         for ci, url in links.items():
             cell = ws.cell(row=current_row, column=ci)
             cell.hyperlink = url
             cell.font = font_hyperlink
             cell.alignment = align_left
-            
+
         date_col_idx = ORDER.index("Fecha") + 1
         date_cell = ws.cell(row=current_row, column=date_col_idx)
         if isinstance(date_cell.value, (datetime.datetime, datetime.date)):
             date_cell.number_format = 'DD/MM/YYYY'
-            
+
         cols_millares = ["Nro. Pagina", "Dimensión", "Duración - Nro. Caracteres", "Tier", "Audiencia"]
         for col_name in cols_millares:
             col_idx = col_idx_map[col_name]
@@ -2877,7 +3290,7 @@ def generate_output_excel(rows, km):
         cpe_cell = ws.cell(row=current_row, column=cpe_idx)
         if isinstance(cpe_cell.value, (int, float)):
             cpe_cell.number_format = '$#,##0'
-            
+
     for i, col_name in enumerate(ORDER, start=1):
         letter = ws.cell(row=1, column=i).column_letter
         if col_name in ['Título', 'Resumen - Aclaracion']:
@@ -2886,7 +3299,7 @@ def generate_output_excel(rows, km):
             ws.column_dimensions[letter].width = 15
         else:
             ws.column_dimensions[letter].width = 20
-            
+
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -2899,7 +3312,7 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
     st.session_state.update({'tokens_input': 0, 'tokens_output': 0, 'tokens_embedding': 0})
     get_embedding_cache().clear()
     t0 = time.time()
-    
+
     if "API" in mode:
         try:
             openai.api_key=st.secrets["OPENAI_API_KEY"]
@@ -2907,22 +3320,20 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
         except:
             st.error("OPENAI_API_KEY no encontrado.")
             st.stop()
-            
+
     with st.status("Paso 1 · Carga de Configuración y Dossier", expanded=True) as s:
         region_map, internet_map = load_config_from_sheets()
 
         wb_in = load_workbook(df_file, data_only=True)
         df_normalized = read_and_normalize_dossier(wb_in.active, region_map, internet_map)
 
-        # Detección de medios sin mapear (no aparecen en el Sheets de Regiones)
         medios_sin_region = sorted(set(
             df_normalized.loc[df_normalized['Región'] == 'N/A', 'Medio']
             .astype(str).str.strip()
         ) - {'', 'nan', 'None'})
         if medios_sin_region:
             st.session_state["medios_sin_mapear"] = medios_sin_region
-        
-        # Expansión por ; en Menciones - Empresa
+
         rows_expanded = []
         for idx, row_series in df_normalized.iterrows():
             menciones = [m.strip() for m in str(row_series['Menciones - Empresa']).split(';') if m.strip()]
@@ -2930,7 +3341,7 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
                 row_dict = row_series.to_dict()
                 row_dict['Menciones - Empresa'] = ""
                 row_dict['original_index'] = idx
-                row_dict['expanded_index'] = len(rows_expanded)  # ID de fila expandida único para mapeo
+                row_dict['expanded_index'] = len(rows_expanded)
                 row_dict['is_duplicate'] = False
                 rows_expanded.append(row_dict)
             else:
@@ -2938,7 +3349,7 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
                     row_dict = row_series.to_dict()
                     row_dict['Menciones - Empresa'] = m
                     row_dict['original_index'] = idx
-                    row_dict['expanded_index'] = len(rows_expanded)  # ID de fila expandida único para mapeo
+                    row_dict['expanded_index'] = len(rows_expanded)
                     row_dict['is_duplicate'] = False
                     rows_expanded.append(row_dict)
 
@@ -2968,22 +3379,22 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
             "menciones": "Menciones - Empresa",
             "idduplicada": "ID duplicada"
         }
-        
+
         rows = detectar_duplicados_avanzado(rows_expanded, km)
         for row in rows:
             if row["is_duplicate"]:
                 row["Tono IA"] = "Duplicada"
                 row["Tema"] = "-"
                 row["Subtema"] = "-"
-                
+
         s.update(label="✓ Paso 1 completado", state="complete")
-        
+
     with st.status("Paso 2 · Normalización", expanded=True) as s:
         s.update(label="✓ Paso 2 · Mapeos y normalizaciones aplicados", state="complete")
-        
+
     gc.collect()
     ta = [r for r in rows if not r.get("is_duplicate")]
-    
+
     if ta:
         df = pd.DataFrame(ta)
         df["_txt"] = df.apply(
@@ -2993,7 +3404,7 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
         with st.status("Embeddings...", expanded=True) as s:
             _ = get_embeddings_batch(df["_txt"].tolist())
             s.update(label=f"✓ {get_embedding_cache().stats()}", state="complete")
-            
+
         with st.status("Paso 3 · Tono (Reputación)", expanded=True) as s:
             pb = st.progress(0)
             if "PKL" in mode and tpkl:
@@ -3007,7 +3418,7 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
                 res = [{"tono": "N/A"}] * len(ta)
             df[km["tonoiai"]] = [r["tono"] for r in res]
             s.update(label="✓ Paso 3 · Tono (Reputación)", state="complete")
-            
+
         with st.status("Paso 4 · Clasificación", expanded=True) as s:
             pb = st.progress(0)
             if "Solo Modelos PKL" in mode:
@@ -3026,7 +3437,7 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
                 df[km["tema"]] = temas
             s.update(label="✓ Paso 4 · Clasificación", state="complete")
 
-        with st.status("Paso 4b · Consistencia entre republicaciones (Título/CuerpoEs)", expanded=True) as s:
+        with st.status("Paso 4b · Consistencia republicaciones (Título/CuerpoEs)", expanded=True) as s:
             pb = st.progress(0)
             df = aplicar_consistencia_intergrupo(
                 df,
@@ -3035,18 +3446,32 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
                 pbar=pb
             )
             s.update(label="✓ Paso 4b · Tono/Tema/Subtema unificados en republicaciones", state="complete")
-            
-        # Re-mapeo usando expanded_index para garantizar unicidad al indexar
+
+        with st.status("Paso 4c · Unificación de subtemas similares (anti-variantes)", expanded=True) as s:
+            pb = st.progress(0)
+            df = unificar_subtemas_similares_post(
+                df,
+                km_subtema=km["subtema"],
+                km_tema=km["tema"],
+                km_tono=km["tonoiai"],
+                km_titulo=km["titulo"],
+                km_resumen=km["resumen"],
+                marca=bn,
+                aliases=ba,
+                pbar=pb,
+            )
+            s.update(label="✓ Paso 4c · Subtemas afines fusionados con validación de contenido", state="complete")
+
         rm2 = df.set_index("expanded_index").to_dict("index")
         for idx, row in enumerate(rows):
             if not row.get("is_duplicate"):
                 row.update(rm2.get(row.get("expanded_index"), {}))
-                
+
     gc.collect()
     ci = (st.session_state['tokens_input']     / 1e6) * PRICE_INPUT_1M
     co = (st.session_state['tokens_output']    / 1e6) * PRICE_OUTPUT_1M
     ce = (st.session_state['tokens_embedding'] / 1e6) * PRICE_EMBEDDING_1M
-    
+
     with st.status("Paso 5 · Informe", expanded=True) as s:
         st.session_state["output_data"]     = generate_output_excel(rows, km)
         st.session_state["output_filename"] = f"Informe_IA_{bn.replace(' ', '_')}_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
@@ -3086,6 +3511,20 @@ async def run_quick_async(df, tc, sc, bn, al):
             km_titulo=tc, km_resumen=sc, pbar=pb
         )
         s.update(label="✓ Consistencia aplicada", state="complete")
+    with st.status("Unificación de subtemas similares", expanded=True) as s:
+        pb = st.progress(0)
+        df = unificar_subtemas_similares_post(
+            df,
+            km_subtema='Subtema',
+            km_tema='Tema',
+            km_tono='Tono IA',
+            km_titulo=tc,
+            km_resumen=sc,
+            marca=bn,
+            aliases=al,
+            pbar=pb,
+        )
+        s.update(label="✓ Subtemas afines unificados", state="complete")
     df.drop(columns=['_txt'], inplace=True)
     ci = (st.session_state['tokens_input']     / 1e6) * PRICE_INPUT_1M
     co = (st.session_state['tokens_output']    / 1e6) * PRICE_OUTPUT_1M
@@ -3177,7 +3616,7 @@ def main():
         <div class="app-header-icon">◈</div>
         <div class="app-header-text">
             <div class="app-header-title">Análisis de Noticias - API</div>
-            <div class="app-header-version">v18.3 · Consistencia ultra-precisa Título/CuerpoEs · 😼 Realizado por Johnathan Cortés 🕵️‍♂️ </div>
+            <div class="app-header-version">v18.4 · Ultra-consistencia Título/CuerpoEs + fusión segura de subtemas · 😼 Johnathan Cortés 🕵️‍♂️ </div>
         </div>
         <div class="app-header-badge">IA</div>
     </div>""", unsafe_allow_html=True)
@@ -3244,8 +3683,10 @@ def main():
                     f'· MinTema={UMBRAL_MIN_PERTENENCIA_TEMA} · MaxGrupo={MAX_GRUPO_ETIQUETA} · '
                     f'<b>Coherencia={UMBRAL_COHERENCIA_ETIQUETA}</b> · '
                     f'<b>SimMin={SIM_MINIMA_AGRUPACION_SUBTEMA}</b> (adaptativos según n) · '
-                    f'<b>Consistencia Título={UMBRAL_SIM_TITULO_CONSIST}/{UMBRAL_EMB_TITULO_CONSIST}</b> · '
-                    f'<b>Consistencia Cuerpo={UMBRAL_SIM_CUERPO_CONSIST}/{UMBRAL_EMB_CUERPO_CONSIST}</b>'
+                    f'<b>Consist Tít={UMBRAL_SIM_TITULO_CONSIST}/{UMBRAL_EMB_TITULO_CONSIST}</b> · '
+                    f'<b>Consist Cuerpo={UMBRAL_SIM_CUERPO_CONSIST}/{UMBRAL_EMB_CUERPO_CONSIST}</b> · '
+                    f'<b>PostFusión Etq/Cont={UMBRAL_FUSION_ETIQUETA_POST}/{UMBRAL_FUSION_CONTENIDO_POST}</b> · '
+                    f'<b>NearDup={UMBRAL_NEAR_DUP_CONTENT}</b>'
                     f'</div>',
                     unsafe_allow_html=True
                 )
@@ -3311,7 +3752,7 @@ def main():
         render_quick_tab()
 
     st.markdown(
-        '<div class="footer">v18.3 · Análisis de Noticias con IA · Consistencia ultra-precisa · Johnathan Cortés ©</div>',
+        '<div class="footer">v18.4 · Análisis de Noticias con IA · Ultra-consistencia + fusión segura · Johnathan Cortés ©</div>',
         unsafe_allow_html=True
     )
 
