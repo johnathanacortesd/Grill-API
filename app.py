@@ -240,7 +240,6 @@ def corregir_tildes(texto: str) -> str:
             resultado.append(p)
     return " ".join(resultado)
 
-
 # ======================================
 # CSS
 # ======================================
@@ -484,18 +483,6 @@ def get_embedding_cache():
 # ======================================
 # Configuración vía Google Sheets (CSV público)
 # ======================================
-# En Google Sheets: Archivo > Compartir > Publicar en la web > eliges la hoja
-# "Regiones" (o "Internet") > formato CSV > copias la URL resultante y la
-# guardas en .streamlit/secrets.toml (o en la config de Secrets de Streamlit
-# Cloud) así:
-#
-# REGIONES_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-xxxx/pub?gid=0&single=true&output=csv"
-# INTERNET_CSV_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-xxxx/pub?gid=123456&single=true&output=csv"
-#
-# Cada hoja debe tener 2 columnas: la primera con el nombre del medio y la
-# segunda con el valor mapeado (región o nombre normalizado de internet).
-# Mantiene el mismo orden de columnas que ya usaba el Configuracion.xlsx anterior.
-
 CONFIG_CACHE_TTL = 300  # segundos; súbelo si tu Sheet cambia poco, bájalo si necesitas ver cambios casi al instante
 
 @st.cache_data(ttl=CONFIG_CACHE_TTL, show_spinner=False)
@@ -1553,7 +1540,6 @@ class ClasificadorSubtema:
         ck = hashlib.md5(("|".join(tn[:12]) + f"#{len(titulos_grp)}#{existentes_key}").encode()).hexdigest()
         if ck in self._cache: return self._cache[ck]
 
-        # MODIFICACIÓN APLICADA: Se asegura que t se convierta a str y no sea un valor nulo (NaN de pandas) antes de hacer el slice
         tm = list(dict.fromkeys(str(t)[:130] for t in titulos_grp if pd.notna(t) and str(t).strip() and str(t).strip().lower() != 'nan'))[:6]
         
         rm = [str(r)[:200] for r in resumenes_grp[:3] if r and len(str(r)) > 20]
@@ -2899,6 +2885,215 @@ def render_quick_tab():
             st.rerun()
 
 # ======================================
+# Análisis Libre (Conserva el Excel Original)
+# ======================================
+async def run_libre_async(file_bytes, col_titulo, col_resumen, marca, aliases, mode, tpkl, epkl):
+    st.session_state.update({'tokens_input': 0, 'tokens_output': 0, 'tokens_embedding': 0})
+    get_embedding_cache().clear()
+    
+    # 1. Leer archivo base con openpyxl para extraer info (1 a 1 con las filas)
+    wb_in = load_workbook(io.BytesIO(file_bytes), data_only=True)
+    ws_in = wb_in.active
+    
+    headers = [cell.value for cell in ws_in[1]]
+    try:
+        idx_titulo = headers.index(col_titulo)
+        idx_resumen = headers.index(col_resumen)
+    except ValueError:
+        st.error(f"No se encontraron las columnas '{col_titulo}' o '{col_resumen}' en la primera fila del archivo.")
+        return None
+        
+    titulos = []
+    resumenes = []
+    
+    # Extraemos iterando por cada fila de la hoja original a partir de la fila 2
+    for row in ws_in.iter_rows(min_row=2):
+        t_val = row[idx_titulo].value if idx_titulo < len(row) else ""
+        r_val = row[idx_resumen].value if idx_resumen < len(row) else ""
+        titulos.append(str(t_val).strip() if t_val is not None else "")
+        resumenes.append(str(r_val).strip() if r_val is not None else "")
+        
+    textos_para_emb = [texto_para_embedding(t, r) for t, r in zip(titulos, resumenes)]
+    series_titulos = pd.Series(titulos)
+    series_resumenes = pd.Series(resumenes)
+    series_textos = pd.Series(textos_para_emb)
+
+    # 2. Setup API
+    if "API" in mode:
+        try:
+            openai.api_key = st.secrets["OPENAI_API_KEY"]
+            openai.aiosession.set(None)
+        except:
+            st.error("OPENAI_API_KEY no encontrada.")
+            return None
+
+    # 3. Embeddings
+    with st.status("Generando Embeddings...", expanded=True) as s:
+        _ = get_embeddings_batch(textos_para_emb)
+        s.update(label=f"✓ Embeddings listos", state="complete")
+
+    # 4. Tono
+    with st.status("Analizando Tono...", expanded=True) as s:
+        pb = st.progress(0)
+        if "PKL" in mode and tpkl is not None:
+            res_tono_raw = analizar_tono_con_pkl(textos_para_emb, tpkl)
+            lista_tonos = [r["tono"] for r in res_tono_raw] if res_tono_raw else ["N/A"] * len(textos_para_emb)
+        elif "API" in mode:
+            res_tono_raw = await ClasificadorTono(marca, aliases).procesar_lote_async(
+                series_textos, pb, series_resumenes, series_titulos
+            )
+            lista_tonos = [r["tono"] for r in res_tono_raw]
+        else:
+            lista_tonos = ["N/A"] * len(textos_para_emb)
+        s.update(label="✓ Tono completado", state="complete")
+
+    # 5. Temas y Subtemas
+    with st.status("Clasificando Temas y Subtemas...", expanded=True) as s:
+        pb = st.progress(0)
+        if "Solo Modelos PKL" in mode:
+            lista_subtemas = ["N/A"] * len(textos_para_emb)
+            if epkl is not None:
+                lista_temas = analizar_temas_con_pkl(textos_para_emb, epkl) or ["N/A"] * len(textos_para_emb)
+            else:
+                lista_temas = ["N/A"] * len(textos_para_emb)
+        else:
+            lista_subtemas = ClasificadorSubtema(marca, aliases).procesar_lote(
+                series_textos, pb, series_resumenes, series_titulos
+            )
+            if "PKL" in mode and epkl is not None:
+                tp = analizar_temas_con_pkl(textos_para_emb, epkl)
+                lista_temas = _unificar_tema_por_subtema(tp, lista_subtemas) if tp else ["N/A"] * len(textos_para_emb)
+            else:
+                lista_temas = consolidar_temas(lista_subtemas, textos_para_emb, pb)
+        s.update(label="✓ Clasificación completada", state="complete")
+
+    # Calcular costo
+    ci = (st.session_state['tokens_input']     / 1e6) * PRICE_INPUT_1M
+    co = (st.session_state['tokens_output']    / 1e6) * PRICE_OUTPUT_1M
+    ce = (st.session_state['tokens_embedding'] / 1e6) * PRICE_EMBEDDING_1M
+    st.session_state['libre_cost'] = f"${ci + co + ce:.4f} USD"
+
+    # 6. Escribir resultados sobre una copia intacta del archivo original
+    with st.status("Generando archivo final...", expanded=True) as s:
+        # Cargar sin data_only preserva colores, fuentes, formulas
+        wb_out = load_workbook(io.BytesIO(file_bytes))
+        ws_out = wb_out.active
+        
+        max_col = ws_out.max_column
+        col_tono = max_col + 1
+        col_tema = max_col + 2
+        col_subtema = max_col + 3
+        
+        # Headers
+        ws_out.cell(row=1, column=col_tono, value="Tono")
+        ws_out.cell(row=1, column=col_tema, value="Tema")
+        ws_out.cell(row=1, column=col_subtema, value="Subtema")
+        
+        header_font = Font(bold=True)
+        ws_out.cell(row=1, column=col_tono).font = header_font
+        ws_out.cell(row=1, column=col_tema).font = header_font
+        ws_out.cell(row=1, column=col_subtema).font = header_font
+        
+        # Rellenar la data
+        for idx in range(len(lista_tonos)):
+            row_idx = idx + 2 # openpyxl es 1-based, fila 1 es header
+            ws_out.cell(row=row_idx, column=col_tono, value=lista_tonos[idx])
+            ws_out.cell(row=row_idx, column=col_tema, value=lista_temas[idx])
+            ws_out.cell(row=row_idx, column=col_subtema, value=lista_subtemas[idx])
+            
+        buf = io.BytesIO()
+        wb_out.save(buf)
+        s.update(label="✓ Archivo generado conservando el formato original", state="complete")
+        
+    return buf.getvalue()
+
+
+def render_libre_tab():
+    st.markdown('<div class="sec-label">Análisis Libre (Conserva el formato original del XLSX)</div>', unsafe_allow_html=True)
+    
+    if 'libre_result' in st.session_state:
+        st.markdown(
+            '<div class="success-banner"><div class="success-icon">✓</div>'
+            '<div><div class="success-title">Completado</div>'
+            '<div class="success-sub">Se agregaron Tono, Tema y Subtema al final de tu archivo.</div></div></div>',
+            unsafe_allow_html=True
+        )
+        st.metric("Costo Estimado", st.session_state.get('libre_cost', "$0.00"))
+        
+        st.download_button(
+            "Descargar Archivo Analizado",
+            data=st.session_state.libre_result,
+            file_name=f"Analisis_{st.session_state.libre_name}",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            type="primary"
+        )
+        
+        if st.button("Hacer un nuevo Análisis Libre"):
+            for k in ('libre_result', 'libre_df_cols', 'libre_name', 'libre_cost', 'libre_bytes'):
+                if k in st.session_state:
+                    del st.session_state[k]
+            st.rerun()
+        return
+
+    f = st.file_uploader("Sube tu archivo .xlsx (Cualquier formato)", type=["xlsx"], key="libre_file")
+    if f:
+        if 'libre_bytes' not in st.session_state or st.session_state.get('libre_name') != f.name:
+            bytes_data = f.getvalue()
+            st.session_state.libre_bytes = bytes_data
+            
+            # Usamos pandas solo para extraer rápido los nombres de las columnas en la UI
+            try:
+                df_temp = pd.read_excel(io.BytesIO(bytes_data))
+                st.session_state.libre_df_cols = df_temp.columns.tolist()
+                st.session_state.libre_name = f.name
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error leyendo columnas del archivo: {e}")
+
+    if 'libre_df_cols' in st.session_state:
+        st.success(f"Archivo cargado: **{st.session_state.libre_name}**")
+        cols = st.session_state.libre_df_cols
+        
+        with st.form("libre_form"):
+            c1, c2 = st.columns(2)
+            col_titulo = c1.selectbox("¿Qué columna contiene el Título?", cols, index=0)
+            col_resumen = c2.selectbox("¿Qué columna contiene el Resumen/Cuerpo?", cols, index=1 if len(cols) > 1 else 0)
+
+            c3, c4 = st.columns(2)
+            bn = c3.text_input("Marca Principal", placeholder="Ej: Bancolombia")
+            bat = c4.text_input("Alias (separados por ;)", placeholder="Ej: Grupo Bancolombia;Ban")
+
+            st.markdown('<hr/>', unsafe_allow_html=True)
+            mode = st.radio("Modo de análisis", ["API de OpenAI", "Híbrido (PKL + API)", "Solo Modelos PKL"], index=0, horizontal=True)
+
+            tpkl, epkl = None, None
+            if "PKL" in mode:
+                p1, p2 = st.columns(2)
+                tpkl = p1.file_uploader("Modelo de Sentimiento (.pkl) opcional", type=["pkl"], key="libre_tpkl")
+                epkl = p2.file_uploader("Modelo de Temas (.pkl) opcional", type=["pkl"], key="libre_epkl")
+
+            if st.form_submit_button("Analizar y Conservar Formato", type="primary", use_container_width=True):
+                if not bn:
+                    st.error("Debes indicar la marca principal.")
+                else:
+                    al = [a.strip() for a in bat.split(";") if a.strip()]
+                    with st.spinner("Procesando análisis libre..."):
+                        st.session_state.libre_result = asyncio.run(
+                            run_libre_async(
+                                st.session_state.libre_bytes,
+                                col_titulo,
+                                col_resumen,
+                                bn,
+                                al,
+                                mode,
+                                tpkl,
+                                epkl
+                            )
+                        )
+                    st.rerun()
+
+# ======================================
 # Main
 # ======================================
 def main():
@@ -2915,7 +3110,7 @@ def main():
         <div class="app-header-badge">IA</div>
     </div>""", unsafe_allow_html=True)
 
-    tab1, tab2 = st.tabs(["Análisis Completo", "Análisis Rápido"])
+    tab1, tab2, tab3 = st.tabs(["Análisis Completo", "Análisis Rápido", "Análisis Libre (Cualquier Formato)"])
 
     with tab1:
         if not st.session_state.get("processing_complete", False):
@@ -3040,6 +3235,9 @@ def main():
 
     with tab2:
         render_quick_tab()
+        
+    with tab3:
+        render_libre_tab()
 
     st.markdown(
         '<div class="footer">v18.2 · Análisis de Noticias con IA · Johnathan Cortés ©</div>',
