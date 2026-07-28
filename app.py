@@ -774,8 +774,10 @@ def clean_cuerpo(text):
     if not isinstance(text, str) or text.strip() == '':
         return text
     text = convert_html_entities(text)
-    text = re.sub(r'<br\s*/?>', '\n', text, flags=re.IGNORECASE)
+    text = re.sub(r'<br\s*/?>', ' ', text, flags=re.IGNORECASE)
     text = re.sub(r'<[^>]+>', '', text)
+    text = re.sub(r'[\r\n]+', ' ', text)
+    text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
 
@@ -805,7 +807,7 @@ def corregir_texto(text):
     text = re.sub(r"(<br>|\[\.\.\.\]|\s+)", " ", text).strip()
     m = re.search(r"[A-ZÁÉÍÓÚÑ]", text)
     if m: text = text[m.start():]
-    if text and not text.endswith("..."): text = text.rstrip(".") + "..."
+    text = re.sub(r"\.\.\.+$", "", text).strip()
     return text
 
 def normalizar_tipo_medio(tipo_raw):
@@ -2468,20 +2470,7 @@ def read_and_normalize_dossier(sheet, region_map, internet_map):
     df['Temas Generales - Tema'] = df.get('Temas Generales - Tema', pd.Series(dtype=str)).astype(str).apply(clean_text)
 
     cuerpo_col = 'CuerpoEs' if 'CuerpoEs' in df.columns else 'Resumen - Aclaracion'
-    cuerpo_cleaned = df.get(cuerpo_col, pd.Series([''] * len(df))).astype(str).apply(clean_cuerpo)
-
-    def fmt_grafica(text):
-        if not isinstance(text, str) or not text.strip():
-            return text
-        parrafos = [p.strip() for p in text.split('\n') if p.strip()]
-        return '\n\n'.join(parrafos) if len(parrafos) > 1 else text
-
-    df['Resumen - Aclaracion'] = np.where(is_av, cuerpo_cleaned, cuerpo_cleaned.apply(fmt_grafica))
-
-    # ── ADICIÓN: columna con el CuerpoEs COMPLETO, sin truncar ──────────────
-    # Se guarda tal cual queda cuerpo_cleaned (HTML limpio, <br> -> saltos de línea),
-    # SIN pasar por corregir_texto() (que es lo que recorta/añade "..." al final).
-    df['Cuerpo Completo'] = cuerpo_cleaned
+    df['Resumen - Aclaracion'] = df.get(cuerpo_col, pd.Series([''] * len(df))).astype(str).apply(clean_cuerpo)
 
     url_nota_av = df.get('URL Nota AV', df.get('Link Nota AV', pd.Series([''] * len(df))))
     url_streaming = df.get('URL (Streaming - Imagen)', pd.Series([''] * len(df)))
@@ -2532,8 +2521,7 @@ def generate_output_excel(rows, km):
         "Nro. Pagina", "Dimensión", "Duración - Nro. Caracteres",
         "CPE", "Tier", "Audiencia", "Tono", "Tono IA", "Tema", "Subtema",
         "Link Nota", "Resumen - Aclaracion", "Link (Streaming - Imagen)", "Menciones - Empresa",
-        "ID duplicada",
-        "Cuerpo Completo"   # ── ADICIÓN: columna final con el CuerpoEs completo, sin truncar ──
+        "ID duplicada"
     ]
     NUM = {"ID Noticia", "Nro. Pagina", "Dimensión", "Duración - Nro. Caracteres", "CPE", "Tier", "Audiencia"}
     ws.append(ORDER)
@@ -2607,7 +2595,7 @@ def generate_output_excel(rows, km):
             
     for i, col_name in enumerate(ORDER, start=1):
         letter = ws.cell(row=1, column=i).column_letter
-        if col_name in ['Título', 'Resumen - Aclaracion', 'Cuerpo Completo']:
+        if col_name in ['Título', 'Resumen - Aclaracion']:
             ws.column_dimensions[letter].width = 50
         elif col_name in ['Link Nota', 'Link (Streaming - Imagen)']:
             ws.column_dimensions[letter].width = 15
