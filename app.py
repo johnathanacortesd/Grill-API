@@ -2478,6 +2478,11 @@ def read_and_normalize_dossier(sheet, region_map, internet_map):
 
     df['Resumen - Aclaracion'] = np.where(is_av, cuerpo_cleaned, cuerpo_cleaned.apply(fmt_grafica))
 
+    # ── ADICIÓN: columna con el CuerpoEs COMPLETO, sin truncar ──────────────
+    # Se guarda tal cual queda cuerpo_cleaned (HTML limpio, <br> -> saltos de línea),
+    # SIN pasar por corregir_texto() (que es lo que recorta/añade "..." al final).
+    df['Cuerpo Completo'] = cuerpo_cleaned
+
     url_nota_av = df.get('URL Nota AV', df.get('Link Nota AV', pd.Series([''] * len(df))))
     url_streaming = df.get('URL (Streaming - Imagen)', pd.Series([''] * len(df)))
     
@@ -2527,7 +2532,8 @@ def generate_output_excel(rows, km):
         "Nro. Pagina", "Dimensión", "Duración - Nro. Caracteres",
         "CPE", "Tier", "Audiencia", "Tono", "Tono IA", "Tema", "Subtema",
         "Link Nota", "Resumen - Aclaracion", "Link (Streaming - Imagen)", "Menciones - Empresa",
-        "ID duplicada"
+        "ID duplicada",
+        "Cuerpo Completo"   # ── ADICIÓN: columna final con el CuerpoEs completo, sin truncar ──
     ]
     NUM = {"ID Noticia", "Nro. Pagina", "Dimensión", "Duración - Nro. Caracteres", "CPE", "Tier", "Audiencia"}
     ws.append(ORDER)
@@ -2601,7 +2607,7 @@ def generate_output_excel(rows, km):
             
     for i, col_name in enumerate(ORDER, start=1):
         letter = ws.cell(row=1, column=i).column_letter
-        if col_name in ['Título', 'Resumen - Aclaracion']:
+        if col_name in ['Título', 'Resumen - Aclaracion', 'Cuerpo Completo']:
             ws.column_dimensions[letter].width = 50
         elif col_name in ['Link Nota', 'Link (Streaming - Imagen)']:
             ws.column_dimensions[letter].width = 15
