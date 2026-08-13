@@ -46,6 +46,8 @@ Los subtemas se limpian y limitan a un máximo de cinco palabras, sin frases inc
 
 `Marca principal` es el eje obligatorio del análisis. El motor busca el nombre completo, sus alias y coincidencias distintivas relacionadas en `Título` y `Resumen - Aclaración`. El tono mide exclusivamente el impacto reputacional sobre esa marca; el tema y el subtema describen el hecho relacionado con ella. Una etiqueta que sea solamente el nombre de la marca, una versión incompleta del nombre o una frase genérica se rechaza y se regenera.
 
+Las validaciones no contienen nombres ni reglas especiales para clientes concretos. El mecanismo es reutilizable: separa los tokens de cualquier `Marca principal`, identifica el tipo de acontecimiento y conserva las palabras que describen su objeto. Por ejemplo, puede formar etiquetas como `Lanzamiento de carrera deportiva`, `Convenio de formación profesional` o `Investigación por fallas operativas`, según el contenido de cada noticia.
+
 - **Ingesta Multi-fuente:** Captura y normalización de artículos desde RSS, sitios web y conectores de API.
 - **Análisis de Sentimientos:** Clasificación automatizada de titulares y contenido en espectros positivo, neutro y negativo.
 - **Extracción de Entidades y Palabras Clave:** Detección de organizaciones, personajes públicos y términos recurrentes.
