@@ -44,8 +44,9 @@ OPENAI_MODEL_EMBEDDING     = "text-embedding-3-small"
 OPENAI_MODEL_CLASIFICACION = "gpt-4.1-nano-2025-04-14"
 
 CONCURRENT_REQUESTS          = 50
-SIMILARITY_THRESHOLD_TONO    = 0.96  # El tono solo se hereda entre republicaciones casi idénticas.
-SIMILARITY_THRESHOLD_TITULOS = 0.94
+SIMILARITY_THRESHOLD_TONO    = 0.94
+SIMILARITY_THRESHOLD_TITULOS = 0.92
+MAX_PALABRAS_SUBTEMA         = 5
 
 # ── Umbrales base (corpus grande ≥ 20 noticias) ──────────────────────────────
 UMBRAL_SUBTEMA = 0.78
@@ -597,7 +598,7 @@ def limpiar_tema(tema):
     tema = tema.strip().strip('"\'')
     for px in ["subtema:", "tema:", "categoría:", "categoria:", "category:"]:
         if tema.lower().startswith(px): tema = tema[len(px):].strip()
-    tema = _recortar_frase_completa(tema, max_palabras=7)
+    tema = _recortar_frase_completa(tema, max_palabras=MAX_PALABRAS_SUBTEMA)
     return capitalizar_etiqueta(tema) if tema else "Sin tema"
 
 def limpiar_tema_geografico(tema, marca, aliases):
@@ -705,7 +706,7 @@ def _grupos_contenido_compatibles(
 
 def _validar_estructura_subtema(etiqueta: str) -> bool:
     if not etiqueta or len(etiqueta.split()) < 2: return False
-    if len(etiqueta.split()) > 7: return False
+    if len(etiqueta.split()) > MAX_PALABRAS_SUBTEMA: return False
     if _PATRON_TITULAR.match(etiqueta): return False
     if _PATRON_ESTADO.search(etiqueta): return False
     palabras = etiqueta.split()
@@ -1182,6 +1183,72 @@ def seleccionar_representante(indices, textos):
     best = int(np.argmax(cosine_similarity(np.array(M), centro)))
     return idxs[best], textos[idxs[best]]
 
+def construir_grupos_consistentes(titulos, resumenes):
+    """Agrupa republicaciones y notas equivalentes con criterios conservadores."""
+    titulos = [str(x or "") for x in titulos]
+    resumenes = [str(x or "") for x in resumenes]
+    textos = [texto_para_embedding(t, r) for t, r in zip(titulos, resumenes)]
+    n = len(textos)
+    dsu = DSU(n)
+    embs = get_embeddings_batch(textos)
+    norm = [normalize_title_for_comparison(t) for t in titulos]
+
+    # Bloqueo por palabras distintivas para evitar una comparación O(n²) completa.
+    indice = defaultdict(set)
+    for i, titulo in enumerate(norm):
+        for token in _tokens_distintivos(titulo):
+            indice[token].add(i)
+    pares = set()
+    for idxs in indice.values():
+        if len(idxs) > 100:
+            continue
+        orden = sorted(idxs)
+        pares.update((orden[a], orden[b]) for a in range(len(orden)) for b in range(a + 1, len(orden)))
+
+    for i, j in pares:
+        if _hay_conflicto_accion(textos[i], textos[j]):
+            continue
+        title_sim = SequenceMatcher(None, norm[i], norm[j]).ratio() if norm[i] and norm[j] else 0.0
+        overlap = _overlap_distintivo(textos[i], textos[j])
+        semantic = 0.0
+        if embs[i] is not None and embs[j] is not None:
+            semantic = cosine_similarity(
+                np.array(embs[i]).reshape(1, -1), np.array(embs[j]).reshape(1, -1)
+            )[0][0]
+        if title_sim >= SIMILARITY_THRESHOLD_TITULOS or (semantic >= SIMILARITY_THRESHOLD_TONO and overlap >= 0.45):
+            dsu.union(i, j)
+    return dsu.grupos(n)
+
+def aplicar_consistencia_grupos(df, titulo_col, resumen_col,
+                                tono_col="Tono IA", tema_col="Tema", subtema_col="Subtema"):
+    """Propaga una clasificación canónica a cada grupo de noticias equivalentes."""
+    if df.empty:
+        return df
+    grupos = construir_grupos_consistentes(df[titulo_col].fillna(''), df[resumen_col].fillna(''))
+    df = df.copy()
+    df["Grupo noticia"] = ""
+    for numero, idxs in enumerate(grupos.values(), start=1):
+        gid = f"G{numero:05d}"
+        for i in idxs:
+            df.at[df.index[i], "Grupo noticia"] = gid
+        if len(idxs) < 2:
+            continue
+        for col in (tono_col, tema_col, subtema_col):
+            if col not in df.columns:
+                continue
+            valores = [str(df.iloc[i][col]).strip() for i in idxs]
+            validos = [v for v in valores if v and v.lower() not in {"nan", "n/a", "-", "sin tema"}]
+            if validos:
+                canonico = Counter(validos).most_common(1)[0][0]
+                for i in idxs:
+                    df.at[df.index[i], col] = canonico
+    if subtema_col in df.columns:
+        df[subtema_col] = df[subtema_col].apply(
+            lambda x: capitalizar_etiqueta(_recortar_frase_completa(str(x), MAX_PALABRAS_SUBTEMA))
+            if str(x).strip().lower() not in {"", "nan", "n/a", "-"} else x
+        )
+    return df
+
 
 # ======================================
 # TONO (Sistema Reputacional por IA)
@@ -1568,7 +1635,7 @@ class ClasificadorSubtema:
 
         prompt = (
             "Eres editor jefe de un periódico. "
-            "Genera UN subtema periodístico (4-7 palabras) que sea una FRASE NOMINAL "
+            "Genera UN subtema periodístico (3-5 palabras) que sea una FRASE NOMINAL "
             "— sin sujeto ni verbo conjugado — para este grupo de noticias.\n\n"
             "TÍTULOS:\n" + "\n".join(f"  · {t}" for t in tm)
             + ctx_resumenes
@@ -1692,7 +1759,7 @@ class ClasificadorSubtema:
         ) if prohibir_verbos else ""
 
         prompt = (
-            "Eres editor jefe. Genera UN subtema periodístico (4-7 palabras) "
+            "Eres editor jefe. Genera UN subtema periodístico (3-5 palabras) "
             "como frase nominal sin verbo conjugado.\n\n"
             f"Títulos: {' | '.join(titulos[:5])}{ctx}\n"
             f"Keywords: {kw}\n\n"
@@ -2530,7 +2597,7 @@ def generate_output_excel(rows, km):
         "ID Noticia", "Fecha", "Hora", "Medio", "Tipo de Medio",
         "Sección - Programa", "Región", "Título", "Autor - Conductor",
         "Nro. Pagina", "Dimensión", "Duración - Nro. Caracteres",
-        "CPE", "Tier", "Audiencia", "Tono", "Tono IA", "Tema", "Subtema",
+        "CPE", "Tier", "Audiencia", "Tono", "Tono IA", "Tema", "Subtema", "Grupo noticia",
         "Link Nota", "Resumen - Aclaracion", "Link (Streaming - Imagen)", "Menciones - Empresa",
         "ID duplicada",
         "Cuerpo Completo"   # ── ADICIÓN: columna final con el CuerpoEs completo, sin truncar ──
@@ -2749,6 +2816,8 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
                 if tp: df[km["tema"]] = tp
             else:
                 df[km["tema"]] = temas
+            df = aplicar_consistencia_grupos(df, km["titulo"], km["resumen"],
+                                             km["tonoiai"], km["tema"], km["subtema"])
             s.update(label="✓ Paso 4 · Clasificación", state="complete")
             
         rm2 = df.set_index("expanded_index").to_dict("index")
@@ -2792,6 +2861,7 @@ async def run_quick_async(df, tc, sc, bn, al):
         df['Subtema'] = subtemas
         temas = consolidar_temas(subtemas, df["_txt"].tolist(), pb)
         df['Tema'] = temas
+        df = aplicar_consistencia_grupos(df, tc, sc)
         s.update(label="✓ Clasificación", state="complete")
     df.drop(columns=['_txt'], inplace=True)
     ci = (st.session_state['tokens_input']     / 1e6) * PRICE_INPUT_1M
@@ -2944,6 +3014,7 @@ async def run_custom_excel_async(file_bytes, tc, sc, bn, al, mode="API de OpenAI
 
         df['Subtema'] = subtemas
         df['Tema']    = temas
+        df = aplicar_consistencia_grupos(df, tc, sc)
         s.update(label="✓ Clasificación completada", state="complete")
 
     # Escribir las 3 columnas adicionales al final en la hoja openpyxl respetando el formato original
