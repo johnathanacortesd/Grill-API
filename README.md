@@ -44,6 +44,8 @@ El pipeline crea un identificador `Grupo noticia` para republicaciones y noticia
 
 Los subtemas se limpian y limitan a un máximo de cinco palabras, sin frases incompletas, verbos conjugados ni etiquetas genéricas. Las filas marcadas como duplicadas conservan su relación mediante `ID duplicada`; las filas equivalentes no eliminadas conservan toda su clasificación y el nuevo `Grupo noticia`.
 
+`Marca principal` es el eje obligatorio del análisis. El motor busca el nombre completo, sus alias y coincidencias distintivas relacionadas en `Título` y `Resumen - Aclaración`. El tono mide exclusivamente el impacto reputacional sobre esa marca; el tema y el subtema describen el hecho relacionado con ella. Una etiqueta que sea solamente el nombre de la marca, una versión incompleta del nombre o una frase genérica se rechaza y se regenera.
+
 - **Ingesta Multi-fuente:** Captura y normalización de artículos desde RSS, sitios web y conectores de API.
 - **Análisis de Sentimientos:** Clasificación automatizada de titulares y contenido en espectros positivo, neutro y negativo.
 - **Extracción de Entidades y Palabras Clave:** Detección de organizaciones, personajes públicos y términos recurrentes.
