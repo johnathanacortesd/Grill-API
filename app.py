@@ -720,6 +720,22 @@ def _validar_estructura_subtema(etiqueta: str) -> bool:
         if not tiene_nexo: return False
     return True
 
+def _es_nombre_o_fragmento_marca(etiqueta: str, marca: str, aliases=None) -> bool:
+    """Detecta etiquetas que solo repiten total o parcialmente el nombre de la marca."""
+    vacias = {"de", "del", "la", "el", "los", "las", "y", "e", "grupo"}
+    tokens_etiqueta = {t for t in _normalizar_mencion(etiqueta).split() if t not in vacias}
+    if not tokens_etiqueta:
+        return True
+    for nombre in [marca] + list(aliases or []):
+        tokens_marca = {t for t in _normalizar_mencion(nombre).split() if t not in vacias}
+        if not tokens_marca:
+            continue
+        comunes = tokens_etiqueta & tokens_marca
+        # Rechaza cualquier etiqueta compuesta casi exclusivamente por tokens de la marca.
+        if len(comunes) >= 2 and len(comunes) / len(tokens_etiqueta) >= 0.70:
+            return True
+    return False
+
 def extract_link(cell):
     if hasattr(cell, "hyperlink") and cell.hyperlink:
         return {"value": "Link", "url": cell.hyperlink.target}
@@ -1728,9 +1744,7 @@ class ClasificadorSubtema:
                          "información", "informacion", "eventos", "varios", "sin tema",
                          "actividad corporativa", "gestion corporativa"}
             es_gen = string_norm_label(et) in {string_norm_label(g) for g in genericas}
-            es_solo_marca = string_norm_label(et) in {
-                string_norm_label(n) for n in [self.marca] + self.aliases if n
-            }
+            es_solo_marca = _es_nombre_o_fragmento_marca(et, self.marca, self.aliases)
             es_rob = _es_robotico(et)
 
             if es_gen or es_solo_marca or es_rob or len(et.split()) < 3:
@@ -1745,6 +1759,10 @@ class ClasificadorSubtema:
                 et, titulos_grp=titulos_grp, resumenes_grp=resumenes_grp,
                 marca=self.marca, aliases=self.aliases, fallback_fn=self._fallback
             )
+            if _es_nombre_o_fragmento_marca(et, self.marca, self.aliases):
+                et = self._refinar(tm, kw, rm, forzar_preposicion=True, prohibir_verbos=True)
+            if _es_nombre_o_fragmento_marca(et, self.marca, self.aliases):
+                et = self._fallback(titulos_grp)
         except:
             et = self._fallback(titulos_grp)
 
@@ -1809,15 +1827,40 @@ class ClasificadorSubtema:
 
     def _fallback(self, titulos):
         if not titulos: return "Cobertura de información relevante"
+        texto_total = " ".join(str(t) for t in titulos[:5])
+        norm_total = _normalizar_mencion(texto_total)
+
+        # Respaldo genérico: identifica el tipo de hecho y su objeto, sin reglas por cliente.
+        acciones = [
+            (r"\b(lanzamiento|lanza|lanzo|presenta|presento|estrena|estreno)\b", "Lanzamiento"),
+            (r"\b(anuncia|anuncio)\b", "Anuncio"),
+            (r"\b(inaugura|inauguro|apertura|abre|abrio)\b", "Apertura"),
+            (r"\b(firma|firmo|suscribe|suscribio|convenio|alianza)\b", "Convenio"),
+            (r"\b(recibe|recibio|premio|reconocimiento)\b", "Reconocimiento"),
+            (r"\b(investiga|investigacion|sancion|demanda)\b", "Investigación"),
+        ]
+        accion = next((nombre for patron, nombre in acciones if re.search(patron, norm_total)), None)
         palabras = []
+        tokens_marca = set(_normalizar_mencion(" ".join([self.marca] + self.aliases)).split())
+        excluir = tokens_marca | STOPWORDS_ES | {
+            "universidad", "empresa", "compania", "corporacion", "fundacion", "institucion",
+            "anuncio", "anuncia", "anuncio", "lanzamiento", "lanza", "presenta", "presencia",
+            "invitado", "especial", "principal", "marca", "cliente",
+        }
         for t in titulos[:5]:
             for w in string_norm_label(t).split():
-                if len(w) > 4: palabras.append(w)
+                if len(w) >= 4 and w not in excluir: palabras.append(w)
         if palabras:
             top = [w for w, _ in Counter(palabras).most_common(3)]
+            if accion:
+                objeto = " ".join(top[:3])
+                frase = _recortar_frase_completa(f"{accion} de {objeto}", MAX_PALABRAS_SUBTEMA)
+                if _frase_esta_completa(frase) and not _es_nombre_o_fragmento_marca(frase, self.marca, self.aliases):
+                    return capitalizar_etiqueta(frase)
             if len(top) >= 2:
                 frase = f"{top[0]} de {top[1]}"
-                if _frase_esta_completa(frase): return capitalizar_etiqueta(frase)
+                if _frase_esta_completa(frase) and not _es_nombre_o_fragmento_marca(frase, self.marca, self.aliases):
+                    return capitalizar_etiqueta(frase)
                 return capitalizar_etiqueta(f"Asuntos de {top[0]} y {top[1]}")
             return capitalizar_etiqueta(f"Asuntos relacionados con {top[0]}")
         return "Cobertura de información relevante"
