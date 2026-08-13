@@ -38,6 +38,12 @@ El acceso a la interfaz de producción está resguardado mediante autenticación
 
 ## 🚀 Funcionalidades
 
+### Agrupación consistente (actualizada)
+
+El pipeline crea un identificador `Grupo noticia` para republicaciones y noticias equivalentes. La pertenencia se valida con título normalizado, palabras distintivas y similitud semántica; no se fusionan hechos con acciones contradictorias (por ejemplo, aprobación frente a rechazo). Una vez clasificado el grupo, se propagan sus valores canónicos de `Tono IA`, `Tema` y `Subtema` a todas sus filas, evitando que una misma noticia cambie de tono o tema entre medios.
+
+Los subtemas se limpian y limitan a un máximo de cinco palabras, sin frases incompletas, verbos conjugados ni etiquetas genéricas. Las filas marcadas como duplicadas conservan su relación mediante `ID duplicada`; las filas equivalentes no eliminadas conservan toda su clasificación y el nuevo `Grupo noticia`.
+
 - **Ingesta Multi-fuente:** Captura y normalización de artículos desde RSS, sitios web y conectores de API.
 - **Análisis de Sentimientos:** Clasificación automatizada de titulares y contenido en espectros positivo, neutro y negativo.
 - **Extracción de Entidades y Palabras Clave:** Detección de organizaciones, personajes públicos y términos recurrentes.
