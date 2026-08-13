@@ -871,23 +871,39 @@ def _coincide_nombre_completo(texto: str, nombre: str) -> bool:
         return False
     return bool(re.search(rf"(?<![a-z0-9]){re.escape(nombre)}(?![a-z0-9])", texto))
 
+def _menciona_marca_o_alias(texto: str, marca: str, aliases=None) -> bool:
+    normalizado = _normalizar_mencion(texto)
+    nombres = [marca] + list(aliases or [])
+    if any(_coincide_nombre_completo(normalizado, nombre) for nombre in nombres if str(nombre).strip()):
+        return True
+    tokens_texto = set(normalizado.split())
+    vacias = {"de", "del", "la", "el", "los", "las", "y", "grupo", "universidad"}
+    for nombre in nombres:
+        tokens_nombre = [t for t in _normalizar_mencion(nombre).split() if len(t) >= 4 and t not in vacias]
+        if len(tokens_nombre) >= 2:
+            coincidencias = len(set(tokens_nombre) & tokens_texto)
+            if coincidencias >= 2 and coincidencias / len(set(tokens_nombre)) >= 0.60:
+                return True
+    return False
+
 def _validar_etiqueta_completa(etiqueta, titulos_grp=None, resumenes_grp=None, marca="", aliases=None, fallback_fn=None):
     if not etiqueta or etiqueta.strip().lower() in ("sin tema", "varios", "n/a"):
         if fallback_fn: return fallback_fn(titulos_grp or [])
         return "Cobertura informativa general"
     if _frase_esta_completa(etiqueta): return etiqueta
-    recortada = _recortar_frase_completa(etiqueta, max_palabras=7)
+    recortada = _recortar_frase_completa(etiqueta, max_palabras=MAX_PALABRAS_SUBTEMA)
     if _frase_esta_completa(recortada) and len(recortada.split()) >= 2:
         return capitalizar_etiqueta(recortada)
     if titulos_grp and len(titulos_grp) > 0:
         try:
             prompt = (
                 f"La frase '{etiqueta}' está incompleta o es genérica. "
-                f"Genera una frase temática COMPLETA en español de 4-6 palabras "
+                f"Genera una frase temática COMPLETA en español de 3-5 palabras "
                 f"con preposición (de/del/para/sobre/en):\n\n"
                 + "\n".join(f"  · {t[:120]}" for t in titulos_grp[:4])
                 + "\n\nREGLAS: frase nominal con preposición, terminar en sustantivo/adjetivo, "
-                "tildes y ñ correctas, sin marcas ni ciudades.\n"
+                f"tildes y ñ correctas. La etiqueta debe explicar el hecho relacionado con '{marca}', "
+                "no limitarse al nombre de la institución.\n"
                 "CORRECTO: 'Proyecto de terminal de transportes', 'Operación del Canal del Dique'\n"
                 "INCORRECTO: 'Terminal transportes', 'Operación canal'\n"
                 'JSON: {"subtema":"..."}'
@@ -906,7 +922,7 @@ def _validar_etiqueta_completa(etiqueta, titulos_grp=None, resumenes_grp=None, m
                 st.session_state['tokens_output'] += (u.get('completion_tokens') if isinstance(u, dict) else getattr(u, 'completion_tokens', 0)) or 0
             raw = json.loads(resp.choices[0].message.content).get("subtema", "")
             if raw:
-                cleaned = limpiar_tema_geografico(limpiar_tema(raw), marca, aliases or [])
+                cleaned = limpiar_tema(raw)
                 if _frase_esta_completa(cleaned) and len(cleaned.split()) >= 2:
                     return capitalizar_etiqueta(cleaned)
         except:
@@ -1063,8 +1079,8 @@ def _unificar_subtemas_llm(subtemas_a_unificar, textos_por_subtema, marca, alias
         f"Estos subtemas son variaciones del MISMO tema. "
         f"Genera UN subtema unificado (4-6 palabras) como frase nominal completa:\n\n"
         f"{subs_str}\n\nKeywords: {kw_str}\n\n"
-        "REGLAS: frase coherente con preposición (de/del/para/sobre/en), "
-        "sin marcas ni ciudades, tildes y ñ correctas, terminar en sustantivo/adjetivo.\n"
+        f"REGLAS: frase coherente vinculada con '{marca}', con preposición (de/del/para/sobre/en), "
+        "tildes y ñ correctas, terminar en sustantivo/adjetivo y explicar el hecho, no solo la marca.\n"
         "CORRECTO: 'Regulación de tarifas eléctricas', 'Apertura de nuevas sucursales'\n"
         "INCORRECTO: 'Tarifas energía', 'Apertura sucursales', 'Actividad corporativa'\n"
         'JSON: {"subtema":"..."}'
@@ -1083,7 +1099,7 @@ def _unificar_subtemas_llm(subtemas_a_unificar, textos_por_subtema, marca, alias
             st.session_state['tokens_input'] += (u.get('prompt_tokens') if isinstance(u, dict) else getattr(u, 'prompt_tokens', 0)) or 0
             st.session_state['tokens_output'] += (u.get('completion_tokens') if isinstance(u, dict) else getattr(u, 'completion_tokens', 0)) or 0
         raw = json.loads(resp.choices[0].message.content).get("subtema", "")
-        if raw: return limpiar_tema_geografico(limpiar_tema(raw), marca, aliases)
+        if raw: return limpiar_tema(raw)
     except:
         pass
     return None
@@ -1260,8 +1276,7 @@ class ClasificadorTono:
         self._all_names = [self.marca] + self.aliases
 
     def _menciona_marca(self, texto):
-        t = _normalizar_mencion(texto)
-        return any(_coincide_nombre_completo(t, nombre) for nombre in self._all_names)
+        return _menciona_marca_o_alias(texto, self.marca, self.aliases)
 
     async def _clasificar_llm(self, texto, sem):
         async with sem:
@@ -1634,7 +1649,7 @@ class ClasificadorSubtema:
             )
 
         prompt = (
-            "Eres editor jefe de un periódico. "
+            f"Eres analista de reputación de la marca principal '{self.marca}'. "
             "Genera UN subtema periodístico (3-5 palabras) que sea una FRASE NOMINAL "
             "— sin sujeto ni verbo conjugado — para este grupo de noticias.\n\n"
             "TÍTULOS:\n" + "\n".join(f"  · {t}" for t in tm)
@@ -1642,6 +1657,8 @@ class ClasificadorSubtema:
             + f"\n\nPALABRAS CLAVE: {kw}"
             + lista_existentes
             + "\n\nREGLAS OBLIGATORIAS:\n"
+            + f"  0. Usa solo hechos vinculados con '{self.marca}' o sus alias; valida la mención en título o resumen.\n"
+            + "     El subtema debe describir qué ocurre con la marca (no solo repetir su nombre).\n"
             "  1. FRASE NOMINAL PURA: empieza con sustantivo, usa preposición para unir conceptos.\n"
             "     NUNCA empieces con cargo/persona ('Alcalde', 'Gobernador', 'Ministro').\n"
             "     NUNCA incluyas verbo conjugado ('presenta', 'anuncia', 'lanza', 'inaugura').\n"
@@ -1651,7 +1668,7 @@ class ClasificadorSubtema:
             "  2. USA preposiciones (de, del, para, sobre, en, por) para conectar concepts.\n"
             "  3. SÉ ESPECÍFICO: describe el asunto real, no el actor.\n"
             "  4. Ciudades y regiones SÍ pueden aparecer si son relevantes al tema.\n"
-            "  5. Sin nombre de marcas privadas. Tildes y ñ correctas.\n\n"
+            "  5. Puedes usar la marca completa si aporta claridad y cabe en cinco palabras. Tildes y ñ correctas.\n\n"
             "EJEMPLOS CORRECTOS: 'Proyecto de terminal de transportes', "
             "'Operación del Canal del Dique', 'Plan de infraestructura vial', "
             "'Regulación de tarifas eléctricas', 'Inversión en salud pública'\n"
@@ -1690,7 +1707,7 @@ class ClasificadorSubtema:
                 st.session_state['tokens_output'] += (u.get('completion_tokens') if isinstance(u, dict) else getattr(u, 'completion_tokens', 0)) or 0
 
             raw = json.loads(resp.choices[0].message.content).get("subtema", "Varios")
-            et = limpiar_tema_geografico(limpiar_tema(raw), self.marca, self.aliases)
+            et = limpiar_tema(raw)
 
             if not et or et.strip().lower() == "sin tema":
                 et = self._refinar(tm, kw, rm, forzar_preposicion=True)
@@ -1711,9 +1728,12 @@ class ClasificadorSubtema:
                          "información", "informacion", "eventos", "varios", "sin tema",
                          "actividad corporativa", "gestion corporativa"}
             es_gen = string_norm_label(et) in {string_norm_label(g) for g in genericas}
+            es_solo_marca = string_norm_label(et) in {
+                string_norm_label(n) for n in [self.marca] + self.aliases if n
+            }
             es_rob = _es_robotico(et)
 
-            if es_gen or es_rob or len(et.split()) < 3:
+            if es_gen or es_solo_marca or es_rob or len(et.split()) < 3:
                 et = self._refinar(tm, kw, rm, forzar_preposicion=True)
 
             if not _validar_estructura_subtema(et):
@@ -1759,14 +1779,14 @@ class ClasificadorSubtema:
         ) if prohibir_verbos else ""
 
         prompt = (
-            "Eres editor jefe. Genera UN subtema periodístico (3-5 palabras) "
+            f"Eres analista de reputación de '{self.marca}'. Genera UN subtema periodístico (3-5 palabras) "
             "como frase nominal sin verbo conjugado.\n\n"
             f"Títulos: {' | '.join(titulos[:5])}{ctx}\n"
             f"Keywords: {kw}\n\n"
             f"{instruccion_prep}{instruccion_verbo}"
             f"CORRECTO: {ej_bueno}, 'Tarifas de energía eléctrica'\n"
             f"INCORRECTO: {ej_malo}, 'Alcalde presenta plan'\n"
-            "Tildes y ñ correctas. Sin marcas privadas.\n"
+            "Tildes y ñ correctas. Describe el hecho vinculado con la marca; no respondas solo su nombre.\n"
             'JSON: {"subtema":"..."}'
         )
         try:
@@ -1779,7 +1799,7 @@ class ClasificadorSubtema:
                 response_format={"type": "json_object"}
             )
             raw = json.loads(resp.choices[0].message.content).get("subtema", "Varios")
-            et = limpiar_tema_geografico(limpiar_tema(raw), self.marca, self.aliases)
+            et = limpiar_tema(raw)
             if not _frase_esta_completa(et):
                 et = _recortar_frase_completa(et)
                 if not _frase_esta_completa(et): return self._fallback(titulos)
@@ -2088,7 +2108,7 @@ def _tema_es_igual_a_subtema(tema: str, subtemas_grupo: list) -> bool:
         if tn in sn or sn in tn: return True
     return False
 
-def _generar_nombre_tema_llm(subtemas_grupo, textos_muestra, titulos_muestra):
+def _generar_nombre_tema_llm(subtemas_grupo, textos_muestra, titulos_muestra, marca=""):
     subs_list = "\n".join(f"  · {s}" for s in subtemas_grupo[:8])
     palabras = []
     for t in titulos_muestra[:15]:
@@ -2097,7 +2117,8 @@ def _generar_nombre_tema_llm(subtemas_grupo, textos_muestra, titulos_muestra):
     kw = ", ".join(w for w, _ in Counter(palabras).most_common(6))
     tit_muestra = "\n".join(f"  · {t[:100]}" for t in list(dict.fromkeys(titulos_muestra))[:5])
     prompt = (
-        "Eres editor jefe. Crea UN tema editorial preciso (2-5 palabras) que agrupe estos subtemas.\n\n"
+        f"Eres analista de reputación de la marca principal '{marca}'. "
+        "Crea UN tema editorial preciso (2-5 palabras) que agrupe estos subtemas y describa el ámbito del hecho relacionado con la marca.\n\n"
         "SUBTEMAS:\n" + subs_list + "\n\nTÍTULOS DE REFERENCIA:\n" + tit_muestra +
         f"\n\nKEYWORDS: {kw}\n\n"
         "REGLAS ESTRICTAS:\n"
@@ -2149,7 +2170,7 @@ def _regenerar_tema_diferente(subtemas_grupo, titulos_muestra, intento=0):
     except:
         return None
 
-def consolidar_temas(subtemas, textos, pbar):
+def consolidar_temas(subtemas, textos, pbar, marca=""):
     n = len(textos)
     u = _umbrales_adaptativos(n)
     pbar.progress(0.05, "Preparando temas...")
@@ -2247,7 +2268,7 @@ def consolidar_temas(subtemas, textos, pbar):
                 textos_cluster.append(txt[:200])
         if len(subtemas_cluster) == 1:
             sub_unico = subtemas_cluster[0]
-            nombre = _generar_nombre_tema_llm(subtemas_cluster, textos_cluster, titulos_cluster)
+            nombre = _generar_nombre_tema_llm(subtemas_cluster, textos_cluster, titulos_cluster, marca)
             if not nombre or _tema_es_igual_a_subtema(nombre, subtemas_cluster):
                 nombre = _regenerar_tema_diferente(subtemas_cluster, titulos_cluster)
             if not nombre or _tema_es_igual_a_subtema(nombre, subtemas_cluster):
@@ -2255,7 +2276,7 @@ def consolidar_temas(subtemas, textos, pbar):
                 nombre = _recortar_frase_completa(" ".join(p), max_palabras=3) if len(p) > 3 else sub_unico
                 if _tema_es_igual_a_subtema(nombre, subtemas_cluster): nombre = sub_unico
         else:
-            nombre = _generar_nombre_tema_llm(subtemas_cluster, textos_cluster, titulos_cluster)
+            nombre = _generar_nombre_tema_llm(subtemas_cluster, textos_cluster, titulos_cluster, marca)
             if not nombre or _tema_es_igual_a_subtema(nombre, subtemas_cluster):
                 nombre = _regenerar_tema_diferente(subtemas_cluster, titulos_cluster)
             if not nombre or _tema_es_igual_a_subtema(nombre, subtemas_cluster):
@@ -2809,7 +2830,7 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
                 subtemas = ClasificadorSubtema(bn, ba).procesar_lote(
                     df["_txt"], pb, df[km["resumen"]], df[km["titulo"]]
                 )
-                temas = consolidar_temas(subtemas, df["_txt"].tolist(), pb)
+                temas = consolidar_temas(subtemas, df["_txt"].tolist(), pb, bn)
             df[km["subtema"]] = subtemas
             if epkl:
                 tp = analizar_temas_con_pkl(df["_txt"].tolist(), epkl)
@@ -2859,7 +2880,7 @@ async def run_quick_async(df, tc, sc, bn, al):
         pb = st.progress(0)
         subtemas = ClasificadorSubtema(bn, al).procesar_lote(df["_txt"], pb, df[sc].fillna(''), df[tc].fillna(''))
         df['Subtema'] = subtemas
-        temas = consolidar_temas(subtemas, df["_txt"].tolist(), pb)
+        temas = consolidar_temas(subtemas, df["_txt"].tolist(), pb, bn)
         df['Tema'] = temas
         df = aplicar_consistencia_grupos(df, tc, sc)
         s.update(label="✓ Clasificación", state="complete")
@@ -3010,7 +3031,7 @@ async def run_custom_excel_async(file_bytes, tc, sc, bn, al, mode="API de OpenAI
         elif "Solo Modelos PKL" in mode:
             temas = ["N/A"] * len(df)
         else:
-            temas = consolidar_temas(subtemas, df["_txt"].tolist(), pb)
+            temas = consolidar_temas(subtemas, df["_txt"].tolist(), pb, bn)
 
         df['Subtema'] = subtemas
         df['Tema']    = temas
