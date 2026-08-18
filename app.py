@@ -1253,7 +1253,7 @@ def construir_grupos_consistentes(titulos, resumenes):
 
 def aplicar_consistencia_grupos(df, titulo_col, resumen_col,
                                 tono_col="Tono IA", tema_col="Tema", subtema_col="Subtema"):
-    """Propaga una clasificación canónica a cada grupo de noticias equivalentes."""
+    """Asigna Grupo noticia como overlay. No sobrescribe Tono IA / Tema / Subtema."""
     if df.empty:
         return df
     grupos = construir_grupos_consistentes(df[titulo_col].fillna(''), df[resumen_col].fillna(''))
@@ -1263,17 +1263,8 @@ def aplicar_consistencia_grupos(df, titulo_col, resumen_col,
         gid = f"G{numero:05d}"
         for i in idxs:
             df.at[df.index[i], "Grupo noticia"] = gid
-        if len(idxs) < 2:
-            continue
-        for col in (tono_col, tema_col, subtema_col):
-            if col not in df.columns:
-                continue
-            valores = [str(df.iloc[i][col]).strip() for i in idxs]
-            validos = [v for v in valores if v and v.lower() not in {"nan", "n/a", "-", "sin tema"}]
-            if validos:
-                canonico = Counter(validos).most_common(1)[0][0]
-                for i in idxs:
-                    df.at[df.index[i], col] = canonico
+        # Keep existing labels even when members disagree. Majority vote was
+        # stamping a generic Subtema onto notes that must stay specific.
     if subtema_col in df.columns:
         df[subtema_col] = df[subtema_col].apply(
             lambda x: capitalizar_etiqueta(_recortar_frase_completa(str(x), MAX_PALABRAS_SUBTEMA))
@@ -1620,10 +1611,11 @@ class ClasificadorSubtema:
                 if len(w) > 3: palabras.append(w)
         return [w for w, _ in Counter(palabras).most_common(top_n)]
 
-    def _generar_etiqueta(self, textos_grp, titulos_grp, resumenes_grp, subtemas_existentes=None):
+    def _generar_etiqueta(self, textos_grp, titulos_grp, resumenes_grp, subtemas_existentes=None, evitar_etiqueta=None):
         tn = sorted(set(normalize_title_for_comparison(t) for t in titulos_grp if t))
         existentes_key = "|".join(sorted(string_norm_label(s) for s in (subtemas_existentes or []))[:20])
-        ck = hashlib.md5(("|".join(tn[:12]) + f"#{len(titulos_grp)}#{existentes_key}").encode()).hexdigest()
+        evitar_key = string_norm_label(evitar_etiqueta) if evitar_etiqueta else ""
+        ck = hashlib.md5(("|".join(tn[:12]) + f"#{len(titulos_grp)}#{existentes_key}#{evitar_key}").encode()).hexdigest()
         if ck in self._cache: return self._cache[ck]
 
         tm = list(dict.fromkeys(str(t)[:130] for t in titulos_grp if pd.notna(t) and str(t).strip() and str(t).strip().lower() != 'nan'))[:6]
@@ -1662,6 +1654,10 @@ class ClasificadorSubtema:
                 "\n\nSUBTEMAS YA CREADOS (ÚSALOS SI APLICAN EXACTAMENTE):\n" +
                 ", ".join(f"'{s}'" for s in subtemas_existentes[:15]) +
                 "\nREGLA: Si este grupo de noticias trata EXACTAMENTE del mismo tema que uno de los subtemas ya creados, responde con ese subtema. Si es un tema distinto, crea uno nuevo."
+            )
+        if evitar_etiqueta:
+            lista_existentes += (
+                f"\nNO uses '{evitar_etiqueta}': este grupo es un evento distinto, genera un subtema nuevo y específico."
             )
 
         prompt = (
@@ -1935,9 +1931,11 @@ class ClasificadorSubtema:
         textos_por_subtema_aprobado = defaultdict(list)
 
         def _generar_etiqueta_segura(idxs):
-            textos_grp = [textos[i] for i in idxs]
-            titulos_grp = [titulos[i] for i in idxs]
-            resumenes_grp = [resumenes[i] for i in idxs]
+            # Sample the LLM prompt, but every member of this DSU group gets the same label.
+            sample = idxs[:MAX_GRUPO_ETIQUETA]
+            textos_grp = [textos[i] for i in sample]
+            titulos_grp = [titulos[i] for i in sample]
+            resumenes_grp = [resumenes[i] for i in sample]
             etiqueta = self._generar_etiqueta(
                 textos_grp,
                 titulos_grp,
@@ -1954,65 +1952,44 @@ class ClasificadorSubtema:
                     min_sim=max(u['sim_minima_agrupacion'], 0.88),
                     min_overlap=0.24,
                 ):
+                    rechazada = etiqueta
                     etiqueta = self._generar_etiqueta(
                         textos_grp,
                         titulos_grp,
                         resumenes_grp,
-                        subtemas_existentes=None
+                        subtemas_existentes=subtemas_aprobados,
+                        evitar_etiqueta=rechazada
                     )
+                    if etiqueta in textos_por_subtema_aprobado:
+                        previos2 = textos_por_subtema_aprobado.get(etiqueta, [])
+                        if not _grupos_contenido_compatibles(
+                            textos_grp,
+                            previos2,
+                            etiqueta,
+                            etiqueta,
+                            min_sim=max(u['sim_minima_agrupacion'], 0.88),
+                            min_overlap=0.24,
+                        ):
+                            etiqueta = capitalizar_etiqueta(self._fallback(titulos_grp))
             if etiqueta not in subtemas_aprobados:
                 subtemas_aprobados.append(etiqueta)
-            textos_por_subtema_aprobado[etiqueta].extend(textos_grp[:MAX_GRUPO_ETIQUETA])
+            textos_por_subtema_aprobado[etiqueta].extend(textos_grp)
             return etiqueta
 
         for k, (lid, idxs) in enumerate(sg):
             if k % 10 == 0: pbar.progress(0.55 + 0.25 * (k / max(ng, 1)), f"Etiquetando {k + 1}/{ng}...")
-            
-            if len(idxs) > MAX_GRUPO_ETIQUETA:
-                subgrupos = [idxs[i:i + MAX_GRUPO_ETIQUETA] for i in range(0, len(idxs), MAX_GRUPO_ETIQUETA)]
-                for sg_ in subgrupos:
-                    e = _generar_etiqueta_segura(sg_)
-                    for i in sg_: mapa[i] = e
-            else:
-                e = _generar_etiqueta_segura(idxs)
-                for i in idxs: mapa[i] = e
+            e = _generar_etiqueta_segura(idxs)
+            for i in idxs: mapa[i] = e
 
         subtemas = [mapa.get(i, "Varios") for i in range(n)]
 
-        pbar.progress(0.80, "Fase 4b · Coherencia etiqueta↔texto...")
-        umbral_coherencia = u['coherencia_etiqueta']
-        subtemas_unicos = list(set(subtemas))
-        embs_sub_lista = get_embeddings_batch(subtemas_unicos)
-        emb_subtemas = {sub: emb for sub, emb in zip(subtemas_unicos, embs_sub_lista) if emb is not None}
+        pbar.progress(0.80, "Fase 4b · Coherencia (sin reasignar)...")
+        # 0.35 cosine-to-label is not event membership. Jumping rows onto
+        # another Subtema (or minting a new phrase) over-grouped and paraphrased.
 
-        incoherentes = 0
-        for i in range(n):
-            sub = subtemas[i]
-            emb_txt = ae[i]
-            emb_sub = emb_subtemas.get(sub)
-            if emb_txt is None or emb_sub is None: continue
-            sim = cosine_similarity(np.array(emb_txt).reshape(1, -1), np.array(emb_sub).reshape(1, -1))[0][0]
-            if sim < umbral_coherencia:
-                mejor_sub, mejor_sim = sub, sim
-                for otro_sub, emb_otro in emb_subtemas.items():
-                    if otro_sub == sub: continue
-                    sim_otro = cosine_similarity(np.array(emb_txt).reshape(1, -1), np.array(emb_otro).reshape(1, -1))[0][0]
-                    if sim_otro > mejor_sim: mejor_sim = sim_otro; mejor_sub = otro_sub
-                if mejor_sub != sub and mejor_sim > umbral_coherencia:
-                    subtemas[i] = mejor_sub
-                else:
-                    nueva = self._generar_etiqueta([textos[i]], [titulos[i]], [resumenes[i]], subtemas_existentes=subtemas_aprobados)
-                    subtemas[i] = capitalizar_etiqueta(nueva)
-                    if nueva not in subtemas_aprobados: subtemas_aprobados.append(nueva)
-                incoherentes += 1
-
-        pbar.progress(0.82, "Fase 5 · Dedup...")
-        subtemas = dedup_labels(subtemas, u['dedup_label'])
-
-        pbar.progress(0.86, "Fase 5b · Fusión semántica...")
-        textos_por_sub = defaultdict(list)
-        for i, s in enumerate(subtemas): textos_por_sub[s].append(textos[i])
-        subtemas = _fusionar_subtemas_semanticos(subtemas, textos_por_sub, self.marca, self.aliases, u['fusion_subtemas'])
+        pbar.progress(0.86, "Fase 5 · Sin fusión cruzada de etiquetas...")
+        # Skip corpus-wide dedup_labels / _fusionar_subtemas_semanticos.
+        # Those glued distinct events that shared a 5-word paraphrase.
 
         pbar.progress(0.90, "Fase 6 · Consistencia...")
         subtemas = self._consistencia(subtemas, ae, pbar, u)
@@ -2028,34 +2005,7 @@ class ClasificadorSubtema:
         pbar.progress(0.93, "Fase 7 · Completitud...")
         subtemas = self._validar_completitud_final(subtemas, textos, titulos, resumenes)
 
-        pbar.progress(0.97, "Fase 8 · Dedup final...")
-        subtemas = dedup_labels(subtemas, u['dedup_label'])
-        
-        pbar.progress(0.99, "Consolidación final IA de sinónimos...")
-        unicos_finales = list(dict.fromkeys(subtemas))
-        if 1 < len(unicos_finales) <= 50:
-            mapa_sinonimos = self._consolidar_sinonimos_llm(unicos_finales)
-            textos_por_sub_final = defaultdict(list)
-            for i, s in enumerate(subtemas):
-                textos_por_sub_final[s].append(textos[i])
-            mapa_seguro = {}
-            for origen, destino in mapa_sinonimos.items():
-                if origen == destino:
-                    mapa_seguro[origen] = destino
-                    continue
-                if destino not in textos_por_sub_final:
-                    continue
-                if _grupos_contenido_compatibles(
-                    textos_por_sub_final.get(origen, []),
-                    textos_por_sub_final.get(destino, []),
-                    origen,
-                    destino,
-                    min_sim=max(u['fusion_subtemas'], 0.88),
-                    min_overlap=0.24,
-                ):
-                    mapa_seguro[origen] = destino
-            subtemas = [mapa_seguro.get(s, s) for s in subtemas]
-
+        pbar.progress(0.97, "Fase 8 · Sin dedup ni sinónimos cruzados...")
         subtemas = [capitalizar_etiqueta(s) for s in subtemas]
         nf = len(set(subtemas))
         pbar.progress(1.0, f"{nf} subtemas")
