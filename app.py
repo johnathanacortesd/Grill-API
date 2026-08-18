@@ -902,6 +902,53 @@ def _menciona_marca_o_alias(texto: str, marca: str, aliases=None) -> bool:
                 return True
     return False
 
+def _lista_alias(marca, aliases=None):
+    nombres = [marca]
+    if isinstance(aliases, str):
+        nombres.extend(a.strip() for a in aliases.split(";") if a.strip())
+    else:
+        nombres.extend(str(a).strip() for a in (aliases or []) if str(a).strip())
+    vistos, out = set(), []
+    for n in nombres:
+        k = _normalizar_mencion(n)
+        if k and k not in vistos:
+            vistos.add(k)
+            out.append(n.strip())
+    return out
+
+def extraer_contexto_marca(titulo, resumen, marca, aliases=None, ventana=320):
+    """Recorta el texto a las frases que mencionan Marca principal / Alias."""
+    titulo = str(titulo or "").strip()
+    resumen = str(resumen or "").strip()
+    texto = f"{titulo}. {resumen}".strip(" .")
+    if not texto or not marca or not _menciona_marca_o_alias(texto, marca, aliases):
+        return ""
+    partes = re.split(r'(?<=[\.\!\?\n])\s+', texto)
+    if len(partes) <= 1:
+        partes = re.split(r'\n+', texto)
+    hits = [p.strip() for p in partes if p.strip() and _menciona_marca_o_alias(p, marca, aliases)]
+    if hits:
+        vistos, out = set(), []
+        for h in hits:
+            k = _normalizar_mencion(h)
+            if k not in vistos:
+                vistos.add(k)
+                out.append(h)
+        return " ".join(out)[:1200]
+    norm = _normalizar_mencion(texto)
+    for nombre in _lista_alias(marca, aliases):
+        nn = _normalizar_mencion(nombre)
+        if len(nn) < 3:
+            continue
+        m = re.search(rf"(?<![a-z0-9]){re.escape(nn)}(?![a-z0-9])", norm)
+        if not m:
+            continue
+        frac = m.start() / max(len(norm), 1)
+        pos = int(frac * len(texto))
+        lo, hi = max(0, pos - ventana), min(len(texto), pos + ventana)
+        return texto[lo:hi].strip()[:1200]
+    return texto[: ventana * 2]
+
 def _validar_etiqueta_completa(etiqueta, titulos_grp=None, resumenes_grp=None, marca="", aliases=None, fallback_fn=None):
     if not etiqueta or etiqueta.strip().lower() in ("sin tema", "varios", "n/a"):
         if fallback_fn: return fallback_fn(titulos_grp or [])
@@ -1285,16 +1332,21 @@ class ClasificadorTono:
     def _menciona_marca(self, texto):
         return _menciona_marca_o_alias(texto, self.marca, self.aliases)
 
-    async def _clasificar_llm(self, texto, sem):
+    async def _clasificar_llm(self, texto, sem, contexto_marca=""):
         async with sem:
-            if not self._menciona_marca(texto):
+            eval_txt = (contexto_marca or texto or "").strip()
+            if not eval_txt or not self._menciona_marca(eval_txt):
                 return {"tono": "Neutro"}
 
             aliases_str = f" (también conocida como: {', '.join(self.aliases)})" if self.aliases else ""
             prompt = (
                 f"Eres un experto analista en Relaciones Públicas y Gestión de Reputación. "
-                f"Tu tarea es evaluar el impacto reputacional DIRECTO de la siguiente noticia sobre la marca '{self.marca}'{aliases_str}.\n\n"
-                f"TEXTO A EVALUAR:\n{texto[:1600]}\n\n"
+                f"Evalúa el impacto reputacional DIRECTO sobre la marca '{self.marca}'{aliases_str}.\n\n"
+                f"El tono GENERAL de la noticia NO importa. Si el artículo es neutro o habla de otro actor, "
+                f"pero la mención a '{self.marca}' es favorable, el tono es Positivo. "
+                f"Si el artículo es positivo o trágico a nivel país/sector, pero '{self.marca}' queda "
+                f"criticada, demandada o cuestionada, el tono es Negativo.\n\n"
+                f"TEXTO CENTRADO EN LA MARCA:\n{eval_txt[:1600]}\n\n"
                 f"REGLAS DE CLASIFICACIÓN ESTRICTAS:\n"
                 f"🔴 NEGATIVO: un hecho perjudica, cuestiona o expone directamente a '{self.marca}' "
                 f"(demandas, multas, fraudes, fallas propias, quejas, investigaciones, pérdidas o retiro de productos).\n"
@@ -1305,8 +1357,7 @@ class ClasificadorTono:
                 f"  - Se menciona a la marca como patrocinador menor o en una lista de empresas.\n"
                 f"  - Una persona, autoridad, proveedor o tercero es quien recibe el efecto positivo o negativo.\n"
                 f"  - Emite un comunicado regular sin evidencia de crisis ni logro relevante.\n\n"
-                f"⚠️ ATENCIÓN: Ignora si la noticia es trágica a nivel general (ej. una pandemia o accidente de terceros). "
-                f"No infieras tono por palabras emocionales ni por el tono del sector. Evalúa ÚNICAMENTE cómo el hecho afecta "
+                f"⚠️ ATENCIÓN: Ignora el tono del sector o de terceros. Evalúa ÚNICAMENTE cómo el hecho afecta "
                 f"la reputación corporativa de '{self.marca}': mejora (Positivo), empeora (Negativo) o no cambia (Neutro).\n\n"
                 f'Responde ÚNICAMENTE con JSON en este formato: {{"tono": "Positivo|Negativo|Neutro"}}'
             )
@@ -1358,13 +1409,27 @@ class ClasificadorTono:
                         dsu.union(i, j)
                 
         grupos = dsu.grupos(n)
-        reps = {cid: seleccionar_representante(idxs, txts)[1] for cid, idxs in grupos.items()}
+        contextos = [
+            extraer_contexto_marca(str(titulos.iloc[i]), str(resumenes.iloc[i]), self.marca, self.aliases)
+            for i in range(n)
+        ]
+        reps = {}
+        for cid, idxs in grupos.items():
+            con_marca = [i for i in idxs if contextos[i]]
+            if con_marca:
+                ri, _ = seleccionar_representante(con_marca, contextos)
+                reps[cid] = (ri, contextos[ri])
+            else:
+                reps[cid] = (idxs[0], "")
         
         sem = asyncio.Semaphore(CONCURRENT_REQUESTS)
         cids = list(reps.keys())
         
         async def _clasificar_con_cid(cid):
-            return cid, await self._clasificar_llm(reps[cid], sem)
+            _idx, ctx = reps[cid]
+            if not ctx:
+                return cid, {"tono": "Neutro"}
+            return cid, await self._clasificar_llm(txts[_idx], sem, contexto_marca=ctx)
 
         tasks = [_clasificar_con_cid(c) for c in cids]
         rpg = {}
@@ -1383,11 +1448,42 @@ class ClasificadorTono:
         pbar.progress(1.0, "Análisis de Tono completado")
         return final
 
-def analizar_tono_con_pkl(textos, pkl_file):
+def analizar_tono_con_pkl(textos, pkl_file, titulos=None, resumenes=None, marca="", aliases=None):
     try:
         pipeline = joblib.load(pkl_file)
-        TM = {1: "Positivo", "1": "Positivo", 0: "Neutro", "0": "Neutro", -1: "Negativo", "-1": "Negativo"}
-        return [{"tono": TM.get(p, str(p).title())} for p in pipeline.predict(textos)]
+        TM = {
+            1: "Positivo", "1": "Positivo", "positivo": "Positivo", "Positivo": "Positivo",
+            0: "Neutro", "0": "Neutro", "neutro": "Neutro", "Neutro": "Neutro",
+            -1: "Negativo", "-1": "Negativo", "negativo": "Negativo", "Negativo": "Negativo",
+        }
+        def _norm_pred(p):
+            if p in TM: return TM[p]
+            s = str(p).strip()
+            return TM.get(s, TM.get(s.title(), s.title() if s.title() in ("Positivo", "Negativo", "Neutro") else "Neutro"))
+
+        if marca and titulos is not None and resumenes is not None:
+            titulos = list(titulos)
+            resumenes = list(resumenes)
+            n = len(titulos)
+            snippets, flags = [], []
+            for i in range(n):
+                ctx = extraer_contexto_marca(titulos[i], resumenes[i], marca, aliases)
+                if ctx:
+                    tit = str(titulos[i] or "").strip()
+                    snippet = ctx if (tit and ctx.lower().startswith(tit[:20].lower())) else (f"{tit}. {ctx}" if tit else ctx)
+                    snippets.append(snippet[:1800])
+                    flags.append(True)
+                else:
+                    snippets.append("")
+                    flags.append(False)
+            result = [{"tono": "Neutro"}] * n
+            idx_pred = [i for i, f in enumerate(flags) if f]
+            if idx_pred:
+                preds = pipeline.predict([snippets[i] for i in idx_pred])
+                for i, p in zip(idx_pred, preds):
+                    result[i] = {"tono": _norm_pred(p)}
+            return result
+        return [{"tono": _norm_pred(p)} for p in pipeline.predict(textos)]
     except Exception as e:
         st.error(f"Error pkl tono: {e}")
         return None
@@ -2378,12 +2474,24 @@ def _post_validar_tema_vs_subtema(temas, subtemas):
     return [reemplazos.get(t, t) for t in temas] if reemplazos else temas
 
 def _unificar_tema_por_subtema(temas, subtemas):
+    """Un mismo Subtema (sin importar mayúsculas) debe tener un único Tema."""
+    vacios = {"", "nan", "n/a", "-", "sin tema", "varios"}
     sub_to_temas = defaultdict(list)
-    for t, s in zip(temas, subtemas): sub_to_temas[s].append(t)
+    for t, s in zip(temas, subtemas):
+        k = string_norm_label(s)
+        if not k or k in vacios:
+            continue
+        sub_to_temas[k].append(t)
     sub_to_best = {}
-    for sub, tema_list in sub_to_temas.items():
-        sub_to_best[sub] = Counter(tema_list).most_common(1)[0][0]
-    return [sub_to_best[s] for s in subtemas]
+    for k, tema_list in sub_to_temas.items():
+        validos = [t for t in tema_list if str(t).strip().lower() not in vacios]
+        if validos:
+            sub_to_best[k] = Counter(validos).most_common(1)[0][0]
+    out = []
+    for t, s in zip(temas, subtemas):
+        k = string_norm_label(s)
+        out.append(sub_to_best[k] if k in sub_to_best else t)
+    return out
 
 # ======================================
 # Duplicados y Excel (Reglas Nuevas)
@@ -2803,7 +2911,11 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
         with st.status("Paso 3 · Tono (Reputación)", expanded=True) as s:
             pb = st.progress(0)
             if ("PKL" in mode or tpkl) and tpkl:
-                res = analizar_tono_con_pkl(df["_txt"].tolist(), tpkl)
+                res = analizar_tono_con_pkl(
+                    df["_txt"].tolist(), tpkl,
+                    titulos=df[km["titulo"]], resumenes=df[km["resumen"]],
+                    marca=bn, aliases=ba,
+                )
                 if res is None: st.stop()
             elif "API" in mode or "Híbrido" in mode:
                 res = await ClasificadorTono(bn, ba).procesar_lote_async(
@@ -2830,6 +2942,7 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
                 if tp: df[km["tema"]] = tp
             else:
                 df[km["tema"]] = temas
+            df[km["tema"]] = _unificar_tema_por_subtema(df[km["tema"]].tolist(), df[km["subtema"]].tolist())
             df = aplicar_consistencia_grupos(df, km["titulo"], km["resumen"],
                                              km["tonoiai"], km["tema"], km["subtema"])
             s.update(label="✓ Paso 4 · Clasificación", state="complete")
@@ -2874,7 +2987,7 @@ async def run_quick_async(df, tc, sc, bn, al):
         subtemas = ClasificadorSubtema(bn, al).procesar_lote(df["_txt"], pb, df[sc].fillna(''), df[tc].fillna(''))
         df['Subtema'] = subtemas
         temas = consolidar_temas(subtemas, df["_txt"].tolist(), pb, bn)
-        df['Tema'] = temas
+        df['Tema'] = _unificar_tema_por_subtema(temas, subtemas)
         df = aplicar_consistencia_grupos(df, tc, sc)
         s.update(label="✓ Clasificación", state="complete")
     df.drop(columns=['_txt'], inplace=True)
@@ -2987,8 +3100,12 @@ async def run_custom_excel_async(file_bytes, tc, sc, bn, al, mode="API de OpenAI
     with st.status("Paso 2 · Evaluando Tono (Reputación)...", expanded=True) as s:
         pb = st.progress(0)
         if tpkl:
-            # Si se subió PKL de Sentimiento/Tono, usarlo directamente
-            res = analizar_tono_con_pkl(df["_txt"].tolist(), tpkl)
+            # PKL de tono: predecir sobre la mención a Marca principal / Alias, no el artículo entero.
+            res = analizar_tono_con_pkl(
+                df["_txt"].tolist(), tpkl,
+                titulos=df[tc].fillna(""), resumenes=df[sc].fillna(""),
+                marca=bn, aliases=al,
+            )
             if res is None: st.stop()
             tonos = [r["tono"] for r in res]
         elif "API" in mode or "Híbrido" in mode:
@@ -3027,7 +3144,7 @@ async def run_custom_excel_async(file_bytes, tc, sc, bn, al, mode="API de OpenAI
             temas = consolidar_temas(subtemas, df["_txt"].tolist(), pb, bn)
 
         df['Subtema'] = subtemas
-        df['Tema']    = temas
+        df['Tema']    = _unificar_tema_por_subtema(temas, subtemas)
         df = aplicar_consistencia_grupos(df, tc, sc)
         s.update(label="✓ Clasificación completada", state="complete")
 
@@ -3189,7 +3306,7 @@ def main():
         <div class="app-header-icon">◈</div>
         <div class="app-header-text">
             <div class="app-header-title">Análisis de Noticias - API</div>
-            <div class="app-header-version">v18.2 · 😼 Realizado por Johnathan Cortés 🕵️‍♂️ </div>
+            <div class="app-header-version">v18.3 · 😼 Realizado por Johnathan Cortés 🕵️‍♂️ </div>
         </div>
         <div class="app-header-badge">IA</div>
     </div>""", unsafe_allow_html=True)
