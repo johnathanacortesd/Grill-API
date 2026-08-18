@@ -889,25 +889,28 @@ def _coincide_nombre_completo(texto: str, nombre: str) -> bool:
 
 def _menciona_marca_o_alias(texto: str, marca: str, aliases=None) -> bool:
     normalizado = _normalizar_mencion(texto)
-    nombres = [marca] + list(aliases or [])
+    nombres = _lista_alias(marca, aliases)
     if any(_coincide_nombre_completo(normalizado, nombre) for nombre in nombres if str(nombre).strip()):
         return True
     tokens_texto = set(normalizado.split())
-    vacias = {"de", "del", "la", "el", "los", "las", "y", "grupo", "universidad"}
+    vacias = {"de", "del", "la", "el", "los", "las", "y", "grupo"}
     for nombre in nombres:
-        tokens_nombre = [t for t in _normalizar_mencion(nombre).split() if len(t) >= 4 and t not in vacias]
-        if len(tokens_nombre) >= 2:
-            coincidencias = len(set(tokens_nombre) & tokens_texto)
-            if coincidencias >= 2 and coincidencias / len(set(tokens_nombre)) >= 0.60:
-                return True
+        tokens_nombre = [t for t in _normalizar_mencion(nombre).split() if len(t) >= 3 and t not in vacias]
+        if not tokens_nombre:
+            continue
+        coincidencias = len(set(tokens_nombre) & tokens_texto)
+        if coincidencias >= min(2, len(set(tokens_nombre))) and coincidencias / len(set(tokens_nombre)) >= 0.60:
+            return True
     return False
 
 def _lista_alias(marca, aliases=None):
-    nombres = [marca]
+    nombres = []
+    if marca:
+        nombres.extend(str(marca).split(";"))
     if isinstance(aliases, str):
-        nombres.extend(a.strip() for a in aliases.split(";") if a.strip())
+        nombres.extend(aliases.split(";"))
     else:
-        nombres.extend(str(a).strip() for a in (aliases or []) if str(a).strip())
+        nombres.extend(str(a) for a in (aliases or []))
     vistos, out = set(), []
     for n in nombres:
         k = _normalizar_mencion(n)
@@ -917,7 +920,7 @@ def _lista_alias(marca, aliases=None):
     return out
 
 def extraer_contexto_marca(titulo, resumen, marca, aliases=None, ventana=320):
-    """Recorta el texto a las frases que mencionan Marca principal / Alias."""
+    """Título + resumen si la marca/alias aparece. No recortar tanto como para perder 'ganadores'."""
     titulo = str(titulo or "").strip()
     resumen = str(resumen or "").strip()
     texto = f"{titulo}. {resumen}".strip(" .")
@@ -927,27 +930,20 @@ def extraer_contexto_marca(titulo, resumen, marca, aliases=None, ventana=320):
     if len(partes) <= 1:
         partes = re.split(r'\n+', texto)
     hits = [p.strip() for p in partes if p.strip() and _menciona_marca_o_alias(p, marca, aliases)]
-    if hits:
-        vistos, out = set(), []
-        for h in hits:
-            k = _normalizar_mencion(h)
-            if k not in vistos:
-                vistos.add(k)
-                out.append(h)
-        return " ".join(out)[:1200]
-    norm = _normalizar_mencion(texto)
-    for nombre in _lista_alias(marca, aliases):
-        nn = _normalizar_mencion(nombre)
-        if len(nn) < 3:
-            continue
-        m = re.search(rf"(?<![a-z0-9]){re.escape(nn)}(?![a-z0-9])", norm)
-        if not m:
-            continue
-        frac = m.start() / max(len(norm), 1)
-        pos = int(frac * len(texto))
-        lo, hi = max(0, pos - ventana), min(len(texto), pos + ventana)
-        return texto[lo:hi].strip()[:1200]
-    return texto[: ventana * 2]
+    # Siempre incluir el título: ahí suele estar "ganadores" / el hecho.
+    bloques = []
+    if titulo:
+        bloques.append(titulo)
+    bloques.extend(hits)
+    if resumen and resumen not in hits:
+        bloques.append(resumen[:900])
+    vistos, out = set(), []
+    for h in bloques:
+        k = _normalizar_mencion(h)
+        if k and k not in vistos:
+            vistos.add(k)
+            out.append(h)
+    return " ".join(out)[:1800] if out else texto[:1800]
 
 def _validar_etiqueta_completa(etiqueta, titulos_grp=None, resumenes_grp=None, marca="", aliases=None, fallback_fn=None):
     if not etiqueta or etiqueta.strip().lower() in ("sin tema", "varios", "n/a"):
@@ -1325,8 +1321,9 @@ def aplicar_consistencia_grupos(df, titulo_col, resumen_col,
 # ======================================
 class ClasificadorTono:
     def __init__(self, marca, aliases):
-        self.marca = marca.strip()
-        self.aliases = [a.strip() for a in (aliases or []) if a.strip()]
+        nombres = _lista_alias(marca, aliases)
+        self.marca = nombres[0] if nombres else str(marca or "").strip()
+        self.aliases = [n for n in nombres[1:] if n]
         self._all_names = [self.marca] + self.aliases
 
     def _menciona_marca(self, texto):
@@ -1344,6 +1341,9 @@ class ClasificadorTono:
                 f"Evalúa el impacto reputacional DIRECTO sobre la marca '{self.marca}'{aliases_str}.\n\n"
                 f"El tono GENERAL de la noticia NO importa. Si el artículo es neutro o habla de otro actor, "
                 f"pero la mención a '{self.marca}' es favorable, el tono es Positivo. "
+                f"Si '{self.marca}' gana, es premiada, finalista, reconocida o se alza como ganadora "
+                f"(aunque aparezca junto a otras instituciones), el tono es Positivo. "
+                f"Estar en una LISTA DE GANADORES no es Neutro. "
                 f"Si el artículo es positivo o trágico a nivel país/sector, pero '{self.marca}' queda "
                 f"criticada, demandada o cuestionada, el tono es Negativo.\n\n"
                 f"TEXTO CENTRADO EN LA MARCA:\n{eval_txt[:1600]}\n\n"
@@ -1354,7 +1354,7 @@ class ClasificadorTono:
                 f"(premio, crecimiento, lanzamiento exitoso, inversión realizada, innovación, expansión o reconocimiento).\n"
                 f"⚪ NEUTRO: La marca se menciona SIN impacto a su imagen. Ejemplos:\n"
                 f"  - La noticia habla de una crisis del sector/país, pero la marca solo es mencionada informando o adaptándose.\n"
-                f"  - Se menciona a la marca como patrocinador menor o en una lista de empresas.\n"
+                f"  - Se menciona a la marca de paso, sin rol (no aplica si es ganadora, premiada o protagonista).\n"
                 f"  - Una persona, autoridad, proveedor o tercero es quien recibe el efecto positivo o negativo.\n"
                 f"  - Emite un comunicado regular sin evidencia de crisis ni logro relevante.\n\n"
                 f"⚠️ ATENCIÓN: Ignora el tono del sector o de terceros. Evalúa ÚNICAMENTE cómo el hecho afecta "
@@ -1444,9 +1444,46 @@ class ClasificadorTono:
         for cid, idxs in grupos.items():
             r = rpg.get(cid, {"tono": "Neutro"})
             for i in idxs: final[i] = r
+
+        tonos = [f["tono"] if f else "Neutro" for f in final]
+        tonos = _propagar_tono_equivalentes(tonos, titulos.tolist(), resumenes.tolist())
+        final = [{"tono": t} for t in tonos]
             
         pbar.progress(1.0, "Análisis de Tono completado")
         return final
+
+def _propagar_tono_equivalentes(tonos, titulos, resumenes):
+    """Si la misma noticia (título/resumen muy parecidos) salió Positivo en una fila y Neutro en otra, unifica al no-Neutro."""
+    n = len(tonos)
+    if n < 2:
+        return list(tonos)
+    out = list(tonos)
+    norm_t = [normalize_title_for_comparison(t) for t in titulos]
+    norm_r = [_normalizar_mencion(str(r)[:280]) for r in resumenes]
+    dsu = DSU(n)
+    for i in range(n):
+        for j in range(i + 1, n):
+            sim_t = SequenceMatcher(None, norm_t[i], norm_t[j]).ratio() if norm_t[i] and norm_t[j] else 0.0
+            sim_r = SequenceMatcher(None, norm_r[i], norm_r[j]).ratio() if norm_r[i] and norm_r[j] else 0.0
+            if sim_t >= 0.88 or (sim_t >= 0.72 and sim_r >= 0.70) or sim_r >= 0.82:
+                if not _hay_conflicto_accion(str(titulos[i]), str(titulos[j])):
+                    dsu.union(i, j)
+    for idxs in dsu.grupos(n).values():
+        if len(idxs) < 2:
+            continue
+        vals = [out[i] for i in idxs]
+        if "Positivo" in vals and "Negativo" in vals:
+            continue
+        if "Positivo" in vals:
+            canon = "Positivo"
+        elif "Negativo" in vals:
+            canon = "Negativo"
+        else:
+            continue
+        for i in idxs:
+            if out[i] in ("Neutro", "N/A", "", "Nan"):
+                out[i] = canon
+    return out
 
 def analizar_tono_con_pkl(textos, pkl_file, titulos=None, resumenes=None, marca="", aliases=None):
     try:
@@ -1482,8 +1519,15 @@ def analizar_tono_con_pkl(textos, pkl_file, titulos=None, resumenes=None, marca=
                 preds = pipeline.predict([snippets[i] for i in idx_pred])
                 for i, p in zip(idx_pred, preds):
                     result[i] = {"tono": _norm_pred(p)}
+            if titulos is not None and resumenes is not None:
+                tonos = _propagar_tono_equivalentes([r["tono"] for r in result], list(titulos), list(resumenes))
+                return [{"tono": t} for t in tonos]
             return result
-        return [{"tono": _norm_pred(p)} for p in pipeline.predict(textos)]
+        preds = [{"tono": _norm_pred(p)} for p in pipeline.predict(textos)]
+        if titulos is not None and resumenes is not None:
+            tonos = _propagar_tono_equivalentes([r["tono"] for r in preds], list(titulos), list(resumenes))
+            return [{"tono": t} for t in tonos]
+        return preds
     except Exception as e:
         st.error(f"Error pkl tono: {e}")
         return None
@@ -3306,7 +3350,7 @@ def main():
         <div class="app-header-icon">◈</div>
         <div class="app-header-text">
             <div class="app-header-title">Análisis de Noticias - API</div>
-            <div class="app-header-version">v18.3 · 😼 Realizado por Johnathan Cortés 🕵️‍♂️ </div>
+            <div class="app-header-version">v18.4 · 😼 Realizado por Johnathan Cortés 🕵️‍♂️ </div>
         </div>
         <div class="app-header-badge">IA</div>
     </div>""", unsafe_allow_html=True)
