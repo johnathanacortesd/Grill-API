@@ -726,7 +726,7 @@ def _es_nombre_o_fragmento_marca(etiqueta: str, marca: str, aliases=None) -> boo
     tokens_etiqueta = {t for t in _normalizar_mencion(etiqueta).split() if t not in vacias}
     if not tokens_etiqueta:
         return True
-    for nombre in [marca] + list(aliases or []):
+    for nombre in _variantes_marca(marca, aliases):
         tokens_marca = {t for t in _normalizar_mencion(nombre).split() if t not in vacias}
         if not tokens_marca:
             continue
@@ -810,7 +810,7 @@ def normalize_title_for_comparison(title):
         suffix = parts[1].strip()
         if len(suffix) >= 10:
             cleaned = suffix
-            
+    cleaned = unidecode(cleaned)
     return re.sub(r"\W+", " ", cleaned).lower().strip()
 
 
@@ -879,29 +879,16 @@ def texto_para_embedding(titulo, resumen, max_len=1800):
     return f"{t}. {t}. {t}. {r}"[:max_len]
 
 def _normalizar_mencion(texto: str) -> str:
+    """Minúsculas, sin tildes, sin puntuación. utb == UTB, tecnologica == tecnológica."""
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", unidecode(str(texto).lower()))).strip()
 
-def _coincide_nombre_completo(texto: str, nombre: str) -> bool:
-    nombre = _normalizar_mencion(nombre)
-    if len(nombre) < 3:
-        return False
-    return bool(re.search(rf"(?<![a-z0-9]){re.escape(nombre)}(?![a-z0-9])", texto))
-
-def _menciona_marca_o_alias(texto: str, marca: str, aliases=None) -> bool:
-    normalizado = _normalizar_mencion(texto)
-    nombres = _lista_alias(marca, aliases)
-    if any(_coincide_nombre_completo(normalizado, nombre) for nombre in nombres if str(nombre).strip()):
-        return True
-    tokens_texto = set(normalizado.split())
-    vacias = {"de", "del", "la", "el", "los", "las", "y", "grupo"}
-    for nombre in nombres:
-        tokens_nombre = [t for t in _normalizar_mencion(nombre).split() if len(t) >= 3 and t not in vacias]
-        if not tokens_nombre:
-            continue
-        coincidencias = len(set(tokens_nombre) & tokens_texto)
-        if coincidencias >= min(2, len(set(tokens_nombre))) and coincidencias / len(set(tokens_nombre)) >= 0.60:
-            return True
-    return False
+def _acronimo_de_nombre(nombre: str) -> str:
+    vacias = {"de", "del", "la", "el", "los", "las", "y", "e", "da", "do", "di", "grupo"}
+    toks = [t for t in _normalizar_mencion(nombre).split() if t not in vacias]
+    if len(toks) < 2:
+        return ""
+    ac = "".join(t[0] for t in toks)
+    return ac if 2 <= len(ac) <= 6 else ""
 
 def _lista_alias(marca, aliases=None):
     nombres = []
@@ -918,6 +905,38 @@ def _lista_alias(marca, aliases=None):
             vistos.add(k)
             out.append(n.strip())
     return out
+
+def _variantes_marca(marca, aliases=None):
+    """Formas digitadas + acrónimos (Universidad Tecnológica de Bolívar → utb)."""
+    base = _lista_alias(marca, aliases)
+    extra = []
+    for n in base:
+        ac = _acronimo_de_nombre(n)
+        if ac:
+            extra.append(ac)
+    return _lista_alias(";".join(base + extra), None)
+
+def _coincide_nombre_completo(texto: str, nombre: str) -> bool:
+    nombre = _normalizar_mencion(nombre)
+    if len(nombre) < 2:
+        return False
+    return bool(re.search(rf"(?<![a-z0-9]){re.escape(nombre)}(?![a-z0-9])", texto))
+
+def _menciona_marca_o_alias(texto: str, marca: str, aliases=None) -> bool:
+    normalizado = _normalizar_mencion(texto)
+    nombres = _variantes_marca(marca, aliases)
+    if any(_coincide_nombre_completo(normalizado, nombre) for nombre in nombres if str(nombre).strip()):
+        return True
+    tokens_texto = set(normalizado.split())
+    vacias = {"de", "del", "la", "el", "los", "las", "y", "grupo"}
+    for nombre in nombres:
+        tokens_nombre = [t for t in _normalizar_mencion(nombre).split() if len(t) >= 3 and t not in vacias]
+        if not tokens_nombre:
+            continue
+        coincidencias = len(set(tokens_nombre) & tokens_texto)
+        if coincidencias >= min(2, len(set(tokens_nombre))) and coincidencias / len(set(tokens_nombre)) >= 0.60:
+            return True
+    return False
 
 def extraer_contexto_marca(titulo, resumen, marca, aliases=None, ventana=320):
     """Título + resumen si la marca/alias aparece. No recortar tanto como para perder 'ganadores'."""
@@ -1321,7 +1340,7 @@ def aplicar_consistencia_grupos(df, titulo_col, resumen_col,
 # ======================================
 class ClasificadorTono:
     def __init__(self, marca, aliases):
-        nombres = _lista_alias(marca, aliases)
+        nombres = _variantes_marca(marca, aliases)
         self.marca = nombres[0] if nombres else str(marca or "").strip()
         self.aliases = [n for n in nombres[1:] if n]
         self._all_names = [self.marca] + self.aliases
@@ -1453,21 +1472,28 @@ class ClasificadorTono:
         return final
 
 def _propagar_tono_equivalentes(tonos, titulos, resumenes):
-    """Si la misma noticia (título/resumen muy parecidos) salió Positivo en una fila y Neutro en otra, unifica al no-Neutro."""
+    """Noticias equivalentes (cualquier marca): si una es Positivo/Negativo y otra Neutro, se alinean."""
     n = len(tonos)
     if n < 2:
         return list(tonos)
     out = list(tonos)
-    norm_t = [normalize_title_for_comparison(t) for t in titulos]
-    norm_r = [_normalizar_mencion(str(r)[:280]) for r in resumenes]
+    norm_t = [_normalizar_mencion(normalize_title_for_comparison(t) or t) for t in titulos]
+    norm_r = [_normalizar_mencion(str(r)[:320]) for r in resumenes]
+    combos = [_normalizar_mencion(f"{titulos[i]} {str(resumenes[i])[:320]}") for i in range(n)]
     dsu = DSU(n)
     for i in range(n):
         for j in range(i + 1, n):
             sim_t = SequenceMatcher(None, norm_t[i], norm_t[j]).ratio() if norm_t[i] and norm_t[j] else 0.0
             sim_r = SequenceMatcher(None, norm_r[i], norm_r[j]).ratio() if norm_r[i] and norm_r[j] else 0.0
-            if sim_t >= 0.88 or (sim_t >= 0.72 and sim_r >= 0.70) or sim_r >= 0.82:
-                if not _hay_conflicto_accion(str(titulos[i]), str(titulos[j])):
-                    dsu.union(i, j)
+            ov = _overlap_distintivo(combos[i], combos[j])
+            mismo = (
+                sim_t >= 0.80
+                or sim_r >= 0.78
+                or (sim_t >= 0.62 and sim_r >= 0.58)
+                or (ov >= 0.50 and (sim_t >= 0.55 or sim_r >= 0.55))
+            )
+            if mismo and not _hay_conflicto_accion(combos[i], combos[j]):
+                dsu.union(i, j)
     for idxs in dsu.grupos(n).values():
         if len(idxs) < 2:
             continue
@@ -1546,8 +1572,9 @@ def analizar_temas_con_pkl(textos, pkl_file):
 # ======================================
 class ClasificadorSubtema:
     def __init__(self, marca, aliases):
-        self.marca = marca
-        self.aliases = aliases or []
+        nombres = _variantes_marca(marca, aliases)
+        self.marca = nombres[0] if nombres else str(marca or "")
+        self.aliases = nombres[1:]
         self._cache = {}
         self._umbrales: dict = {}
 
@@ -3350,7 +3377,7 @@ def main():
         <div class="app-header-icon">◈</div>
         <div class="app-header-text">
             <div class="app-header-title">Análisis de Noticias - API</div>
-            <div class="app-header-version">v18.4 · 😼 Realizado por Johnathan Cortés 🕵️‍♂️ </div>
+            <div class="app-header-version">v18.5 · 😼 Realizado por Johnathan Cortés 🕵️‍♂️ </div>
         </div>
         <div class="app-header-badge">IA</div>
     </div>""", unsafe_allow_html=True)
