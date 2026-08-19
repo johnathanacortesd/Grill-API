@@ -936,6 +936,13 @@ def _menciona_marca_o_alias(texto: str, marca: str, aliases=None) -> bool:
         coincidencias = len(set(tokens_nombre) & tokens_texto)
         if coincidencias >= min(2, len(set(tokens_nombre))) and coincidencias / len(set(tokens_nombre)) >= 0.60:
             return True
+        if len(tokens_nombre) == 1:
+            token = tokens_nombre[0]
+            if len(token) >= 6 and any(
+                len(candidate) >= 6 and SequenceMatcher(None, token, candidate).ratio() >= 0.88
+                for candidate in tokens_texto
+            ):
+                return True
     return False
 
 def extraer_contexto_marca(titulo, resumen, marca, aliases=None, ventana=320):
@@ -954,8 +961,18 @@ def extraer_contexto_marca(titulo, resumen, marca, aliases=None, ventana=320):
     if titulo:
         bloques.append(titulo)
     bloques.extend(hits)
-    if resumen and resumen not in hits:
-        bloques.append(resumen[:900])
+    # Never append the complete summary: sentiment must stay centered on the brand.
+    if hits and len(" ".join(hits).split()) < 12:
+        all_parts = [p.strip() for p in partes if p.strip()]
+        for hit in hits:
+            try:
+                pos = all_parts.index(hit)
+                if pos and all_parts[pos - 1] not in bloques:
+                    bloques.insert(0, all_parts[pos - 1])
+                elif pos + 1 < len(all_parts) and all_parts[pos + 1] not in bloques:
+                    bloques.append(all_parts[pos + 1])
+            except ValueError:
+                pass
     vistos, out = set(), []
     for h in bloques:
         k = _normalizar_mencion(h)
@@ -963,6 +980,23 @@ def extraer_contexto_marca(titulo, resumen, marca, aliases=None, ventana=320):
             vistos.add(k)
             out.append(h)
     return " ".join(out)[:1800] if out else texto[:1800]
+
+def extraer_contexto_marca_detallado(titulo, resumen, marca, aliases=None):
+    """Return auditable brand match metadata for sentiment analysis."""
+    titulo, resumen = str(titulo or "").strip(), str(resumen or "").strip()
+    nombres = _variantes_marca(marca, aliases)
+    title_hit = _menciona_marca_o_alias(titulo, marca, aliases)
+    summary_hit = _menciona_marca_o_alias(resumen, marca, aliases)
+    if not title_hit and not summary_hit:
+        return {"contexto": "", "marca_encontrada": "No", "origen": "", "coincidencia": ""}
+    origen = ", ".join(x for x, ok in (("Título", title_hit), ("Resumen", summary_hit)) if ok)
+    source = f"{titulo}. {resumen}".strip(" .")
+    source_norm = _normalizar_mencion(source)
+    matched = next((n for n in nombres if _coincide_nombre_completo(source_norm, n)), marca)
+    return {
+        "contexto": extraer_contexto_marca(titulo, resumen, marca, aliases),
+        "marca_encontrada": "Sí", "origen": origen, "coincidencia": matched,
+    }
 
 def _validar_etiqueta_completa(etiqueta, titulos_grp=None, resumenes_grp=None, marca="", aliases=None, fallback_fn=None):
     if not etiqueta or etiqueta.strip().lower() in ("sin tema", "varios", "n/a"):
@@ -1399,9 +1433,15 @@ class ClasificadorTono:
                 resultado = json.loads(resp.choices[0].message.content)
                 tono = str(resultado.get("tono", "Neutro")).strip().title()
                 
-                return {"tono": tono if tono in ("Positivo", "Negativo", "Neutro") else "Neutro"}
+                tono = tono if tono in ("Positivo", "Negativo", "Neutro") else "Neutro"
+                confianza = str(resultado.get("confianza", "Media")).strip().title()
+                if confianza not in ("Alta", "Media", "Baja"):
+                    confianza = "Media"
+                return {"tono": tono, "confianza": confianza,
+                        "justificacion": str(resultado.get("justificacion", "")).strip()[:400],
+                        "evidencia": eval_txt[:1800]}
             except Exception as e:
-                return {"tono": "Neutro"}
+                return {"tono": "Neutro", "confianza": "Baja", "justificacion": "Error de clasificación", "evidencia": eval_txt[:1800]}
 
     async def procesar_lote_async(self, textos, pbar, resumenes, titulos):
         n = len(textos)
@@ -3368,6 +3408,52 @@ def render_custom_excel_tab():
 # ======================================
 # Main
 # ======================================
+async def run_sentiment_only_async(df, title_col, summary_col, brand, aliases, pkl_file=None):
+    details = [extraer_contexto_marca_detallado(r.get(title_col, ''), r.get(summary_col, ''), brand, aliases) for _, r in df.iterrows()]
+    df = df.copy()
+    idx = [i for i, d in enumerate(details) if d['contexto']]
+    results = [{'tono':'Neutro','confianza':'Alta','justificacion':'La marca no aparece en el título ni en el resumen.'} for _ in details]
+    if idx:
+        pb = st.progress(0)
+        if pkl_file:
+            raw = analizar_tono_con_pkl([details[i]['contexto'] for i in idx], pkl_file)
+        else:
+            raw = await ClasificadorTono(brand, aliases).procesar_lote_async(pd.Series([details[i]['contexto'] for i in idx]), pb, pd.Series([df.iloc[i][summary_col] for i in idx]), pd.Series([df.iloc[i][title_col] for i in idx]))
+        for i, r in zip(idx, raw or []): results[i].update(r)
+    df['Tono IA'] = [r.get('tono','Neutro') for r in results]
+    df['Confianza Tono'] = [r.get('confianza','Media') for r in results]
+    df['Marca encontrada'] = [d['marca_encontrada'] for d in details]
+    df['Justificación tono'] = [r.get('justificacion','') for r in results]
+    df['Contexto analizado'] = [d['contexto'] for d in details]
+    df['Coincidencia marca'] = [d['coincidencia'] for d in details]
+    df['Origen coincidencia'] = [d['origen'] for d in details]
+    return df
+
+def render_sentiment_tab():
+    st.markdown('<div class="sec-label">Sentimiento por Marca</div>', unsafe_allow_html=True)
+    st.caption('Analiza exclusivamente el impacto reputacional de la marca encontrada en título y resumen.')
+    f = st.file_uploader('Sube un Excel (.xlsx)', type=['xlsx'], key='sentiment_uploader')
+    if not f: return
+    try:
+        df = pd.read_excel(io.BytesIO(f.getvalue())); cols = df.columns.tolist()
+        with st.form('sentiment_form'):
+            tc = st.selectbox('Columna de título', cols, 0); sc = st.selectbox('Columna de resumen / aclaración', cols, 1 if len(cols)>1 else 0)
+            brand = st.text_input('Marca principal'); alias_text = st.text_input('Alias separados por ;')
+            pkl = st.file_uploader('Modelo PKL opcional', type=['pkl'], key='sentiment_pkl')
+            submit = st.form_submit_button('Analizar sentimiento', type='primary', use_container_width=True)
+        if submit:
+            if not brand.strip(): st.error('Ingresa la marca principal.')
+            else:
+                if not pkl: openai.api_key = st.secrets['OPENAI_API_KEY']
+                aliases = [a.strip() for a in alias_text.split(';') if a.strip()]
+                with st.spinner('Analizando menciones de la marca...'):
+                    result = asyncio.run(run_sentiment_only_async(df, tc, sc, brand.strip(), aliases, pkl))
+                st.dataframe(result.head(20), use_container_width=True)
+                out = io.BytesIO()
+                with pd.ExcelWriter(out, engine='openpyxl') as w: result.to_excel(w, index=False, sheet_name='Sentimiento')
+                st.download_button('Descargar Excel de Sentimiento', out.getvalue(), 'Sentimiento_Marca.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', use_container_width=True, type='primary')
+    except Exception as e: st.error(f'Error durante el análisis: {e}')
+
 def main():
     load_custom_css()
     if not check_password(): return
@@ -3382,7 +3468,7 @@ def main():
         <div class="app-header-badge">IA</div>
     </div>""", unsafe_allow_html=True)
 
-    tab1, tab2, tab3 = st.tabs(["Análisis Completo", "Análisis Rápido", "Excel Personalizado"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Análisis Completo", "Análisis Rápido", "Excel Personalizado", "Sentimiento"])
 
     with tab1:
         if not st.session_state.get("processing_complete", False):
@@ -3510,6 +3596,9 @@ def main():
 
     with tab3:
         render_custom_excel_tab()
+
+    with tab4:
+        render_sentiment_tab()
 
     st.markdown(
         '<div class="footer">v18.2 · Análisis de Noticias con IA · Johnathan Cortés ©</div>',
