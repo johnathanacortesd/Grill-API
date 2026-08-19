@@ -979,6 +979,10 @@ def _safe_filename_part(value):
     cleaned = re.sub(r'[^A-Za-z0-9_-]+', '_', unidecode(str(value or '')).strip())
     return cleaned.strip('_') or 'marca'
 
+def _brand_audit(titulo, resumen, marca, aliases):
+    d = extraer_contexto_marca_detallado(titulo, resumen, marca, aliases)
+    return d['contexto'], d['coincidencia'], d['origen']
+
 def extraer_contexto_marca(titulo, resumen, marca, aliases=None, ventana=320):
     """Título + resumen si la marca/alias aparece. No recortar tanto como para perder 'ganadores'."""
     titulo = str(titulo or "").strip()
@@ -2872,6 +2876,7 @@ def generate_output_excel(rows, km):
         "Cuerpo Completo"   # ── ADICIÓN: columna final con el CuerpoEs completo, sin truncar ──
     ]
     NUM = {"ID Noticia", "Nro. Pagina", "Dimensión", "Duración - Nro. Caracteres", "CPE", "Tier", "Audiencia"}
+    ORDER += ["Contexto analizado", "Coincidencia marca", "Origen coincidencia"]
     ws.append(ORDER)
     
     font_hyperlink = Font(color="000000", underline=None)
@@ -2885,6 +2890,8 @@ def generate_output_excel(rows, km):
     col_idx_map = {name: ORDER.index(name) + 1 for name in ORDER}
         
     for row in rows:
+        ctx, match, origin = _brand_audit(row.get(km.get("titulo"), ""), row.get(km.get("resumen"), ""), st.session_state.get("brand_name", ""), st.session_state.get("brand_aliases", []))
+        row["Contexto analizado"], row["Coincidencia marca"], row["Origen coincidencia"] = ctx, match, origin
         tk = km.get("titulo")
         if tk and tk in row: row[tk] = clean_title_for_output(row.get(tk))
         rk = km.get("resumen")
@@ -3104,6 +3111,8 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
     co = (st.session_state['tokens_output']    / 1e6) * PRICE_OUTPUT_1M
     ce = (st.session_state['tokens_embedding'] / 1e6) * PRICE_EMBEDDING_1M
     
+    st.session_state["brand_name"] = bn
+    st.session_state["brand_aliases"] = ba
     with st.status("Paso 5 · Informe", expanded=True) as s:
         st.session_state["output_data"]     = generate_output_excel(rows, km)
         st.session_state["output_filename"] = f"Informe_IA_{bn.replace(' ', '_')}_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
@@ -3128,6 +3137,8 @@ async def run_quick_async(df, tc, sc, bn, al):
         pb = st.progress(0)
         res = await ClasificadorTono(bn, al).procesar_lote_async(df["_txt"], pb, df[sc].fillna(''), df[tc].fillna(''))
         df['Tono IA'] = [r["tono"] for r in res]
+        audits = [_brand_audit(r.get(tc, ''), r.get(sc, ''), bn, al) for _, r in df.iterrows()]
+        df['Contexto analizado'], df['Coincidencia marca'], df['Origen coincidencia'] = zip(*audits)
         s.update(label="✓ Tono", state="complete")
     with st.status("Clasificación", expanded=True) as s:
         pb = st.progress(0)
@@ -3144,7 +3155,15 @@ async def run_quick_async(df, tc, sc, bn, al):
     st.session_state['quick_cost'] = f"${ci + co + ce:.4f} USD"
     return df
 
-def gen_quick_excel(df):
+def gen_quick_excel(df, original_bytes=None):
+    if original_bytes:
+        wb = load_workbook(io.BytesIO(original_bytes))
+        ws = wb.active
+        start = ws.max_column + 1
+        for offset, col in enumerate([c for c in df.columns if c not in list(ws.values)[0]], start):
+            ws.cell(1, offset, col)
+            for i, value in enumerate(df[col].tolist(), 2): ws.cell(i, offset, value)
+        out = io.BytesIO(); wb.save(out); return out.getvalue()
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine='openpyxl') as w:
         df.to_excel(w, index=False, sheet_name='Analisis')
@@ -3163,7 +3182,7 @@ def render_quick_tab():
         st.dataframe(st.session_state.quick_result.head(10), use_container_width=True)
         st.download_button(
             "Descargar",
-            data=gen_quick_excel(st.session_state.quick_result),
+            data=gen_quick_excel(st.session_state.quick_result, st.session_state.get('quick_bytes')),
             file_name="Analisis_Rapido_IA.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
@@ -3180,7 +3199,8 @@ def render_quick_tab():
         f = st.file_uploader("Excel", type=["xlsx"], label_visibility="collapsed", key="qu")
         if f:
             try:
-                st.session_state.quick_df   = pd.read_excel(f)
+                st.session_state.quick_bytes = f.getvalue()
+                st.session_state.quick_df   = pd.read_excel(io.BytesIO(st.session_state.quick_bytes))
                 st.session_state.quick_name = f.name
                 st.rerun()
             except Exception as e:
@@ -3263,6 +3283,8 @@ async def run_custom_excel_async(file_bytes, tc, sc, bn, al, mode="API de OpenAI
         else:
             tonos = ["N/A"] * len(df)
         df['Tono IA'] = tonos
+        audits = [_brand_audit(r.get(tc, ''), r.get(sc, ''), bn, al) for _, r in df.iterrows()]
+        df['Contexto analizado'], df['Coincidencia marca'], df['Origen coincidencia'] = zip(*audits)
         s.update(label="✓ Tono IA evaluado", state="complete")
 
     # --- PASO 3: SUBTEMAS Y TEMAS ---
@@ -3300,12 +3322,18 @@ async def run_custom_excel_async(file_bytes, tc, sc, bn, al, mode="API de OpenAI
     col_tono    = max_col + 1
     col_tema    = max_col + 2
     col_subtema = max_col + 3
+    col_contexto = max_col + 4
+    col_coincidencia = max_col + 5
+    col_origen = max_col + 6
 
     # Encabezados en negrita
     font_bold = Font(bold=True)
     ws.cell(row=1, column=col_tono, value="Tono IA").font = font_bold
     ws.cell(row=1, column=col_tema, value="Tema").font = font_bold
     ws.cell(row=1, column=col_subtema, value="Subtema").font = font_bold
+    ws.cell(row=1, column=col_contexto, value="Contexto analizado").font = font_bold
+    ws.cell(row=1, column=col_coincidencia, value="Coincidencia marca").font = font_bold
+    ws.cell(row=1, column=col_origen, value="Origen coincidencia").font = font_bold
 
     # Asignar valores por fila manteniendo la coincidencia exacta
     for idx, row_data in df.iterrows():
@@ -3313,6 +3341,9 @@ async def run_custom_excel_async(file_bytes, tc, sc, bn, al, mode="API de OpenAI
         ws.cell(row=r, column=col_tono, value=str(row_data['Tono IA']))
         ws.cell(row=r, column=col_tema, value=str(row_data['Tema']))
         ws.cell(row=r, column=col_subtema, value=str(row_data['Subtema']))
+        ws.cell(row=r, column=col_contexto, value=str(row_data['Contexto analizado']))
+        ws.cell(row=r, column=col_coincidencia, value=str(row_data['Coincidencia marca']))
+        ws.cell(row=r, column=col_origen, value=str(row_data['Origen coincidencia']))
 
     buf_out = io.BytesIO()
     wb.save(buf_out)
