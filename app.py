@@ -943,7 +943,41 @@ def _menciona_marca_o_alias(texto: str, marca: str, aliases=None) -> bool:
                 for candidate in tokens_texto
             ):
                 return True
+        else:
+            # Compare each brand/alias token against nearby text tokens. This accepts
+            # small spelling differences while still requiring most of the name.
+            fuzzy_hits = 0
+            for token in set(tokens_nombre):
+                if any(
+                    candidate == token or (
+                        len(token) >= 5 and len(candidate) >= 5
+                        and SequenceMatcher(None, token, candidate).ratio() >= 0.86
+                    )
+                    for candidate in tokens_texto
+                ):
+                    fuzzy_hits += 1
+            required = max(1, int(np.ceil(len(set(tokens_nombre)) * 0.60)))
+            if fuzzy_hits >= required and (fuzzy_hits >= 2 or len(set(tokens_nombre)) == 1):
+                return True
     return False
+
+def _default_text_column_index(columns, preferred_names, fallback=0):
+    """Find common title/summary column spellings without accents or case sensitivity."""
+    normalized = [_normalizar_mencion(str(c)).replace("-", " ") for c in columns]
+    preferred = [_normalizar_mencion(x).replace("-", " ") for x in preferred_names]
+    for wanted in preferred:
+        for i, current in enumerate(normalized):
+            if current == wanted:
+                return i
+    for wanted in preferred:
+        for i, current in enumerate(normalized):
+            if wanted in current or current in wanted:
+                return i
+    return min(fallback, max(0, len(columns) - 1))
+
+def _safe_filename_part(value):
+    cleaned = re.sub(r'[^A-Za-z0-9_-]+', '_', unidecode(str(value or '')).strip())
+    return cleaned.strip('_') or 'marca'
 
 def extraer_contexto_marca(titulo, resumen, marca, aliases=None, ventana=320):
     """Título + resumen si la marca/alias aparece. No recortar tanto como para perder 'ganadores'."""
@@ -1412,7 +1446,8 @@ class ClasificadorTono:
                 f"  - Emite un comunicado regular sin evidencia de crisis ni logro relevante.\n\n"
                 f"⚠️ ATENCIÓN: Ignora el tono del sector o de terceros. Evalúa ÚNICAMENTE cómo el hecho afecta "
                 f"la reputación corporativa de '{self.marca}': mejora (Positivo), empeora (Negativo) o no cambia (Neutro).\n\n"
-                f'Responde ÚNICAMENTE con JSON en este formato: {{"tono": "Positivo|Negativo|Neutro"}}'
+                f'Responde ÚNICAMENTE con JSON: {{"tono":"Positivo|Negativo|Neutro", '
+                f'"confianza":"Alta|Media|Baja", "justificacion":"explicación concreta de máximo 35 palabras"}}'
             )
 
             try:
@@ -1420,7 +1455,7 @@ class ClasificadorTono:
                     openai.ChatCompletion.acreate,
                     model=OPENAI_MODEL_CLASIFICACION,
                     messages=[{"role": "user", "content": prompt}],
-                    max_tokens=40,
+                    max_tokens=100,
                     temperature=0.0,
                     response_format={"type": "json_object"}
                 )
@@ -3154,8 +3189,8 @@ def render_quick_tab():
         with st.form("qf"):
             cols = st.session_state.quick_df.columns.tolist()
             c1, c2 = st.columns(2)
-            tc = c1.selectbox("Col. título",  cols, 0)
-            sc = c2.selectbox("Col. resumen", cols, 1 if len(cols) > 1 else 0)
+            tc = c1.selectbox("Col. título", cols, _default_text_column_index(cols, ['Título', 'Titulo', 'Titular', 'Headline'], 0))
+            sc = c2.selectbox("Col. resumen", cols, _default_text_column_index(cols, ['Resumen - Aclaración', 'Resumen - Aclaracion', 'Resumen', 'Cuerpo', 'Descripción', 'Descripcion'], 1))
             bn  = st.text_input("Marca",       placeholder="Ej: Bancolombia")
             bat = st.text_input("Alias (;)",   placeholder="Ej: Grupo Bancolombia;Ban")
             if st.form_submit_button("Analizar", use_container_width=True, type="primary"):
@@ -3346,8 +3381,8 @@ def render_custom_excel_tab():
         with st.form("custom_form"):
             st.markdown('<div class="sec-label">Selección de Columnas</div>', unsafe_allow_html=True)
             c_col1, c_col2 = st.columns(2)
-            tc = c_col1.selectbox("Columna que contiene el TÍTULO", cols, index=0)
-            sc = c_col2.selectbox("Columna que contiene el RESUMEN / CUERPO", cols, index=1 if len(cols) > 1 else 0)
+            tc = c_col1.selectbox("Columna que contiene el TÍTULO", cols, index=_default_text_column_index(cols, ['Título', 'Titulo', 'Titular', 'Headline'], 0))
+            sc = c_col2.selectbox("Columna que contiene el RESUMEN / CUERPO", cols, index=_default_text_column_index(cols, ['Resumen - Aclaración', 'Resumen - Aclaracion', 'Resumen', 'Cuerpo', 'Descripción', 'Descripcion'], 1))
 
             st.markdown('<div class="sec-label">Configuración del Análisis</div>', unsafe_allow_html=True)
             cl, cr = st.columns([3, 2])
@@ -3437,7 +3472,8 @@ def render_sentiment_tab():
     try:
         df = pd.read_excel(io.BytesIO(f.getvalue())); cols = df.columns.tolist()
         with st.form('sentiment_form'):
-            tc = st.selectbox('Columna de título', cols, 0); sc = st.selectbox('Columna de resumen / aclaración', cols, 1 if len(cols)>1 else 0)
+            tc = st.selectbox('Columna de título', cols, _default_text_column_index(cols, ['Título', 'Titulo', 'Titular', 'Headline'], 0))
+            sc = st.selectbox('Columna de resumen / aclaración', cols, _default_text_column_index(cols, ['Resumen - Aclaración', 'Resumen - Aclaracion', 'Resumen', 'Cuerpo', 'Descripción', 'Descripcion'], 1))
             brand = st.text_input('Marca principal'); alias_text = st.text_input('Alias separados por ;')
             pkl = st.file_uploader('Modelo PKL opcional', type=['pkl'], key='sentiment_pkl')
             submit = st.form_submit_button('Analizar sentimiento', type='primary', use_container_width=True)
@@ -3451,7 +3487,8 @@ def render_sentiment_tab():
                 st.dataframe(result.head(20), use_container_width=True)
                 out = io.BytesIO()
                 with pd.ExcelWriter(out, engine='openpyxl') as w: result.to_excel(w, index=False, sheet_name='Sentimiento')
-                st.download_button('Descargar Excel de Sentimiento', out.getvalue(), 'Sentimiento_Marca.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', use_container_width=True, type='primary')
+                output_name = f"sentimiento_{_safe_filename_part(brand)}.xlsx"
+                st.download_button('Descargar Excel de Sentimiento', out.getvalue(), output_name, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', use_container_width=True, type='primary')
     except Exception as e: st.error(f'Error durante el análisis: {e}')
 
 def main():
