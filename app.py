@@ -1443,7 +1443,8 @@ class ClasificadorTono:
                 f"  - La noticia habla de una crisis del sector/país, pero la marca solo es mencionada informando o adaptándose.\n"
                 f"  - Se menciona a la marca de paso, sin rol (no aplica si es ganadora, premiada o protagonista).\n"
                 f"  - Una persona, autoridad, proveedor o tercero es quien recibe el efecto positivo o negativo.\n"
-                f"  - Emite un comunicado regular sin evidencia de crisis ni logro relevante.\n\n"
+                f"  - Emite un comunicado regular sin evidencia de crisis ni logro relevante.\n"
+                f"  - Critica, denuncia o advierte sobre un problema de terceros o del sector; la crítica de la marca NO es una crítica contra la marca.\n\n"
                 f"⚠️ ATENCIÓN: Ignora el tono del sector o de terceros. Evalúa ÚNICAMENTE cómo el hecho afecta "
                 f"la reputación corporativa de '{self.marca}': mejora (Positivo), empeora (Negativo) o no cambia (Neutro).\n\n"
                 f'Responde ÚNICAMENTE con JSON: {{"tono":"Positivo|Negativo|Neutro", '
@@ -3190,7 +3191,7 @@ def render_quick_tab():
             cols = st.session_state.quick_df.columns.tolist()
             c1, c2 = st.columns(2)
             tc = c1.selectbox("Col. título", cols, _default_text_column_index(cols, ['Título', 'Titulo', 'Titular', 'Headline'], 0))
-            sc = c2.selectbox("Col. resumen", cols, _default_text_column_index(cols, ['Resumen - Aclaración', 'Resumen - Aclaracion', 'Resumen', 'Cuerpo', 'Descripción', 'Descripcion'], 1))
+            sc = c2.selectbox("Col. resumen", cols, _default_text_column_index(cols, ['CuerpoEs', 'Resumen - Aclaración', 'Resumen - Aclaracion', 'Resumen', 'Cuerpo', 'Descripción', 'Descripcion'], 1))
             bn  = st.text_input("Marca",       placeholder="Ej: Bancolombia")
             bat = st.text_input("Alias (;)",   placeholder="Ej: Grupo Bancolombia;Ban")
             if st.form_submit_button("Analizar", use_container_width=True, type="primary"):
@@ -3382,7 +3383,7 @@ def render_custom_excel_tab():
             st.markdown('<div class="sec-label">Selección de Columnas</div>', unsafe_allow_html=True)
             c_col1, c_col2 = st.columns(2)
             tc = c_col1.selectbox("Columna que contiene el TÍTULO", cols, index=_default_text_column_index(cols, ['Título', 'Titulo', 'Titular', 'Headline'], 0))
-            sc = c_col2.selectbox("Columna que contiene el RESUMEN / CUERPO", cols, index=_default_text_column_index(cols, ['Resumen - Aclaración', 'Resumen - Aclaracion', 'Resumen', 'Cuerpo', 'Descripción', 'Descripcion'], 1))
+            sc = c_col2.selectbox("Columna que contiene el RESUMEN / CUERPO", cols, index=_default_text_column_index(cols, ['CuerpoEs', 'Resumen - Aclaración', 'Resumen - Aclaracion', 'Resumen', 'Cuerpo', 'Descripción', 'Descripcion'], 1))
 
             st.markdown('<div class="sec-label">Configuración del Análisis</div>', unsafe_allow_html=True)
             cl, cr = st.columns([3, 2])
@@ -3458,7 +3459,6 @@ async def run_sentiment_only_async(df, title_col, summary_col, brand, aliases, p
     df['Tono IA'] = [r.get('tono','Neutro') for r in results]
     df['Confianza Tono'] = [r.get('confianza','Media') for r in results]
     df['Marca encontrada'] = [d['marca_encontrada'] for d in details]
-    df['Justificación tono'] = [r.get('justificacion','') for r in results]
     df['Contexto analizado'] = [d['contexto'] for d in details]
     df['Coincidencia marca'] = [d['coincidencia'] for d in details]
     df['Origen coincidencia'] = [d['origen'] for d in details]
@@ -3473,7 +3473,7 @@ def render_sentiment_tab():
         df = pd.read_excel(io.BytesIO(f.getvalue())); cols = df.columns.tolist()
         with st.form('sentiment_form'):
             tc = st.selectbox('Columna de título', cols, _default_text_column_index(cols, ['Título', 'Titulo', 'Titular', 'Headline'], 0))
-            sc = st.selectbox('Columna de resumen / aclaración', cols, _default_text_column_index(cols, ['Resumen - Aclaración', 'Resumen - Aclaracion', 'Resumen', 'Cuerpo', 'Descripción', 'Descripcion'], 1))
+            sc = st.selectbox('Columna de resumen / aclaración', cols, _default_text_column_index(cols, ['CuerpoEs', 'Resumen - Aclaración', 'Resumen - Aclaracion', 'Resumen', 'Cuerpo', 'Descripción', 'Descripcion'], 1))
             brand = st.text_input('Marca principal'); alias_text = st.text_input('Alias separados por ;')
             pkl = st.file_uploader('Modelo PKL opcional', type=['pkl'], key='sentiment_pkl')
             submit = st.form_submit_button('Analizar sentimiento', type='primary', use_container_width=True)
