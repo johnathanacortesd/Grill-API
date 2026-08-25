@@ -1591,8 +1591,27 @@ def _propagar_tono_equivalentes(tonos, titulos, resumenes):
                 out[i] = canon
     return out
 
-def analizar_tono_con_pkl(textos, pkl_file, titulos=None, resumenes=None, marca="", aliases=None):
+def _predict_pkl_in_batches(pipeline, textos, progress=None, batch_size=64):
+    """Run sklearn PKL inference in bounded batches so Streamlit can show progress."""
+    values = list(textos)
+    if not values:
+        return []
+    predictions = []
+    total = len(values)
+    for start in range(0, total, batch_size):
+        end = min(start + batch_size, total)
+        predictions.extend(pipeline.predict(values[start:end]))
+        if progress is not None:
+            progress.progress(end / total, f"Prediciendo PKL {end}/{total}")
+    return predictions
+
+
+def analizar_tono_con_pkl(textos, pkl_file, titulos=None, resumenes=None, marca="", aliases=None, progress=None):
     try:
+        if progress is not None:
+            progress.progress(0.02, "Cargando modelo PKL...")
+        if hasattr(pkl_file, "seek"):
+            pkl_file.seek(0)
         pipeline = joblib.load(pkl_file)
         TM = {
             1: "Positivo", "1": "Positivo", "positivo": "Positivo", "Positivo": "Positivo",
@@ -1622,14 +1641,14 @@ def analizar_tono_con_pkl(textos, pkl_file, titulos=None, resumenes=None, marca=
             result = [{"tono": "Neutro"}] * n
             idx_pred = [i for i, f in enumerate(flags) if f]
             if idx_pred:
-                preds = pipeline.predict([snippets[i] for i in idx_pred])
+                preds = _predict_pkl_in_batches(pipeline, [snippets[i] for i in idx_pred], progress)
                 for i, p in zip(idx_pred, preds):
                     result[i] = {"tono": _norm_pred(p)}
             if titulos is not None and resumenes is not None:
                 tonos = _propagar_tono_equivalentes([r["tono"] for r in result], list(titulos), list(resumenes))
                 return [{"tono": t} for t in tonos]
             return result
-        preds = [{"tono": _norm_pred(p)} for p in pipeline.predict(textos)]
+        preds = [{"tono": _norm_pred(p)} for p in _predict_pkl_in_batches(pipeline, textos, progress)]
         if titulos is not None and resumenes is not None:
             tonos = _propagar_tono_equivalentes([r["tono"] for r in preds], list(titulos), list(resumenes))
             return [{"tono": t} for t in tonos]
@@ -3068,7 +3087,7 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
                 res = analizar_tono_con_pkl(
                     df["_txt"].tolist(), tpkl,
                     titulos=df[km["titulo"]], resumenes=df[km["resumen"]],
-                    marca=bn, aliases=ba,
+                    marca=bn, aliases=ba, progress=pb,
                 )
                 if res is None: st.stop()
             elif "API" in mode or "Híbrido" in mode:
