@@ -40,8 +40,22 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
+def _resolver_modelo_clasificacion():
+    """Modelo de clasificación configurable sin redeploy.
+    Orden: env OPENAI_CLASIF_MODEL → secret OPENAI_CLASIF_MODEL → gpt-5-nano por defecto."""
+    env = os.environ.get("OPENAI_CLASIF_MODEL")
+    if env:
+        return env
+    try:
+        s = st.secrets.get("OPENAI_CLASIF_MODEL")
+        if s:
+            return s
+    except Exception:
+        pass
+    return "gpt-5-nano-2025-08-07"
+
 OPENAI_MODEL_EMBEDDING     = "text-embedding-3-small"
-OPENAI_MODEL_CLASIFICACION = "gpt-4.1-nano-2025-04-14"
+OPENAI_MODEL_CLASIFICACION = _resolver_modelo_clasificacion()
 
 CONCURRENT_REQUESTS          = 50
 SIMILARITY_THRESHOLD_TONO    = 0.94
@@ -979,60 +993,87 @@ def _safe_filename_part(value):
     cleaned = re.sub(r'[^A-Za-z0-9_-]+', '_', unidecode(str(value or '')).strip())
     return cleaned.strip('_') or 'marca'
 
-def _brand_audit(titulo, resumen, marca, aliases):
-    d = extraer_contexto_marca_detallado(titulo, resumen, marca, aliases)
+_TERMINAL_PUNCT = re.compile(r'[.!?…]')
+MIN_PALABRAS_CONTEXTO = 10
+MAX_CONTEXTO_CHARS = 1800
+
+def _texto_hasta_terminal(texto, n=1):
+    """Recorta 'texto' para que termine justo tras el enésimo signo de cierre (punto)."""
+    if not texto:
+        return ""
+    for m in _TERMINAL_PUNCT.finditer(texto):
+        n -= 1
+        if n == 0:
+            return texto[:m.end()].strip(" \n\t")
+    return texto.strip(" \n\t")
+
+def _extraer_parrafo_marca(fuente, marca, aliases):
+    """Contexto estructurado: inicio del párrafo → punto final del párrafo completo.
+    Si el tramo queda muy corto (< MIN_PALABRAS_CONTEXTO), se extiende hasta el
+    segundo punto del texto siguiente (regla: 'a punto final, o al segundo punto
+    si el texto es muy corto')."""
+    parrafos = [p.strip() for p in re.split(r'\n+', fuente) if p and p.strip()]
+    if not parrafos:
+        parrafos = [fuente.strip()]
+    con_hits = [i for i, p in enumerate(parrafos) if _menciona_marca_o_alias(p, marca, aliases)]
+    if not con_hits:
+        return ""
+    i = con_hits[0]  # primer párrafo que menciona la marca
+    # Tramo primario: párrafo completo, desde su inicio hasta su punto final.
+    tramo = parrafos[i]
+    palabras = len(tramo.split())
+    # Si el párrafo quedó muy corto, ampliar con el texto siguiente hasta el 2º punto.
+    if palabras < MIN_PALABRAS_CONTEXTO:
+        partes = [tramo]
+        for j in range(i + 1, len(parrafos)):
+            partes.append(_texto_hasta_terminal(parrafos[j], n=2))
+            tramo = " ".join(p for p in partes if p).strip()
+            if len(tramo.split()) >= MIN_PALABRAS_CONTEXTO:
+                break
+    return tramo[:MAX_CONTEXTO_CHARS]
+
+def _brand_audit(titulo, resumen, marca, aliases, cuerpo=None):
+    d = extraer_contexto_marca_detallado(titulo, resumen, marca, aliases, cuerpo)
     return d['contexto'], d['coincidencia'], d['origen']
 
-def extraer_contexto_marca(titulo, resumen, marca, aliases=None, ventana=320):
-    """Título + resumen si la marca/alias aparece. No recortar tanto como para perder 'ganadores'."""
-    titulo = str(titulo or "").strip()
-    resumen = str(resumen or "").strip()
-    texto = f"{titulo}. {resumen}".strip(" .")
-    if not texto or not marca or not _menciona_marca_o_alias(texto, marca, aliases):
+def extraer_contexto_marca(titulo, resumen, marca, aliases=None, cuerpo=None, ventana=320):
+    """Contexto analizado de la marca: párrafo completo desde su inicio hasta su
+    punto final. Prioridad de fuentes: Cuerpo Completo → Resumen → Título. Si el
+    tramo queda muy corto, extiende hasta el segundo punto del texto siguiente."""
+    titulo   = clean_text(str(titulo or "")).strip()
+    resumen  = clean_text(str(resumen or "")).strip()
+    cuerpo   = clean_text(str(cuerpo or "")).strip()
+    if not marca:
         return ""
-    partes = re.split(r'(?<=[\.\!\?\n])\s+', texto)
-    if len(partes) <= 1:
-        partes = re.split(r'\n+', texto)
-    hits = [p.strip() for p in partes if p.strip() and _menciona_marca_o_alias(p, marca, aliases)]
-    # Siempre incluir el título: ahí suele estar "ganadores" / el hecho.
-    bloques = []
-    if titulo:
-        bloques.append(titulo)
-    bloques.extend(hits)
-    # Never append the complete summary: sentiment must stay centered on the brand.
-    if hits and len(" ".join(hits).split()) < 12:
-        all_parts = [p.strip() for p in partes if p.strip()]
-        for hit in hits:
-            try:
-                pos = all_parts.index(hit)
-                if pos and all_parts[pos - 1] not in bloques:
-                    bloques.insert(0, all_parts[pos - 1])
-                elif pos + 1 < len(all_parts) and all_parts[pos + 1] not in bloques:
-                    bloques.append(all_parts[pos + 1])
-            except ValueError:
-                pass
-    vistos, out = set(), []
-    for h in bloques:
-        k = _normalizar_mencion(h)
-        if k and k not in vistos:
-            vistos.add(k)
-            out.append(h)
-    return " ".join(out)[:1800] if out else texto[:1800]
+    fuentes = []
+    if cuerpo:   fuentes.append(cuerpo)
+    if resumen:  fuentes.append(resumen)
+    if titulo:   fuentes.append(titulo)
+    fuente = ""
+    for f in fuentes:
+        if _menciona_marca_o_alias(f, marca, aliases):
+            fuente = f
+            break
+    if not fuente:
+        return ""
+    return _extraer_parrafo_marca(fuente, marca, aliases)
 
-def extraer_contexto_marca_detallado(titulo, resumen, marca, aliases=None):
+def extraer_contexto_marca_detallado(titulo, resumen, marca, aliases=None, cuerpo=None):
     """Return auditable brand match metadata for sentiment analysis."""
     titulo, resumen = str(titulo or "").strip(), str(resumen or "").strip()
+    cuerpo = str(cuerpo or "").strip()
     nombres = _variantes_marca(marca, aliases)
     title_hit = _menciona_marca_o_alias(titulo, marca, aliases)
     summary_hit = _menciona_marca_o_alias(resumen, marca, aliases)
-    if not title_hit and not summary_hit:
+    body_hit = bool(cuerpo) and _menciona_marca_o_alias(cuerpo, marca, aliases)
+    if not title_hit and not summary_hit and not body_hit:
         return {"contexto": "", "marca_encontrada": "No", "origen": "", "coincidencia": ""}
-    origen = ", ".join(x for x, ok in (("Título", title_hit), ("Resumen", summary_hit)) if ok)
-    source = f"{titulo}. {resumen}".strip(" .")
+    origen = ", ".join(x for x, ok in (("Título", title_hit), ("Resumen", summary_hit), ("Cuerpo", body_hit)) if ok)
+    source = f"{titulo}. {resumen}. {cuerpo}".strip(" .")
     source_norm = _normalizar_mencion(source)
     matched = next((n for n in nombres if _coincide_nombre_completo(source_norm, n)), marca)
     return {
-        "contexto": extraer_contexto_marca(titulo, resumen, marca, aliases),
+        "contexto": extraer_contexto_marca(titulo, resumen, marca, aliases, cuerpo),
         "marca_encontrada": "Sí", "origen": origen, "coincidencia": matched,
     }
 
@@ -1460,7 +1501,7 @@ class ClasificadorTono:
                     openai.ChatCompletion.acreate,
                     model=OPENAI_MODEL_CLASIFICACION,
                     messages=[{"role": "user", "content": prompt}],
-                    max_tokens=100,
+                    max_tokens=300,
                     temperature=0.0,
                     response_format={"type": "json_object"}
                 )
@@ -1483,7 +1524,7 @@ class ClasificadorTono:
             except Exception as e:
                 return {"tono": "Neutro", "confianza": "Baja", "justificacion": "Error de clasificación", "evidencia": eval_txt[:1800]}
 
-    async def procesar_lote_async(self, textos, pbar, resumenes, titulos):
+    async def procesar_lote_async(self, textos, pbar, resumenes, titulos, cuerpos=None):
         n = len(textos)
         txts = textos.tolist()
         pbar.progress(0.05, "Agrupando noticias para análisis de tono...")
@@ -1509,7 +1550,10 @@ class ClasificadorTono:
                 
         grupos = dsu.grupos(n)
         contextos = [
-            extraer_contexto_marca(str(titulos.iloc[i]), str(resumenes.iloc[i]), self.marca, self.aliases)
+            extraer_contexto_marca(
+                str(titulos.iloc[i]), str(resumenes.iloc[i]), self.marca, self.aliases,
+                cuerpos.iloc[i] if cuerpos is not None else None
+            )
             for i in range(n)
         ]
         reps = {}
@@ -1606,7 +1650,7 @@ def _predict_pkl_in_batches(pipeline, textos, progress=None, batch_size=64):
     return predictions
 
 
-def analizar_tono_con_pkl(textos, pkl_file, titulos=None, resumenes=None, marca="", aliases=None, progress=None):
+def analizar_tono_con_pkl(textos, pkl_file, titulos=None, resumenes=None, marca="", aliases=None, progress=None, cuerpos=None):
     try:
         if progress is not None:
             progress.progress(0.02, "Cargando modelo PKL...")
@@ -1629,7 +1673,7 @@ def analizar_tono_con_pkl(textos, pkl_file, titulos=None, resumenes=None, marca=
             n = len(titulos)
             snippets, flags = [], []
             for i in range(n):
-                ctx = extraer_contexto_marca(titulos[i], resumenes[i], marca, aliases)
+                ctx = extraer_contexto_marca(titulos[i], resumenes[i], marca, aliases, cuerpos[i] if cuerpos is not None else None)
                 if ctx:
                     tit = str(titulos[i] or "").strip()
                     snippet = ctx if (tit and ctx.lower().startswith(tit[:20].lower())) else (f"{tit}. {ctx}" if tit else ctx)
@@ -2909,7 +2953,7 @@ def generate_output_excel(rows, km):
     col_idx_map = {name: ORDER.index(name) + 1 for name in ORDER}
         
     for row in rows:
-        ctx, match, origin = _brand_audit(row.get(km.get("titulo"), ""), row.get(km.get("resumen"), ""), st.session_state.get("brand_name", ""), st.session_state.get("brand_aliases", []))
+        ctx, match, origin = _brand_audit(row.get(km.get("titulo"), ""), row.get(km.get("resumen"), ""), st.session_state.get("brand_name", ""), st.session_state.get("brand_aliases", []), row.get("Cuerpo Completo"))
         row["Contexto analizado"], row["Coincidencia marca"], row["Origen coincidencia"] = ctx, match, origin
         tk = km.get("titulo")
         if tk and tk in row: row[tk] = clean_title_for_output(row.get(tk))
@@ -3088,11 +3132,13 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
                     df["_txt"].tolist(), tpkl,
                     titulos=df[km["titulo"]], resumenes=df[km["resumen"]],
                     marca=bn, aliases=ba, progress=pb,
+                    cuerpos=df['Cuerpo Completo'] if 'Cuerpo Completo' in df.columns else None,
                 )
                 if res is None: st.stop()
             elif "API" in mode or "Híbrido" in mode:
                 res = await ClasificadorTono(bn, ba).procesar_lote_async(
-                    df["_txt"], pb, df[km["resumen"]], df[km["titulo"]]
+                    df["_txt"], pb, df[km["resumen"]], df[km["titulo"]],
+                    df['Cuerpo Completo'] if 'Cuerpo Completo' in df.columns else None,
                 )
             else:
                 res = [{"tono": "N/A"}] * len(ta)
@@ -3156,7 +3202,7 @@ async def run_quick_async(df, tc, sc, bn, al):
         pb = st.progress(0)
         res = await ClasificadorTono(bn, al).procesar_lote_async(df["_txt"], pb, df[sc].fillna(''), df[tc].fillna(''))
         df['Tono IA'] = [r["tono"] for r in res]
-        audits = [_brand_audit(r.get(tc, ''), r.get(sc, ''), bn, al) for _, r in df.iterrows()]
+        audits = [_brand_audit(r.get(tc, ''), r.get(sc, ''), bn, al, r.get('Cuerpo Completo')) for _, r in df.iterrows()]
         df['Contexto analizado'], df['Coincidencia marca'], df['Origen coincidencia'] = zip(*audits)
         s.update(label="✓ Tono", state="complete")
     with st.status("Clasificación", expanded=True) as s:
@@ -3291,18 +3337,20 @@ async def run_custom_excel_async(file_bytes, tc, sc, bn, al, mode="API de OpenAI
                 df["_txt"].tolist(), tpkl,
                 titulos=df[tc].fillna(""), resumenes=df[sc].fillna(""),
                 marca=bn, aliases=al,
+                cuerpos=df['Cuerpo Completo'] if 'Cuerpo Completo' in df.columns else None,
             )
             if res is None: st.stop()
             tonos = [r["tono"] for r in res]
         elif "API" in mode or "Híbrido" in mode:
             res = await ClasificadorTono(bn, al).procesar_lote_async(
-                df["_txt"], pb, df[sc].fillna(''), df[tc].fillna('')
+                df["_txt"], pb, df[sc].fillna(''), df[tc].fillna(''),
+                df['Cuerpo Completo'] if 'Cuerpo Completo' in df.columns else None,
             )
             tonos = [r["tono"] for r in res]
         else:
             tonos = ["N/A"] * len(df)
         df['Tono IA'] = tonos
-        audits = [_brand_audit(r.get(tc, ''), r.get(sc, ''), bn, al) for _, r in df.iterrows()]
+        audits = [_brand_audit(r.get(tc, ''), r.get(sc, ''), bn, al, r.get('Cuerpo Completo')) for _, r in df.iterrows()]
         df['Contexto analizado'], df['Coincidencia marca'], df['Origen coincidencia'] = zip(*audits)
         s.update(label="✓ Tono IA evaluado", state="complete")
 
@@ -3495,7 +3543,7 @@ def render_custom_excel_tab():
 # Main
 # ======================================
 async def run_sentiment_only_async(df, title_col, summary_col, brand, aliases, pkl_file=None):
-    details = [extraer_contexto_marca_detallado(r.get(title_col, ''), r.get(summary_col, ''), brand, aliases) for _, r in df.iterrows()]
+    details = [extraer_contexto_marca_detallado(r.get(title_col, ''), r.get(summary_col, ''), brand, aliases, r.get('Cuerpo Completo')) for _, r in df.iterrows()]
     df = df.copy()
     idx = [i for i, d in enumerate(details) if d['contexto']]
     results = [{'tono':'Neutro','confianza':'Alta','justificacion':'La marca no aparece en el título ni en el resumen.'} for _ in details]
