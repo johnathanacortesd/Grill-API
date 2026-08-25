@@ -29,6 +29,7 @@ import zipfile
 import xml.etree.ElementTree as ET
 import html
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ======================================
 # Configuración general
@@ -1007,6 +1008,30 @@ def _texto_hasta_terminal(texto, n=1):
             return texto[:m.end()].strip(" \n\t")
     return texto.strip(" \n\t")
 
+def _contexto_para_excel(contexto, max_chars=480, umbral_corto=127):
+    """Paso final de limpieza del 'Contexto analizado' para el Excel: recorta el
+    párrafo completo hasta el PRIMER punto; si ese tramo queda < umbral_corto car.,
+    extiende hasta el SEGUNDO punto. Tope ~max_chars."""
+    if not contexto:
+        return ""
+    texto = str(contexto).strip()
+    tramo = _texto_hasta_terminal(texto, n=1)
+    if 0 < len(tramo) < umbral_corto:
+        ampliada = _texto_hasta_terminal(texto, n=2)
+        if len(ampliada) > len(tramo):
+            tramo = ampliada
+    if len(tramo) > max_chars:
+        tramo = tramo[:max_chars].rstrip()
+    return tramo.strip()
+
+def _texto_analisis(row, tc, sc, bn, al):
+    """Texto que se analiza (tono/tema/subtema): el contexto de marca (párrafo) si la
+    marca aparece; si no, título+resumen. Así el 'Contexto analizado' es la base de análisis."""
+    ctx = extraer_contexto_marca(row.get(tc, ""), row.get(sc, ""), bn, al, row.get("Cuerpo Completo"))
+    if ctx:
+        return ctx
+    return texto_para_embedding(str(row.get(tc, "")), str(row.get(sc, "")))
+
 def _extraer_parrafo_marca(fuente, marca, aliases):
     """Contexto estructurado: inicio del párrafo → punto final del párrafo completo.
     Si el tramo queda muy corto (< MIN_PALABRAS_CONTEXTO), se extiende hasta el
@@ -1946,6 +1971,15 @@ class ClasificadorSubtema:
             + "\n".join(f"  · {r}" for r in rm)
         ) if rm else ""
 
+        ctx_notas = []
+        for t in textos_grp[:3]:
+            t_ = str(t).strip()
+            if t_: ctx_notas.append(t_[:320])
+        ctx_bloque = (
+            "\n\nCONTEXTO DE LA NOTICIA (párrafo a analizar):\n"
+            + "\n".join(f"  · {c}" for c in ctx_notas)
+        ) if ctx_notas else ""
+
         if len(kw_list) >= 3:
             ejemplo_dinamico = (
                 f"'{kw_list[0].title()} de {kw_list[1].title()}' o "
@@ -1976,6 +2010,7 @@ class ClasificadorSubtema:
             "— sin sujeto ni verbo conjugado — para este grupo de noticias.\n\n"
             "TÍTULOS:\n" + "\n".join(f"  · {t}" for t in tm)
             + ctx_resumenes
+            + ctx_bloque
             + f"\n\nPALABRAS CLAVE: {kw}"
             + lista_existentes
             + "\n\nREGLAS OBLIGATORIAS:\n"
@@ -2213,7 +2248,7 @@ class ClasificadorSubtema:
             f"Sim mínima: **{u['sim_minima_agrupacion']}**"
         )
 
-        et = [texto_para_embedding(titulos[i], resumenes[i]) for i in range(n)]
+        et = textos  # base de agrupación = el contexto de marca (párrafo) ya en `col`
 
         pbar.progress(0.05, "Fase 1 · Idénticas...")
         dsu = DSU(n)
@@ -2419,10 +2454,12 @@ def _generar_nombre_tema_llm(subtemas_grupo, textos_muestra, titulos_muestra, ma
             if len(w) > 3: palabras.append(w)
     kw = ", ".join(w for w, _ in Counter(palabras).most_common(6))
     tit_muestra = "\n".join(f"  · {t[:100]}" for t in list(dict.fromkeys(titulos_muestra))[:5])
+    cm = list(dict.fromkeys(str(t).strip() for t in textos_muestra if str(t).strip()))
+    ctx_bloque = ("\n\nCONTEXTO DE LA NOTICIA (párrafo a analizar):\n" + "\n".join(f"  · {c}" for c in cm[:4])) if cm else ""
     prompt = (
         f"Eres analista de reputación de la marca principal '{marca}'. "
         "Crea UN tema editorial preciso (2-5 palabras) que agrupe estos subtemas y describa el ámbito del hecho relacionado con la marca.\n\n"
-        "SUBTEMAS:\n" + subs_list + "\n\nTÍTULOS DE REFERENCIA:\n" + tit_muestra +
+        "SUBTEMAS:\n" + subs_list + "\n\nTÍTULOS DE REFERENCIA:\n" + tit_muestra + ctx_bloque +
         f"\n\nKEYWORDS: {kw}\n\n"
         "REGLAS ESTRICTAS:\n"
         "  1. Conserva el asunto común que diferencia este grupo; NO uses secciones vagas de una palabra.\n"
@@ -2559,8 +2596,8 @@ def consolidar_temas(subtemas, textos, pbar, marca=""):
     mt = {}
     tc = len(clusters)
     pbar.progress(0.50, f"Nombres {tc} temas...")
-    for k, (cid, subtemas_cluster) in enumerate(clusters.items()):
-        pbar.progress(0.50 + 0.35 * (k / max(tc, 1)), f"Tema {k + 1}/{tc}...")
+    # Nombrado por cluster es INDEPENDIENTE → se paraleliza para acelerar (21 noticias).
+    def _nombrar_cluster(cid, subtemas_cluster):
         titulos_cluster = []
         textos_cluster = []
         for sub in subtemas_cluster:
@@ -2595,8 +2632,26 @@ def consolidar_temas(subtemas, textos, pbar, marca=""):
             if not _frase_esta_completa(nombre):
                 freq = Counter(subtemas)
                 nombre = _recortar_frase_completa(max(subtemas_cluster, key=lambda s: freq.get(s, 0)), max_palabras=4)
-        nombre = capitalizar_etiqueta(nombre)
-        for sub in subtemas_cluster: mt[sub] = nombre
+        return {sub: capitalizar_etiqueta(nombre) for sub in subtemas_cluster}
+
+    workers = min(int(CONCURRENT_REQUESTS), tc or 1)
+    if workers > 1 and tc > 1:
+        futuras = {}
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for cid, subs in clusters.items():
+                futuras[ex.submit(_nombrar_cluster, cid, subs)] = cid
+            done = 0
+            for f in as_completed(futuras):
+                try:
+                    for sub, nombre in f.result().items(): mt[sub] = nombre
+                except Exception:
+                    pass
+                done += 1
+                pbar.progress(0.50 + 0.35 * (done / max(tc, 1)), f"Tema {done}/{tc}...")
+    else:
+        for k, (cid, subtemas_cluster) in enumerate(clusters.items()):
+            pbar.progress(0.50 + 0.35 * (k / max(tc, 1)), f"Tema {k + 1}/{tc}...")
+            for sub, nombre in _nombrar_cluster(cid, subtemas_cluster).items(): mt[sub] = nombre
     for sub in uc: mt[sub] = capitalizar_etiqueta(sub)
 
     pbar.progress(0.87, "Validando pertenencia mínima a temas...")
@@ -2954,7 +3009,8 @@ def generate_output_excel(rows, km):
         
     for row in rows:
         ctx, match, origin = _brand_audit(row.get(km.get("titulo"), ""), row.get(km.get("resumen"), ""), st.session_state.get("brand_name", ""), st.session_state.get("brand_aliases", []), row.get("Cuerpo Completo"))
-        row["Contexto analizado"], row["Coincidencia marca"], row["Origen coincidencia"] = ctx, match, origin
+        row["Contexto analizado"] = _contexto_para_excel(ctx)
+        row["Coincidencia marca"], row["Origen coincidencia"] = match, origin
         tk = km.get("titulo")
         if tk and tk in row: row[tk] = clean_title_for_output(row.get(tk))
         rk = km.get("resumen")
@@ -3118,7 +3174,7 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
     if ta:
         df = pd.DataFrame(ta)
         df["_txt"] = df.apply(
-            lambda r: texto_para_embedding(str(r.get(km["titulo"], "")), str(r.get(km["resumen"], ""))),
+            lambda r: _texto_analisis(r, km["titulo"], km["resumen"], bn, ba),
             axis=1
         )
         with st.status("Embeddings...", expanded=True) as s:
@@ -3194,7 +3250,7 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
 async def run_quick_async(df, tc, sc, bn, al):
     st.session_state.update({'tokens_input': 0, 'tokens_output': 0, 'tokens_embedding': 0})
     get_embedding_cache().clear()
-    df['_txt'] = df.apply(lambda r: texto_para_embedding(str(r.get(tc, "")), str(r.get(sc, ""))), axis=1)
+    df['_txt'] = df.apply(lambda r: _texto_analisis(r, tc, sc, bn, al), axis=1)
     with st.status("Embeddings...", expanded=True) as s:
         _ = get_embeddings_batch(df['_txt'].tolist())
         s.update(label=f"✓ {get_embedding_cache().stats()}", state="complete")
@@ -3203,7 +3259,8 @@ async def run_quick_async(df, tc, sc, bn, al):
         res = await ClasificadorTono(bn, al).procesar_lote_async(df["_txt"], pb, df[sc].fillna(''), df[tc].fillna(''))
         df['Tono IA'] = [r["tono"] for r in res]
         audits = [_brand_audit(r.get(tc, ''), r.get(sc, ''), bn, al, r.get('Cuerpo Completo')) for _, r in df.iterrows()]
-        df['Contexto analizado'], df['Coincidencia marca'], df['Origen coincidencia'] = zip(*audits)
+        df['Contexto analizado'] = [_contexto_para_excel(a[0]) for a in audits]
+        df['Coincidencia marca'], df['Origen coincidencia'] = [a[1] for a in audits], [a[2] for a in audits]
         s.update(label="✓ Tono", state="complete")
     with st.status("Clasificación", expanded=True) as s:
         pb = st.progress(0)
@@ -3320,7 +3377,7 @@ async def run_custom_excel_async(file_bytes, tc, sc, bn, al, mode="API de OpenAI
     df = pd.read_excel(buf_in)
 
     df['_txt'] = df.apply(
-        lambda r: texto_para_embedding(str(r.get(tc, "")), str(r.get(sc, ""))),
+        lambda r: _texto_analisis(r, tc, sc, bn, al),
         axis=1
     )
 
@@ -3351,7 +3408,8 @@ async def run_custom_excel_async(file_bytes, tc, sc, bn, al, mode="API de OpenAI
             tonos = ["N/A"] * len(df)
         df['Tono IA'] = tonos
         audits = [_brand_audit(r.get(tc, ''), r.get(sc, ''), bn, al, r.get('Cuerpo Completo')) for _, r in df.iterrows()]
-        df['Contexto analizado'], df['Coincidencia marca'], df['Origen coincidencia'] = zip(*audits)
+        df['Contexto analizado'] = [_contexto_para_excel(a[0]) for a in audits]
+        df['Coincidencia marca'], df['Origen coincidencia'] = [a[1] for a in audits], [a[2] for a in audits]
         s.update(label="✓ Tono IA evaluado", state="complete")
 
     # --- PASO 3: SUBTEMAS Y TEMAS ---
@@ -3557,7 +3615,7 @@ async def run_sentiment_only_async(df, title_col, summary_col, brand, aliases, p
     df['Tono IA'] = [r.get('tono','Neutro') for r in results]
     df['Confianza Tono'] = [r.get('confianza','Media') for r in results]
     df['Marca encontrada'] = [d['marca_encontrada'] for d in details]
-    df['Contexto analizado'] = [d['contexto'] for d in details]
+    df['Contexto analizado'] = [_contexto_para_excel(d['contexto']) for d in details]
     df['Coincidencia marca'] = [d['coincidencia'] for d in details]
     df['Origen coincidencia'] = [d['origen'] for d in details]
     return df
