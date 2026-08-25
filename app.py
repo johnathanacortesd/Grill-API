@@ -43,7 +43,8 @@ st.set_page_config(
 
 def _resolver_modelo_clasificacion():
     """Modelo de clasificación configurable sin redeploy.
-    Orden: env OPENAI_CLASIF_MODEL → secret OPENAI_CLASIF_MODEL → gpt-5-nano por defecto."""
+    Orden: env OPENAI_CLASIF_MODEL → secret OPENAI_CLASIF_MODEL → gpt-4.1-nano por defecto.
+    (gpt-5-nano-2025-08-07 NO es fiable con esta pila: subtemas 'X de Y' y tono todo Neutro.)"""
     env = os.environ.get("OPENAI_CLASIF_MODEL")
     if env:
         return env
@@ -53,7 +54,7 @@ def _resolver_modelo_clasificacion():
             return s
     except Exception:
         pass
-    return "gpt-5-nano-2025-08-07"
+    return "gpt-4.1-nano-2025-04-14"
 
 OPENAI_MODEL_EMBEDDING     = "text-embedding-3-small"
 OPENAI_MODEL_CLASIFICACION = _resolver_modelo_clasificacion()
