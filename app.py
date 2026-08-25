@@ -1514,6 +1514,7 @@ def aplicar_consistencia_grupos(df, titulo_col, resumen_col,
         cn = None
         if 'Contexto analizado' in df.columns:
             cn = [norm_key(str(x)) for x in df['Contexto analizado'].fillna('')]
+        rn = [norm_key(str(x)) for x in df[resumen_col].fillna('')] if resumen_col in df.columns else None
         parent = list(range(n))
 
         def _fa(i):
@@ -1535,12 +1536,31 @@ def aplicar_consistencia_grupos(df, titulo_col, resumen_col,
                     igual = (ti in tj or tj in ti)          # mismo titular, con/sin subtítulo
                 if not igual and SequenceMatcher(None, ti, tj).ratio() >= 0.88:
                     igual = True
+                if not igual and rn and rn[i] and rn[j] \
+                        and SequenceMatcher(None, ti, tj).ratio() >= 0.80 \
+                        and SequenceMatcher(None, rn[i], rn[j]).ratio() >= 0.70:
+                    igual = True                            # título parecido Y cuerpo parecido
                 if not igual and cn and cn[i] and cn[i] == cn[j]:
                     igual = True                            # mismo "Contexto analizado"
                 if igual:
                     ri, rj = _fa(i), _fa(j)
                     if ri != rj:
                         parent[rj] = ri
+
+        # Agrupación SEMÁNTICA: noticias del MISMO hecho aunque títulos/cuerpos difieran
+        # (el sistema ya las detectó como un mismo grupo en "Grupo noticia"). Unificarlas.
+        if 'Grupo noticia' in df.columns:
+            por_grupo = defaultdict(list)
+            for i in range(n):
+                g = str(df.iloc[i].get('Grupo noticia') or "").strip()
+                if g and g.lower() not in ("", "nan", "none"):
+                    por_grupo[g].append(i)
+            for idxs in por_grupo.values():
+                if len(idxs) < 2:
+                    continue
+                base = _fa(idxs[0])
+                for k in idxs[1:]:
+                    parent[_fa(k)] = base
 
         grupos = defaultdict(list)
         for i in range(n):
