@@ -1024,7 +1024,7 @@ def _texto_hasta_terminal(texto, n=1):
             return texto[:m.end()].strip(" \n\t")
     return texto.strip(" \n\t")
 
-def _contexto_para_excel(contexto, max_chars=480, umbral_corto=127):
+def _contexto_para_excel(contexto, max_chars=900, umbral_corto=127):
     """Paso final de limpieza del 'Contexto analizado' para el Excel: recorta el
     párrafo completo hasta el PRIMER punto; si ese tramo queda < umbral_corto car.,
     extiende hasta el SEGUNDO punto. Tope ~max_chars."""
@@ -1041,13 +1041,13 @@ def _contexto_para_excel(contexto, max_chars=480, umbral_corto=127):
     return tramo.strip()
 
 def _construir_texto_basico(row, tc, sc, bn, al):
-    """Texto base de análisis: prioridad Título → Contexto analizado → Resumen-Aclaración.
-    El título va repetido (dominante) + el contexto corto + un resumen acotado."""
+    """Texto base de análisis: prioridad Título → Contexto analizado → Resumen-Aclaración,
+    con el CONTEXTO AMPLIO (párrafo completo de la marca, hasta ~1500 car)."""
     titulo = str(row.get(tc, "") or "").strip()
     resumen = str(row.get(sc, "") or "").strip()[:300]
-    ctx = _contexto_para_excel(
-        extraer_contexto_marca(row.get(tc, ""), row.get(sc, ""), bn, al, row.get("Cuerpo Completo"))
-    )
+    ctx = extraer_contexto_marca(row.get(tc, ""), row.get(sc, ""), bn, al, row.get("Cuerpo Completo"))
+    if ctx:
+        ctx = ctx[:1500]
     return f"{titulo}. {titulo}. {ctx}. {resumen}".strip(" .")
 
 def _extraer_parrafo_marca(fuente, marca, aliases):
@@ -1526,15 +1526,19 @@ class ClasificadorTono:
                 f"🔴 NEGATIVO: un hecho perjudica, cuestiona o expone directamente a '{self.marca}' "
                 f"(demandas, multas, fraudes, fallas propias, quejas, investigaciones, pérdidas o retiro de productos).\n"
                 f"🟢 POSITIVO: el hecho acredita directamente un logro, mejora o aporte verificable de '{self.marca}' "
-                f"(premio, crecimiento, lanzamiento exitoso, inversión realizada, innovación, expansión o reconocimiento).\n"
+                f"(premio, crecimiento, lanzamiento exitoso, inversión realizada, innovación, expansión o reconocimiento). "
+                f"También es POSITIVO si '{self.marca}' expresa SOLIDARIDAD o respaldo, emite un comunicado de apoyo humanitario, "
+                f"dona, ayuda a comunidades/afectados tras una crisis o se pronuncia apoyando a su sector. "
+                f"Un comunicado o muestra de solidaridad de la marca NUNCA es Neutro: refuerza su imagen pública.\n"
                 f"⚪ NEUTRO: La marca se menciona SIN impacto a su imagen. Ejemplos:\n"
                 f"  - La noticia habla de una crisis del sector/país, pero la marca solo es mencionada informando o adaptándose.\n"
                 f"  - Se menciona a la marca de paso, sin rol (no aplica si es ganadora, premiada o protagonista).\n"
                 f"  - Una persona, autoridad, proveedor o tercero es quien recibe el efecto positivo o negativo.\n"
-                f"  - Emite un comunicado regular sin evidencia de crisis ni logro relevante.\n"
+                f"  - Emite un comunicado puramente rutinario/informativo SIN solidaridad, ayuda ni logro (p. ej. cambio de horario, cierre de oficina).\n"
                 f"  - Critica, denuncia o advierte sobre un problema de terceros o del sector; la crítica de la marca NO es una crítica contra la marca.\n\n"
                 f"⚠️ ATENCIÓN: Ignora el tono del sector o de terceros. Evalúa ÚNICAMENTE cómo el hecho afecta "
-                f"la reputación corporativa de '{self.marca}': mejora (Positivo), empeora (Negativo) o no cambia (Neutro).\n\n"
+                f"la reputación corporativa de '{self.marca}': mejora (Positivo), empeora (Negativo) o no cambia (Neutro). "
+                f"Recordatorio: solidaridad, comunicados de respaldo y ayuda humanitaria de la marca = POSITIVO, nunca Neutro.\n\n"
                 f'Responde ÚNICAMENTE con JSON: {{"tono":"Positivo|Negativo|Neutro", '
                 f'"confianza":"Alta|Media|Baja", "justificacion":"explicación concreta de máximo 35 palabras"}}'
             )
@@ -2016,7 +2020,9 @@ class ClasificadorSubtema:
         prompt = (
             f"Eres analista de reputación de la marca principal '{self.marca}'. "
             "Genera UN subtema periodístico (3-5 palabras) que sea una FRASE NOMINAL "
-            "— sin sujeto ni verbo conjugado — para este grupo de noticias.\n\n"
+            "— sin sujeto ni verbo conjugado — para este grupo de noticias. "
+            "Si el hecho NO está vinculado con la marca, describe el tema real de la noticia "
+            "y NO fuerces una relación con la marca.\n\n"
             "TÍTULOS:\n" + "\n".join(f"  · {t}" for t in tm)
             + ctx_resumenes
             + f"\n\nPALABRAS CLAVE: {kw}"
@@ -2483,7 +2489,8 @@ def _generar_nombre_tema_llm(subtemas_grupo, textos_muestra, titulos_muestra, ma
     tit_muestra = "\n".join(f"  · {t[:100]}" for t in list(dict.fromkeys(titulos_muestra))[:5])
     prompt = (
         f"Eres analista de reputación de la marca principal '{marca}'. "
-        "Crea UN tema editorial preciso (2-5 palabras) que agrupe estos subtemas y describa el ámbito del hecho relacionado con la marca.\n\n"
+        "Crea UN tema editorial preciso (2-5 palabras) que agrupe estos subtemas y describa el ámbito del hecho. "
+        "Si el hecho NO está vinculado con la marca, crea el tema real de la noticia; NO lo fuerces a la marca ni a su sector.\n\n"
         "SUBTEMAS:\n" + subs_list + "\n\nTÍTULOS DE REFERENCIA:\n" + tit_muestra +
         f"\n\nKEYWORDS: {kw}\n\n"
         "REGLAS ESTRICTAS:\n"
