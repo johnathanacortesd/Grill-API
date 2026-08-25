@@ -43,7 +43,7 @@ st.set_page_config(
 
 def _resolver_modelo_clasificacion():
     """Modelo de clasificación configurable sin redeploy.
-    Orden: env OPENAI_CLASIF_MODEL → secret OPENAI_CLASIF_MODEL → gpt-5-nano por defecto."""
+    Orden: env OPENAI_CLASIF_MODEL → secret OPENAI_CLASIF_MODEL → gpt-4.1-nano por defecto."""
     env = os.environ.get("OPENAI_CLASIF_MODEL")
     if env:
         return env
@@ -53,7 +53,7 @@ def _resolver_modelo_clasificacion():
             return s
     except Exception:
         pass
-    return "gpt-5-nano-2025-08-07"
+    return "gpt-4.1-nano-2025-04-14"
 
 OPENAI_MODEL_EMBEDDING     = "text-embedding-3-small"
 OPENAI_MODEL_CLASIFICACION = _resolver_modelo_clasificacion()
@@ -1024,14 +1024,6 @@ def _contexto_para_excel(contexto, max_chars=480, umbral_corto=127):
         tramo = tramo[:max_chars].rstrip()
     return tramo.strip()
 
-def _texto_analisis(row, tc, sc, bn, al):
-    """Texto que se analiza (tono/tema/subtema): el contexto de marca (párrafo) si la
-    marca aparece; si no, título+resumen. Así el 'Contexto analizado' es la base de análisis."""
-    ctx = extraer_contexto_marca(row.get(tc, ""), row.get(sc, ""), bn, al, row.get("Cuerpo Completo"))
-    if ctx:
-        return ctx
-    return texto_para_embedding(str(row.get(tc, "")), str(row.get(sc, "")))
-
 def _extraer_parrafo_marca(fuente, marca, aliases):
     """Contexto estructurado: inicio del párrafo → punto final del párrafo completo.
     Si el tramo queda muy corto (< MIN_PALABRAS_CONTEXTO), se extiende hasta el
@@ -1526,7 +1518,7 @@ class ClasificadorTono:
                     openai.ChatCompletion.acreate,
                     model=OPENAI_MODEL_CLASIFICACION,
                     messages=[{"role": "user", "content": prompt}],
-                    max_tokens=300,
+                    max_tokens=100,
                     temperature=0.0,
                     response_format={"type": "json_object"}
                 )
@@ -1971,15 +1963,6 @@ class ClasificadorSubtema:
             + "\n".join(f"  · {r}" for r in rm)
         ) if rm else ""
 
-        ctx_notas = []
-        for t in textos_grp[:3]:
-            t_ = str(t).strip()
-            if t_: ctx_notas.append(t_[:320])
-        ctx_bloque = (
-            "\n\nCONTEXTO DE LA NOTICIA (párrafo a analizar):\n"
-            + "\n".join(f"  · {c}" for c in ctx_notas)
-        ) if ctx_notas else ""
-
         if len(kw_list) >= 3:
             ejemplo_dinamico = (
                 f"'{kw_list[0].title()} de {kw_list[1].title()}' o "
@@ -2010,7 +1993,6 @@ class ClasificadorSubtema:
             "— sin sujeto ni verbo conjugado — para este grupo de noticias.\n\n"
             "TÍTULOS:\n" + "\n".join(f"  · {t}" for t in tm)
             + ctx_resumenes
-            + ctx_bloque
             + f"\n\nPALABRAS CLAVE: {kw}"
             + lista_existentes
             + "\n\nREGLAS OBLIGATORIAS:\n"
@@ -2248,7 +2230,7 @@ class ClasificadorSubtema:
             f"Sim mínima: **{u['sim_minima_agrupacion']}**"
         )
 
-        et = textos  # base de agrupación = el contexto de marca (párrafo) ya en `col`
+        et = [texto_para_embedding(titulos[i], resumenes[i]) for i in range(n)]
 
         pbar.progress(0.05, "Fase 1 · Idénticas...")
         dsu = DSU(n)
@@ -2454,12 +2436,10 @@ def _generar_nombre_tema_llm(subtemas_grupo, textos_muestra, titulos_muestra, ma
             if len(w) > 3: palabras.append(w)
     kw = ", ".join(w for w, _ in Counter(palabras).most_common(6))
     tit_muestra = "\n".join(f"  · {t[:100]}" for t in list(dict.fromkeys(titulos_muestra))[:5])
-    cm = list(dict.fromkeys(str(t).strip() for t in textos_muestra if str(t).strip()))
-    ctx_bloque = ("\n\nCONTEXTO DE LA NOTICIA (párrafo a analizar):\n" + "\n".join(f"  · {c}" for c in cm[:4])) if cm else ""
     prompt = (
         f"Eres analista de reputación de la marca principal '{marca}'. "
         "Crea UN tema editorial preciso (2-5 palabras) que agrupe estos subtemas y describa el ámbito del hecho relacionado con la marca.\n\n"
-        "SUBTEMAS:\n" + subs_list + "\n\nTÍTULOS DE REFERENCIA:\n" + tit_muestra + ctx_bloque +
+        "SUBTEMAS:\n" + subs_list + "\n\nTÍTULOS DE REFERENCIA:\n" + tit_muestra +
         f"\n\nKEYWORDS: {kw}\n\n"
         "REGLAS ESTRICTAS:\n"
         "  1. Conserva el asunto común que diferencia este grupo; NO uses secciones vagas de una palabra.\n"
@@ -3174,7 +3154,7 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
     if ta:
         df = pd.DataFrame(ta)
         df["_txt"] = df.apply(
-            lambda r: _texto_analisis(r, km["titulo"], km["resumen"], bn, ba),
+            lambda r: texto_para_embedding(str(r.get(km["titulo"], "")), str(r.get(km["resumen"], ""))),
             axis=1
         )
         with st.status("Embeddings...", expanded=True) as s:
@@ -3250,7 +3230,7 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
 async def run_quick_async(df, tc, sc, bn, al):
     st.session_state.update({'tokens_input': 0, 'tokens_output': 0, 'tokens_embedding': 0})
     get_embedding_cache().clear()
-    df['_txt'] = df.apply(lambda r: _texto_analisis(r, tc, sc, bn, al), axis=1)
+    df['_txt'] = df.apply(lambda r: texto_para_embedding(str(r.get(tc, "")), str(r.get(sc, ""))), axis=1)
     with st.status("Embeddings...", expanded=True) as s:
         _ = get_embeddings_batch(df['_txt'].tolist())
         s.update(label=f"✓ {get_embedding_cache().stats()}", state="complete")
@@ -3377,7 +3357,7 @@ async def run_custom_excel_async(file_bytes, tc, sc, bn, al, mode="API de OpenAI
     df = pd.read_excel(buf_in)
 
     df['_txt'] = df.apply(
-        lambda r: _texto_analisis(r, tc, sc, bn, al),
+        lambda r: texto_para_embedding(str(r.get(tc, "")), str(r.get(sc, ""))),
         axis=1
     )
 
