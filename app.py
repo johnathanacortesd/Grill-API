@@ -327,8 +327,10 @@ def _subtema_grounded(etiqueta, fuentes):
                for fs in fuente_stems):
             continue
         no_coinciden += 1
-    # Exigimos que como máximo UNA palabra de contenido quede sin apuntar al texto.
-    return no_coinciden <= 1
+    # Antes rechazaba con 1 sola palabra no anclada, lo que tiraba a fallback etiquetas
+    # legítimas (el tema no siempre aparece literal en un contexto corto). Ahora solo rechaza
+    # si MÁS DE LA MITAD de las palabras de contenido no tiene anclaje (label casi entera inventada).
+    return no_coinciden * 2 <= len(contenido)
 
 
 _PATRON_TITULAR = re.compile(
@@ -664,6 +666,19 @@ class EmbeddingCache:
         self._cache: Dict[str, List[float]] = {}
         self._hits = 0
         self._misses = 0
+        self._dirty = False
+        self._disk_path = None
+        # Persistencia ligera en disco (local). En Streamlit Cloud el FS es efímero y
+        # nunca rompe nada si falla la escritura: todo quede en try/except.
+        try:
+            d = Path(os.environ.get("GRILL_CACHE_DIR", str(Path.home() / ".grill_cache")))
+            d.mkdir(parents=True, exist_ok=True)
+            self._disk_path = d / "embeddings.json"
+            if self._disk_path.exists() and self._disk_path.stat().st_size < 80 * 1024 * 1024:
+                with open(self._disk_path, "r", encoding="utf-8") as f:
+                    self._cache.update(json.load(f))
+        except Exception:
+            self._disk_path = None
 
     def _key(self, text):
         return hashlib.md5(text[:2000].encode('utf-8', errors='ignore')).hexdigest()
@@ -678,6 +693,7 @@ class EmbeddingCache:
 
     def put(self, text, emb):
         self._cache[self._key(text)] = emb
+        self._dirty = True
 
     def get_many(self, textos):
         results = [None] * len(textos)
@@ -690,6 +706,19 @@ class EmbeddingCache:
                 missing.append(i)
         return results, missing
 
+    def flush(self):
+        """Persiste el caché a disco (una sola escritura; ignora fallos)."""
+        if not self._disk_path or not self._dirty:
+            return
+        try:
+            tmp = str(self._disk_path) + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self._cache, f, separators=(",", ":"))
+            os.replace(tmp, str(self._disk_path))
+            self._dirty = False
+        except Exception:
+            self._dirty = False
+
     def stats(self):
         total = self._hits + self._misses
         rate = (self._hits / total * 100) if total > 0 else 0
@@ -697,6 +726,10 @@ class EmbeddingCache:
 
     def clear(self):
         self._cache.clear()
+        self._hits = 0
+        self._misses = 0
+
+    def reset_stats(self):
         self._hits = 0
         self._misses = 0
 
@@ -960,6 +993,21 @@ def _es_nombre_o_fragmento_marca(etiqueta: str, marca: str, aliases=None) -> boo
             return True
     return False
 
+def _es_verboso_con_marca(etiqueta, marca, aliases=None):
+    """Detecta etiquetas vacías tipo 'Investigación sobre universidad simón bolívar':
+    un verbo-muletilla (investigación/estudio/análisis/informe) + 'sobre/de' + SOLO la marca.
+    Eso no describe un hecho; se debe regenerar con un asunto real."""
+    s = (etiqueta or "").strip()
+    m = re.match(
+        r"^(investigaci[oó]n|estudio|an[aá]lisis|informe|trabajo)\s+"
+        r"(sobre|acerca de|de|del|sobre la|sobre el|de la|de el)\s+(.+)$",
+        s, re.IGNORECASE,
+    )
+    if not m:
+        return False
+    resto = m.group(3)
+    return bool(resto.strip()) and _es_nombre_o_fragmento_marca(resto, marca, aliases)
+
 def extract_link(cell):
     if hasattr(cell, "hyperlink") and cell.hyperlink:
         return {"value": "Link", "url": cell.hyperlink.target}
@@ -1205,7 +1253,11 @@ def _safe_filename_part(value):
 
 _TERMINAL_PUNCT = re.compile(r'[.!?…]')
 MIN_PALABRAS_CONTEXTO = 10
-MAX_CONTEXTO_CHARS = 1800
+# Contexto amplio: más caracteres alrededor de la mención de la marca/alias para un análisis
+# más preciso de tono y subtema (el usuario pidió ampliarlo). ~600 carácter. mínimos garantizados,
+# tope de ~2600.
+CONTEXTO_MIN_CHARS = 600
+MAX_CONTEXTO_CHARS = 2600
 
 def _texto_hasta_terminal(texto, n=1):
     """Recorta 'texto' para que termine justo tras el enésimo signo de cierre (punto)."""
@@ -1217,16 +1269,15 @@ def _texto_hasta_terminal(texto, n=1):
             return texto[:m.end()].strip(" \n\t")
     return texto.strip(" \n\t")
 
-def _contexto_para_excel(contexto, max_chars=900, umbral_corto=127):
-    """Paso final de limpieza del 'Contexto analizado' para el Excel: recorta el
-    párrafo completo hasta el PRIMER punto; si ese tramo queda < umbral_corto car.,
-    extiende hasta el SEGUNDO punto. Tope ~max_chars."""
+def _contexto_para_excel(contexto, max_chars=1400, umbral_corto=127):
+    """Paso final de limpieza del 'Contexto analizado' para el Excel: toma hasta 3 oraciones
+    (más contexto de la marca) con tope ~max_chars, ampliado tras el reciente aumento de caracteres."""
     if not contexto:
         return ""
     texto = str(contexto).strip()
-    tramo = _texto_hasta_terminal(texto, n=1)
+    tramo = _texto_hasta_terminal(texto, n=2)
     if 0 < len(tramo) < umbral_corto:
-        ampliada = _texto_hasta_terminal(texto, n=2)
+        ampliada = _texto_hasta_terminal(texto, n=3)
         if len(ampliada) > len(tramo):
             tramo = ampliada
     if len(tramo) > max_chars:
@@ -1235,19 +1286,18 @@ def _contexto_para_excel(contexto, max_chars=900, umbral_corto=127):
 
 def _construir_texto_basico(row, tc, sc, bn, al):
     """Texto base de análisis: prioridad Título → Contexto analizado → Resumen-Aclaración,
-    con el CONTEXTO AMPLIO (párrafo completo de la marca, hasta ~1500 car)."""
+    con el CONTEXTO AMPLIO (párrafo completo de la marca, hasta ~2200 car)."""
     titulo = str(row.get(tc, "") or "").strip()
     resumen = str(row.get(sc, "") or "").strip()[:300]
     ctx = extraer_contexto_marca(row.get(tc, ""), row.get(sc, ""), bn, al, row.get("Cuerpo Completo"))
     if ctx:
-        ctx = ctx[:1500]
+        ctx = ctx[:2200]
     return f"{titulo}. {titulo}. {ctx}. {resumen}".strip(" .")
 
 def _extraer_parrafo_marca(fuente, marca, aliases):
-    """Contexto estructurado: inicio del párrafo → punto final del párrafo completo.
-    Si el tramo queda muy corto (< MIN_PALABRAS_CONTEXTO), se extiende hasta el
-    segundo punto del texto siguiente (regla: 'a punto final, o al segundo punto
-    si el texto es muy corto')."""
+    """Contexto amplio de la marca: parte del párrafo que la menciona y añade los párrafos
+    siguientes hasta cubrir CONTEXTO_MIN_CHARS (≈600 car.), con tope MAX_CONTEXTO_CHARS.
+    Así el análisis del tono/subtema de la marca cuenta con MÁS caracteres (pedido del usuario)."""
     parrafos = [p.strip() for p in re.split(r'\n+', fuente) if p and p.strip()]
     if not parrafos:
         parrafos = [fuente.strip()]
@@ -1255,17 +1305,19 @@ def _extraer_parrafo_marca(fuente, marca, aliases):
     if not con_hits:
         return ""
     i = con_hits[0]  # primer párrafo que menciona la marca
-    # Tramo primario: párrafo completo, desde su inicio hasta su punto final.
-    tramo = parrafos[i]
-    palabras = len(tramo.split())
-    # Si el párrafo quedó muy corto, ampliar con el texto siguiente hasta el 2º punto.
-    if palabras < MIN_PALABRAS_CONTEXTO:
-        partes = [tramo]
-        for j in range(i + 1, len(parrafos)):
-            partes.append(_texto_hasta_terminal(parrafos[j], n=2))
-            tramo = " ".join(p for p in partes if p).strip()
-            if len(tramo.split()) >= MIN_PALABRAS_CONTEXTO:
-                break
+    partes = [parrafos[i]]
+    acum = len(parrafos[i])
+    # Ampliar con el texto siguiente (hasta su 2º punto) mientras no se cubra el mínimo.
+    for j in range(i + 1, len(parrafos)):
+        if acum >= CONTEXTO_MIN_CHARS:
+            break
+        siguientes = parrafos[j]
+        tramo1 = _texto_hasta_terminal(siguientes, n=1)
+        if 0 < len(tramo1) < 60:
+            siguientes = _texto_hasta_terminal(siguientes, n=2)
+        partes.append(siguientes)
+        acum += len(siguientes)
+    tramo = " ".join(p for p in partes if p).strip()
     return tramo[:MAX_CONTEXTO_CHARS]
 
 def _brand_audit(titulo, resumen, marca, aliases, cuerpo=None):
@@ -1560,6 +1612,7 @@ def get_embeddings_batch(textos, batch_size=100):
                     cache.put(textos[oi], emb)
                 except:
                     pass
+    cache.flush()
     return resultados
 
 class DSU:
@@ -1662,9 +1715,39 @@ def construir_grupos_consistentes(titulos, resumenes):
             dsu.union(i, j)
     return dsu.grupos(n)
 
+def construir_grafo_equivalencia(titulos, resumenes, contextos=None):
+    # Grafo UNICO de 'noticias equivalentes' (misma historia), con criterios ESTRICTOS.
+    # Reutilizado por tono, tema y subtema para que no se contradigan entre si.
+    n = len(titulos)
+    dsu = DSU(n)
+    tn = [norm_key(str(t or "")) for t in titulos]
+    rn = [norm_key(str(r or "")) for r in resumenes] if resumenes is not None else None
+    cn = [norm_key(str(c or "")) for c in contextos] if contextos is not None else None
+    for i in range(n):
+        if not tn[i]:
+            continue
+        ti = tn[i]
+        for j in range(i + 1, n):
+            tj = tn[j]
+            if not tj or dsu.find(i) == dsu.find(j):
+                continue
+            igual = (ti == tj)
+            if not igual and len(ti) >= 10 and len(tj) >= 10:
+                igual = (ti in tj or tj in ti)                     # mismo titular con/sin subtitulo
+            if not igual and SequenceMatcher(None, ti, tj).ratio() >= 0.88:
+                igual = True
+            if not igual and rn and rn[i] and rn[j] and SequenceMatcher(None, ti, tj).ratio() >= 0.80 and SequenceMatcher(None, rn[i], rn[j]).ratio() >= 0.70:
+                igual = True                                       # titulo parecido Y cuerpo parecido
+            if not igual and cn and cn[i] and cn[i] == cn[j]:
+                igual = True                                       # mismo Contexto analizado
+            if igual:
+                dsu.union(i, j)
+    return dsu
+
 def aplicar_consistencia_grupos(df, titulo_col, resumen_col,
                                 tono_col="Tono IA", tema_col="Tema", subtema_col="Subtema"):
-    """Asigna Grupo noticia como overlay. No sobrescribe Tono IA / Tema / Subtema."""
+    # Asigna 'Grupo noticia' y unifica Tono IA / Tema / Subtema de las noticias equivalentes
+    # usando UN UNICO grafo de equivalencia (mismo criterio para los tres).
     if df.empty:
         return df
     grupos = construir_grupos_consistentes(df[titulo_col].fillna(''), df[resumen_col].fillna(''))
@@ -1674,110 +1757,127 @@ def aplicar_consistencia_grupos(df, titulo_col, resumen_col,
         gid = f"G{numero:05d}"
         for i in idxs:
             df.at[df.index[i], "Grupo noticia"] = gid
-        # Keep existing labels even when members disagree. Majority vote was
-        # stamping a generic Subtema onto notes that must stay specific.
+
     if subtema_col in df.columns:
         df[subtema_col] = df[subtema_col].apply(
             lambda x: capitalizar_etiqueta(_recortar_frase_completa(str(x), MAX_PALABRAS_SUBTEMA))
             if str(x).strip().lower() not in {"", "nan", "n/a", "-"} else x
         )
 
-    # ── Unificación determinista: noticias idénticas o casi idénticas ⇒ MISMO subtema y tema ──
-    # Evita que dos noticias iguales/similares (mismo titular, mismo contexto, o subtitulado
-    # que solo agrega/quita una oración) terminen con subtemas distintos.
-    if subtema_col in df.columns and titulo_col in df.columns:
-        n = len(df)
-        tn = [norm_key(str(x)) for x in df[titulo_col].fillna('')]
-        cn = None
-        if 'Contexto analizado' in df.columns:
-            cn = [norm_key(str(x)) for x in df['Contexto analizado'].fillna('')]
-        rn = [norm_key(str(x)) for x in df[resumen_col].fillna('')] if resumen_col in df.columns else None
-        parent = list(range(n))
+    n = len(df)
+    contextos = ([str(x) for x in df['Contexto analizado'].fillna('')]
+                 if 'Contexto analizado' in df.columns else None)
 
-        def _fa(i):
-            while parent[i] != i:
-                parent[i] = parent[parent[i]]
-                i = parent[i]
-            return i
+    # Grafo de equivalencia estricto + union semantica por 'Grupo noticia'.
+    dsu = construir_grafo_equivalencia(
+        [str(x) for x in df[titulo_col].fillna('')],
+        [str(x) for x in df[resumen_col].fillna('')],
+        contextos,
+    )
+    por_grupo = defaultdict(list)
+    for i in range(n):
+        g = str(df.iloc[i].get('Grupo noticia') or "").strip()
+        if g and g.lower() not in ("", "nan", "none"):
+            por_grupo[g].append(i)
+    for idxs in por_grupo.values():
+        if len(idxs) < 2:
+            continue
+        base = idxs[0]
+        for k in idxs[1:]:
+            dsu.union(base, k)
 
-        for i in range(n):
-            if not tn[i]:
-                continue
-            ti = tn[i]
-            for j in range(i + 1, n):
-                tj = tn[j]
-                if not tj:
-                    continue
-                igual = (ti == tj)
-                if not igual and len(ti) >= 10 and len(tj) >= 10:
-                    igual = (ti in tj or tj in ti)          # mismo titular, con/sin subtítulo
-                if not igual and SequenceMatcher(None, ti, tj).ratio() >= 0.88:
-                    igual = True
-                if not igual and rn and rn[i] and rn[j] \
-                        and SequenceMatcher(None, ti, tj).ratio() >= 0.80 \
-                        and SequenceMatcher(None, rn[i], rn[j]).ratio() >= 0.70:
-                    igual = True                            # título parecido Y cuerpo parecido
-                if not igual and cn and cn[i] and cn[i] == cn[j]:
-                    igual = True                            # mismo "Contexto analizado"
-                if igual:
-                    ri, rj = _fa(i), _fa(j)
-                    if ri != rj:
-                        parent[rj] = ri
+    grupos_eq = defaultdict(list)
+    for i in range(n):
+        grupos_eq[dsu.find(i)].append(i)
 
-        # Agrupación SEMÁNTICA: noticias del MISMO hecho aunque títulos/cuerpos difieran
-        # (el sistema ya las detectó como un mismo grupo en "Grupo noticia"). Unificarlas.
-        if 'Grupo noticia' in df.columns:
-            por_grupo = defaultdict(list)
-            for i in range(n):
-                g = str(df.iloc[i].get('Grupo noticia') or "").strip()
-                if g and g.lower() not in ("", "nan", "none"):
-                    por_grupo[g].append(i)
-            for idxs in por_grupo.values():
-                if len(idxs) < 2:
-                    continue
-                base = _fa(idxs[0])
-                for k in idxs[1:]:
-                    parent[_fa(k)] = base
+    def _canon_mas_frecuente(idxs, col):
+        vals = [str(df.iloc[i][col]).strip() for i in idxs]
+        vals = [v for v in vals if v and v.lower() not in ("nan", "none", "-", "n/a", "")]
+        if not vals:
+            return None
+        order = []
+        for v in vals:
+            if v not in order:
+                order.append(v)
+        freq = {v: vals.count(v) for v in order}
+        return max(order, key=lambda v: (freq[v], -order.index(v)))
 
-        grupos = defaultdict(list)
-        for i in range(n):
-            grupos[_fa(i)].append(i)
-
-        for idxs in grupos.values():
-            if len(idxs) < 2:
-                continue
-            subs = [str(df.iloc[i][subtema_col]) for i in idxs
-                    if str(df.iloc[i][subtema_col] or "").strip() not in ("", "-", "nan", "None")]
-            subs = [s for s in subs if s and s.lower() != "nan"]
-            if not subs:
-                continue
-            order = []
-            for s in subs:
-                if s not in order:
-                    order.append(s)
-            freq = {s: subs.count(s) for s in order}
-            canon = max(order, key=lambda s: (freq[s], -order.index(s)))
-            for i in idxs:
-                df.at[df.index[i], subtema_col] = capitalizar_etiqueta(canon)
-            if tema_col in df.columns:
-                ts = [str(df.iloc[i][tema_col]) for i in idxs
-                      if str(df.iloc[i][tema_col] or "").strip() not in ("", "-", "nan", "None")]
-                ts = [t for t in ts if t and t.lower() != "nan"]
-                if ts:
-                    ordt = []
-                    for t in ts:
-                        if t not in ordt:
-                            ordt.append(t)
-                    freqt = {t: ts.count(t) for t in ordt}
-                    canon_t = max(ordt, key=lambda t: (freqt[t], -ordt.index(t)))
+    for idxs in grupos_eq.values():
+        if len(idxs) < 2:
+            continue
+        for col in (subtema_col, tema_col):
+            if col in df.columns:
+                canon = _canon_mas_frecuente(idxs, col)
+                if canon:
                     for i in idxs:
-                        df.at[df.index[i], tema_col] = capitalizar_etiqueta(canon_t)
+                        df.at[df.index[i], col] = capitalizar_etiqueta(canon)
+        # Tono: Positivo/Negativo 'gana' sobre Neutro; conflicto Pos+Neg no se toca.
+        if tono_col in df.columns:
+            tvals = [str(df.iloc[i][tono_col]).strip().title() for i in idxs]
+            if "Positivo" in tvals and "Negativo" in tvals:
+                continue
+            canon_tono = "Positivo" if "Positivo" in tvals else ("Negativo" if "Negativo" in tvals else None)
+            if canon_tono:
+                for i in idxs:
+                    cur = str(df.iloc[i][tono_col]).strip().title()
+                    if cur in ("Neutro", "N/A", "", "Nan"):
+                        df.at[df.index[i], tono_col] = canon_tono
     return df
 
 
-# ======================================
 # TONO (Sistema Reputacional por IA)
 # ======================================
+
+# ── Pre-despacho determinista de tono (solo casos inequívocos, alta precisión) ──
+# Reduce llamadas al LLM y elimina varianza en hechos estructurales. Si no es concluyente,
+# devuelve None y decide el LLM. Desactivar con env GRILL_TONO_DETERMINISTA=0.
+_TONO_POS_SUJETO = re.compile(
+    r"\b(?:es|fue|result[oó]|qued[oó]|queda|resulta|se alz[oó]|se consagr[oó])\b"
+    r".{0,30}?\b(?:ganador|ganadora|campe[oó]n|premiad[oa]|galardonad[oa]|reconocid[oa]|"
+    r"condecorad[oa]|finalista|n[uú]mero uno|primer (?:lugar|puesto))\b"
+)
+_TONO_POS_VERBO = re.compile(
+    r"\b(?:gan[oó]|obtuv[oó]|alz[oó]|recibi[oó]|logr[oó]|consigui[oó])\b"
+    r".{0,30}?\b(?:premio|galard[oó]n|reconocimiento|honoris causa|triunfo|victoria|"
+    r"primer (?:lugar|puesto)|n[uú]mero uno|distinci[oó]n|condecoraci[oó]n)\b"
+)
+_TONO_NEG_PASIVO = re.compile(
+    r"\b(?:fue|es|siendo|qued[oó]|result[oó])\s+(?:demandad[oa]|denunciad[oa]|multad[oa]|"
+    r"sancionad[oa]|investigad[oa]|imputad[oa]|condenad[oa]|judicializad[oa])\b"
+)
+_TONO_NEG_CONTRA = re.compile(
+    r"\b(?:demanda|denuncia|multa|sanci[oó]n|investigaci[oó]n|proceso|querella)\b"
+    r".{0,40}?\b(?:contra|a)\s+"
+)
+
+
+def _tono_determinista(eval_txt: str, marca: str, aliases=None):
+    tex = unidecode((eval_txt or "").lower())
+    if not tex:
+        return None
+    nombres = [unidecode(n.lower()) for n in [marca] + [a for a in (aliases or []) if a] if n]
+    spans = []
+    for n in nombres:
+        spans.extend(m.start() for m in re.finditer(re.escape(n), tex))
+    if not spans:
+        return None
+    pos = min(spans)
+    # Positivo / negativo-pasivo: la marca es sujeto, el verbo/hecho va justo después.
+    ventana = tex[max(0, pos - 10): pos + 80]
+    if _TONO_POS_SUJETO.search(ventana) or _TONO_POS_VERBO.search(ventana):
+        return {"tono": "Positivo", "confianza": "Alta",
+                "justificacion": "Regla determinista: la marca es premiada/reconocida/ganadora."}
+    if _TONO_NEG_PASIVO.search(ventana):
+        return {"tono": "Negativo", "confianza": "Alta",
+                "justificacion": "Regla determinista: la marca es demandada/multada/sancionada/investigada."}
+    # Negativo "contra la marca": el desencadenante (demanda/denuncia/...) puede ir algo antes.
+    ventana_contra = tex[max(0, pos - 50): pos + 80]
+    if _TONO_NEG_CONTRA.search(ventana_contra):
+        return {"tono": "Negativo", "confianza": "Alta",
+                "justificacion": "Regla determinista: demanda/denuncia/sanción contra la marca."}
+    return None
+
+
 class ClasificadorTono:
     def __init__(self, marca, aliases):
         nombres = _variantes_marca(marca, aliases)
@@ -1794,6 +1894,13 @@ class ClasificadorTono:
             if not eval_txt or not self._menciona_marca(eval_txt):
                 return {"tono": "Neutro"}
 
+            # Pre-despacho determinista (ahorra LLM en hechos inequívocos y elimina varianza)
+            if os.environ.get("GRILL_TONO_DETERMINISTA", "1") != "0":
+                det = _tono_determinista(eval_txt, self.marca, self.aliases)
+                if det:
+                    det["evidencia"] = eval_txt[:2400]
+                    return det
+
             aliases_str = f" (también conocida como: {', '.join(self.aliases)})" if self.aliases else ""
             prompt = (
                 f"Eres un experto analista en Relaciones Públicas y Gestión de Reputación. "
@@ -1805,7 +1912,7 @@ class ClasificadorTono:
                 f"Estar en una LISTA DE GANADORES no es Neutro. "
                 f"Si el artículo es positivo o trágico a nivel país/sector, pero '{self.marca}' queda "
                 f"criticada, demandada o cuestionada, el tono es Negativo.\n\n"
-                f"TEXTO CENTRADO EN LA MARCA:\n{eval_txt[:1600]}\n\n"
+                f"TEXTO CENTRADO EN LA MARCA:\n{eval_txt[:2400]}\n\n"
                 f"REGLAS DE CLASIFICACIÓN ESTRICTAS:\n"
                 f"🔴 NEGATIVO: un hecho perjudica, cuestiona o expone directamente a '{self.marca}' "
                 f"(demandas, multas, fraudes, fallas propias, quejas, investigaciones, pérdidas o retiro de productos).\n"
@@ -1851,9 +1958,9 @@ class ClasificadorTono:
                     confianza = "Media"
                 return {"tono": tono, "confianza": confianza,
                         "justificacion": str(resultado.get("justificacion", "")).strip()[:400],
-                        "evidencia": eval_txt[:1800]}
+                        "evidencia": eval_txt[:2400]}
             except Exception as e:
-                return {"tono": "Neutro", "confianza": "Baja", "justificacion": "Error de clasificación", "evidencia": eval_txt[:1800]}
+                return {"tono": "Neutro", "confianza": "Baja", "justificacion": "Error de clasificación", "evidencia": eval_txt[:2400]}
 
     async def procesar_lote_async(self, textos, pbar, resumenes, titulos, cuerpos=None):
         n = len(textos)
@@ -1926,29 +2033,14 @@ class ClasificadorTono:
         pbar.progress(1.0, "Análisis de Tono completado")
         return final
 
-def _propagar_tono_equivalentes(tonos, titulos, resumenes):
-    """Noticias equivalentes (cualquier marca): si una es Positivo/Negativo y otra Neutro, se alinean."""
+def _propagar_tono_equivalentes(tonos, titulos, resumenes, contextos=None):
+    # Noticias equivalentes (mismo grafo de equivalencia que tema/subtema):
+    # si una es Positivo/Negativo y otra Neutro, se alinean. No propaga conflictos Pos+Neg.
     n = len(tonos)
     if n < 2:
         return list(tonos)
+    dsu = construir_grafo_equivalencia(titulos, resumenes, contextos)
     out = list(tonos)
-    norm_t = [_normalizar_mencion(normalize_title_for_comparison(t) or t) for t in titulos]
-    norm_r = [_normalizar_mencion(str(r)[:320]) for r in resumenes]
-    combos = [_normalizar_mencion(f"{titulos[i]} {str(resumenes[i])[:320]}") for i in range(n)]
-    dsu = DSU(n)
-    for i in range(n):
-        for j in range(i + 1, n):
-            sim_t = SequenceMatcher(None, norm_t[i], norm_t[j]).ratio() if norm_t[i] and norm_t[j] else 0.0
-            sim_r = SequenceMatcher(None, norm_r[i], norm_r[j]).ratio() if norm_r[i] and norm_r[j] else 0.0
-            ov = _overlap_distintivo(combos[i], combos[j])
-            mismo = (
-                sim_t >= 0.80
-                or sim_r >= 0.78
-                or (sim_t >= 0.62 and sim_r >= 0.58)
-                or (ov >= 0.50 and (sim_t >= 0.55 or sim_r >= 0.55))
-            )
-            if mismo and not _hay_conflicto_accion(combos[i], combos[j]):
-                dsu.union(i, j)
     for idxs in dsu.grupos(n).values():
         if len(idxs) < 2:
             continue
@@ -1966,6 +2058,7 @@ def _propagar_tono_equivalentes(tonos, titulos, resumenes):
                 out[i] = canon
     return out
 
+
 def _predict_pkl_in_batches(pipeline, textos, progress=None, batch_size=64):
     """Run sklearn PKL inference in bounded batches so Streamlit can show progress."""
     values = list(textos)
@@ -1979,6 +2072,18 @@ def _predict_pkl_in_batches(pipeline, textos, progress=None, batch_size=64):
         if progress is not None:
             progress.progress(end / total, f"Prediciendo PKL {end}/{total}")
     return predictions
+
+
+def _snippet_tono_pkl(titulo, contexto):
+    # Shape canonico del texto que recibe el PKL de tono (centrado en la marca).
+    # IMPORTANTE: entrena el PKL con este MISMO formato para maxima consistencia.
+    tit = str(titulo or "").strip()
+    ctx = str(contexto or "").strip()
+    if ctx and tit and ctx.lower().startswith(tit[:20].lower()):
+        return ctx
+    if ctx and tit:
+        return f"{tit}. {ctx}"
+    return ctx or tit
 
 
 def analizar_tono_con_pkl(textos, pkl_file, titulos=None, resumenes=None, marca="", aliases=None, progress=None, cuerpos=None):
@@ -2006,9 +2111,7 @@ def analizar_tono_con_pkl(textos, pkl_file, titulos=None, resumenes=None, marca=
             for i in range(n):
                 ctx = extraer_contexto_marca(titulos[i], resumenes[i], marca, aliases, cuerpos[i] if cuerpos is not None else None)
                 if ctx:
-                    tit = str(titulos[i] or "").strip()
-                    snippet = ctx if (tit and ctx.lower().startswith(tit[:20].lower())) else (f"{tit}. {ctx}" if tit else ctx)
-                    snippets.append(snippet[:1800])
+                    snippets.append(_snippet_tono_pkl(titulos[i], ctx)[:2400])
                     flags.append(True)
                 else:
                     snippets.append("")
@@ -2099,7 +2202,10 @@ class ClasificadorSubtema:
         for ws in titulo_words:
             for w in ws: word_freq[w] += 1
         n = len(titulos)
-        max_freq = max(2, int(n * 0.03))
+        # 'Raras' = palabras distintivas que conectan noticias: aparecen en >=2 títulos
+        # pero en una minoría (<= 8% del corpus). El 3% anterior se colapsaba a 2 en corpus
+        # pequeños (solo palabras con frecuencia exacta 2), dejando el paso casi inerte.
+        max_freq = max(3, int(n * 0.08))
         rare_index = defaultdict(list)
         for i, ws in enumerate(titulo_words):
             for w in ws:
@@ -2273,6 +2379,12 @@ class ClasificadorSubtema:
 
         bloq_resumenes = ("\nRESÚMENES:\n" + "\n".join(f"  · {r}" for r in rm)) if rm else ""
 
+        # Contexto amplio de la MARCA (extraído del texto rico `_txt`): llega al prompt del
+        # subtema con más caracteres para que el asunto se derive de la mención de la marca.
+        ctx_txt = [str(t) for t in textos_grp[:2] if t and str(t).strip()]
+        bloq_contexto = ("\n\nCONTEXTO AMPLIADO (puede incluir la mención de la marca/alias):\n"
+                         + "\n".join(f"  · {c[:700]}" for c in ctx_txt)) if ctx_txt else ""
+
         prompt = (
             f"Eres analista de reputación que monitorea noticias sobre '{self.marca}'.\n"
             "Lee las noticias de este grupo y resume EL HECHO periodístico central en UNA sola "
@@ -2296,6 +2408,7 @@ class ClasificadorSubtema:
             "  - Etiquetas genéricas ('Gestión corporativa', 'Actividad institucional').\n\n"
             f"TÍTULOS:\n" + "\n".join(f"  · {t}" for t in tm)
             + bloq_resumenes
+            + bloq_contexto
             + lista_existentes
             + "\n\nEJEMPLOS CORRECTOS: 'Convenio de cooperación científica', 'Reconocimiento al liderazgo regional', "
             "'Intercambio intercultural en La Guajira', 'Explotación sexual de menores', 'Posesión del superintendente de Notariado'\n"
@@ -2372,9 +2485,10 @@ class ClasificadorSubtema:
                          "reputacion corporativa", "impacto corporativo"}
             es_gen = string_norm_label(et) in {string_norm_label(g) for g in genericas}
             es_solo_marca = _es_nombre_o_fragmento_marca(et, self.marca, self.aliases)
+            es_verboso_marca = _es_verboso_con_marca(et, self.marca, self.aliases)
             es_rob = _es_robotico(et)
 
-            if es_gen or es_solo_marca or es_rob or len(et.split()) < 3:
+            if es_gen or es_solo_marca or es_verboso_marca or es_rob or len(et.split()) < 3:
                 et = self._refinar(tm, None, rm, forzar_preposicion=True, prohibir_verbos=True)
 
             if not _validar_estructura_subtema(et):
@@ -2503,12 +2617,13 @@ class ClasificadorSubtema:
                 frase = _recortar_frase_completa(f"{accion} de {' '.join(top[:2])}", MAX_PALABRAS_SUBTEMA)
             elif accion:
                 frase = _recortar_frase_completa(accion, MAX_PALABRAS_SUBTEMA)
-            elif top:
-                frase = _recortar_frase_completa(" ".join(top[:3]), MAX_PALABRAS_SUBTEMA)
             else:
+                # NO se concatenan palabras clave sueltas (el usuario lo rechaza explícitamente).
+                # Sin un tipo de hecho claro, se devuelve un rótulo genérico limpio.
                 frase = ""
             if _frase_esta_completa(frase) and not _es_nombre_o_fragmento_marca(frase, self.marca, self.aliases):
                 return capitalizar_etiqueta(frase)
+            return "Cobertura de información relevante"
         return "Cobertura de información relevante"
 
     def _consolidar_sinonimos_llm(self, subtemas_unicos):
@@ -2576,49 +2691,38 @@ class ClasificadorSubtema:
         ng = len(gf)
         pbar.progress(0.55, f"Fase 4 · Etiquetando {ng} grupos...")
         mapa = {}
-        sg = sorted(gf.items(), key=lambda x: -len(x[1]))
-        subtemas_aprobados = [] 
+        sg = sorted(gf.items(), key=lambda x: -len(x[1]))  # grupos grandes primero (revert: lógica estable)
+        subtemas_aprobados = []
         textos_por_subtema_aprobado = defaultdict(list)
 
         def _generar_etiqueta_segura(idxs):
-            # Sample the LLM prompt, but every member of this DSU group gets the same label.
+            # Cada miembro del grupo DSU comparte la etiqueta; reutiliza los subtemas ya
+            # aprobados para que noticias equivalentes compartan EXACTAMENTE el mismo subtema.
             sample = idxs[:MAX_GRUPO_ETIQUETA]
             textos_grp = [textos[i] for i in sample]
             titulos_grp = [titulos[i] for i in sample]
             resumenes_grp = [resumenes[i] for i in sample]
             etiqueta = self._generar_etiqueta(
-                textos_grp,
-                titulos_grp,
-                resumenes_grp,
+                textos_grp, titulos_grp, resumenes_grp,
                 subtemas_existentes=subtemas_aprobados
             )
             if etiqueta in textos_por_subtema_aprobado:
                 previos = textos_por_subtema_aprobado.get(etiqueta, [])
                 if not _grupos_contenido_compatibles(
-                    textos_grp,
-                    previos,
-                    etiqueta,
-                    etiqueta,
-                    min_sim=max(u['sim_minima_agrupacion'], 0.88),
-                    min_overlap=0.24,
+                    textos_grp, previos, etiqueta, etiqueta,
+                    min_sim=max(u['sim_minima_agrupacion'], 0.88), min_overlap=0.24,
                 ):
                     rechazada = etiqueta
                     etiqueta = self._generar_etiqueta(
-                        textos_grp,
-                        titulos_grp,
-                        resumenes_grp,
+                        textos_grp, titulos_grp, resumenes_grp,
                         subtemas_existentes=subtemas_aprobados,
                         evitar_etiqueta=rechazada
                     )
                     if etiqueta in textos_por_subtema_aprobado:
                         previos2 = textos_por_subtema_aprobado.get(etiqueta, [])
                         if not _grupos_contenido_compatibles(
-                            textos_grp,
-                            previos2,
-                            etiqueta,
-                            etiqueta,
-                            min_sim=max(u['sim_minima_agrupacion'], 0.88),
-                            min_overlap=0.24,
+                            textos_grp, previos2, etiqueta, etiqueta,
+                            min_sim=max(u['sim_minima_agrupacion'], 0.88), min_overlap=0.24,
                         ):
                             etiqueta = capitalizar_etiqueta(self._fallback(titulos_grp))
             if etiqueta not in subtemas_aprobados:
@@ -2632,6 +2736,8 @@ class ClasificadorSubtema:
             for i in idxs: mapa[i] = e
 
         subtemas = [mapa.get(i, "Varios") for i in range(n)]
+
+
 
         pbar.progress(0.80, "Fase 4b · Coherencia (sin reasignar)...")
         # 0.35 cosine-to-label is not event membership. Jumping rows onto
@@ -3390,7 +3496,7 @@ def generate_output_excel(rows, km):
 # ======================================
 async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=None, cliente="", voceros="", enable_scraping=False):
     st.session_state.update({'tokens_input': 0, 'tokens_output': 0, 'tokens_embedding': 0})
-    get_embedding_cache().clear()
+    get_embedding_cache().reset_stats()  # mantiene los embeddings cacheados entre corridas (no los limpia)
     t0 = time.time()
     
     if "API" in mode:
@@ -3553,7 +3659,7 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
 
 async def run_quick_async(df, tc, sc, bn, al):
     st.session_state.update({'tokens_input': 0, 'tokens_output': 0, 'tokens_embedding': 0})
-    get_embedding_cache().clear()
+    get_embedding_cache().reset_stats()  # mantiene embeddings cacheados entre corridas
     df['_txt'] = df.apply(lambda r: _construir_texto_basico(r, tc, sc, bn, al), axis=1)
     with st.status("Embeddings...", expanded=True) as s:
         _ = get_embeddings_batch(df['_txt'].tolist())
@@ -3668,7 +3774,7 @@ def render_quick_tab():
 # ======================================
 async def run_custom_excel_async(file_bytes, tc, sc, bn, al, mode="API de OpenAI", tpkl=None, epkl=None):
     st.session_state.update({'tokens_input': 0, 'tokens_output': 0, 'tokens_embedding': 0})
-    get_embedding_cache().clear()
+    get_embedding_cache().reset_stats()  # mantiene los embeddings cacheados entre corridas (no los limpia)
     t0 = time.time()
 
     # Cargar archivo usando openpyxl para conservar estilos y formato original
