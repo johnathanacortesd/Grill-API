@@ -43,7 +43,7 @@ st.set_page_config(
 
 def _resolver_modelo_clasificacion():
     """Modelo de clasificación configurable sin redeploy.
-    Orden: env OPENAI_CLASIF_MODEL → secret OPENAI_CLASIF_MODEL → gpt-4.1-nano por defecto."""
+    Orden: env OPENAI_CLASIF_MODEL → secret OPENAI_CLASIF_MODEL → gpt-5-nano por defecto."""
     env = os.environ.get("OPENAI_CLASIF_MODEL")
     if env:
         return env
@@ -53,7 +53,7 @@ def _resolver_modelo_clasificacion():
             return s
     except Exception:
         pass
-    return "gpt-4.1-nano-2025-04-14"
+    return "gpt-5-nano-2025-08-07"
 
 OPENAI_MODEL_EMBEDDING     = "text-embedding-3-small"
 OPENAI_MODEL_CLASIFICACION = _resolver_modelo_clasificacion()
@@ -120,6 +120,21 @@ _TRAILING_INCOMPLETE = {
     "mi","mis","tu","tus","nuestro","nuestra","nuestros","nuestras",
     "a","ha","he","ser","estar","haber","hacer","tener","poder","deber",
     "ir","dar","ver","saber","querer","llegar","pasar","decir","poner",
+}
+
+_VERBOS_LEAD_SUBTEMA = {
+    "levanta", "levantan", "levantaron", "levanto", "impacta", "impactan", "impacto",
+    "encarece", "encarecen", "encarecio", "sube", "suben", "subio", "baja", "bajan",
+    "bajaron", "bajo", "aumenta", "aumentan", "aumento", "aumentaron", "crece", "crecen",
+    "crecio", "crecieron", "gana", "ganan", "gano", "ganaron", "pierde", "pierden",
+    "perdio", "pierden", "logra", "logran", "logro", "busca", "buscan", "busco",
+    "ofrece", "ofrecen", "ofrecio", "entrega", "entregan", "entrego", "abre", "abren",
+    "abrio", "vende", "venden", "vendio", "anuncia", "anuncian", "presenta", "presentan",
+    "inaugura", "inauguran", "lanza", "lanzan", "firma", "firman", "solicita", "solicitan",
+    "reconoce", "reconocen", "conquista", "conquistan", "inicia", "inician", "llega",
+    "llegan", "supera", "superan", "alcanza", "alcanzan", "derrumba", "derrumban",
+    "colapsa", "colapsan", "recupera", "recuperan", "avanza", "avanzan", "consolida",
+    "consolidan", "espera", "esperan", "planea", "planean", "prepara", "preparan",
 }
 
 _PATRON_TITULAR = re.compile(
@@ -1024,6 +1039,16 @@ def _contexto_para_excel(contexto, max_chars=480, umbral_corto=127):
         tramo = tramo[:max_chars].rstrip()
     return tramo.strip()
 
+def _construir_texto_basico(row, tc, sc, bn, al):
+    """Texto base de análisis: prioridad Título → Contexto analizado → Resumen-Aclaración.
+    El título va repetido (dominante) + el contexto corto + un resumen acotado."""
+    titulo = str(row.get(tc, "") or "").strip()
+    resumen = str(row.get(sc, "") or "").strip()[:300]
+    ctx = _contexto_para_excel(
+        extraer_contexto_marca(row.get(tc, ""), row.get(sc, ""), bn, al, row.get("Cuerpo Completo"))
+    )
+    return f"{titulo}. {titulo}. {ctx}. {resumen}".strip(" .")
+
 def _extraer_parrafo_marca(fuente, marca, aliases):
     """Contexto estructurado: inicio del párrafo → punto final del párrafo completo.
     Si el tramo queda muy corto (< MIN_PALABRAS_CONTEXTO), se extiende hasta el
@@ -1120,7 +1145,7 @@ def _validar_etiqueta_completa(etiqueta, titulos_grp=None, resumenes_grp=None, m
                 openai.ChatCompletion.create,
                 model=OPENAI_MODEL_CLASIFICACION,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=80,
+                max_tokens=200,
                 temperature=0.1,
                 response_format={"type": "json_object"}
             )
@@ -1298,7 +1323,7 @@ def _unificar_subtemas_llm(subtemas_a_unificar, textos_por_subtema, marca, alias
             openai.ChatCompletion.create,
             model=OPENAI_MODEL_CLASIFICACION,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=60,
+            max_tokens=160,
             temperature=0.05,
             response_format={"type": "json_object"}
         )
@@ -1518,7 +1543,7 @@ class ClasificadorTono:
                     openai.ChatCompletion.acreate,
                     model=OPENAI_MODEL_CLASIFICACION,
                     messages=[{"role": "user", "content": prompt}],
-                    max_tokens=100,
+                    max_tokens=300,
                     temperature=0.0,
                     response_format={"type": "json_object"}
                 )
@@ -2025,18 +2050,26 @@ class ClasificadorSubtema:
             r'solicita|solicitan|visita|visitan|atiende|atienden|destaca|destacan|'
             r'señala|señalan|indica|indican|expresa|expresan|afirma|afirman|'
             r'propone|proponen|pide|piden|exige|exigen|apoya|apoyan|'
-            r'informa|informan|reporta|reportan|advierte|advierten)\b',
+            r'informa|informan|reporta|reportan|advierte|advierten|'
+            r'levanta|levantan|levantaron|levanto|impacta|impactan|encarece|encarecen|'
+            r'encarecio|sube|suben|subio|baja|bajan|bajaron|gano|ganan|ganaron|'
+            r'pierde|pierden|perdio|logra|logran|busca|buscan|crece|crecen|'
+            r'aumenta|aumentan|conquista|conquistan|derrumba|derrumban|recupera|recuperan)\\b',
             re.IGNORECASE
         )
 
         def _tiene_verbo_conjugado(s): return bool(_VERBOS_FRASES.search(s))
+
+        def _primera_palabra_verbo(s):
+            prim = unidecode((s or "").strip().lower() or "").split()
+            return bool(prim and prim[0].rstrip(".,!?;:") in _VERBOS_LEAD_SUBTEMA)
 
         try:
             resp = call_with_retries(
                 openai.ChatCompletion.create,
                 model=OPENAI_MODEL_CLASIFICACION,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=60,
+                max_tokens=180,
                 temperature=0.0,
                 response_format={"type": "json_object"}
             )
@@ -2065,7 +2098,9 @@ class ClasificadorSubtema:
 
             genericas = {"gestión", "gestion", "actividades", "acciones", "noticias",
                          "información", "informacion", "eventos", "varios", "sin tema",
-                         "actividad corporativa", "gestion corporativa"}
+                         "actividad corporativa", "gestion corporativa",
+                         "impacto en la reputacion", "impacto reputacional",
+                         "reputacion corporativa", "impacto corporativo"}
             es_gen = string_norm_label(et) in {string_norm_label(g) for g in genericas}
             es_solo_marca = _es_nombre_o_fragmento_marca(et, self.marca, self.aliases)
             es_rob = _es_robotico(et)
@@ -2077,6 +2112,12 @@ class ClasificadorSubtema:
                 et = self._refinar(tm, kw, rm, forzar_preposicion=True)
                 if not _validar_estructura_subtema(et):
                     et = self._fallback(titulos_grp)
+
+            # REFUERZO anti-frases-sin-sentido: verbo conjugado / verbo al inicio / robotica
+            if _tiene_verbo_conjugado(et) or _primera_palabra_verbo(et) or _es_robotico(et):
+                et = self._refinar(tm, kw, rm, forzar_preposicion=True, prohibir_verbos=True)
+            if _tiene_verbo_conjugado(et) or _primera_palabra_verbo(et):
+                et = self._fallback(titulos_grp)
 
             et = _validar_etiqueta_completa(
                 et, titulos_grp=titulos_grp, resumenes_grp=resumenes_grp,
@@ -2135,7 +2176,7 @@ class ClasificadorSubtema:
                 openai.ChatCompletion.create,
                 model=OPENAI_MODEL_CLASIFICACION,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=60,
+                max_tokens=180,
                 temperature=0.2,
                 response_format={"type": "json_object"}
             )
@@ -2165,10 +2206,13 @@ class ClasificadorSubtema:
         accion = next((nombre for patron, nombre in acciones if re.search(patron, norm_total)), None)
         palabras = []
         tokens_marca = set(_normalizar_mencion(" ".join([self.marca] + self.aliases)).split())
-        excluir = tokens_marca | STOPWORDS_ES | {
+        excluir = tokens_marca | STOPWORDS_ES | _VERBOS_LEAD_SUBTEMA | {
             "universidad", "empresa", "compania", "corporacion", "fundacion", "institucion",
             "anuncio", "anuncia", "anuncio", "lanzamiento", "lanza", "presenta", "presencia",
             "invitado", "especial", "principal", "marca", "cliente",
+            "ultimo", "ultima", "ultimos", "ultimas", "nuevo", "nueva", "nuevos", "nuevas",
+            "poder", "suerte", "gran", "grande", "grandes", "coccion", "lenta", "medio",
+            "parte", "manera", "forma", "tipo", "asi", "pues", "mismo", "misma",
         }
         for t in titulos[:5]:
             for w in string_norm_label(t).split():
@@ -2230,7 +2274,7 @@ class ClasificadorSubtema:
             f"Sim mínima: **{u['sim_minima_agrupacion']}**"
         )
 
-        et = [texto_para_embedding(titulos[i], resumenes[i]) for i in range(n)]
+        et = textos  # base de agrupación: Título+Contexto+Resumen (ya en `col` = _txt)
 
         pbar.progress(0.05, "Fase 1 · Idénticas...")
         dsu = DSU(n)
@@ -2456,7 +2500,7 @@ def _generar_nombre_tema_llm(subtemas_grupo, textos_muestra, titulos_muestra, ma
             openai.ChatCompletion.create,
             model=OPENAI_MODEL_CLASIFICACION,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=40,
+            max_tokens=120,
             temperature=0.05,
             response_format={"type": "json_object"}
         )
@@ -2481,7 +2525,7 @@ def _regenerar_tema_diferente(subtemas_grupo, titulos_muestra, intento=0):
             openai.ChatCompletion.create,
             model=OPENAI_MODEL_CLASIFICACION,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=50,
+            max_tokens=120,
             temperature=0.2 + intento * 0.1,
             response_format={"type": "json_object"}
         )
@@ -3154,7 +3198,7 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
     if ta:
         df = pd.DataFrame(ta)
         df["_txt"] = df.apply(
-            lambda r: texto_para_embedding(str(r.get(km["titulo"], "")), str(r.get(km["resumen"], ""))),
+            lambda r: _construir_texto_basico(r, km["titulo"], km["resumen"], bn, ba),
             axis=1
         )
         with st.status("Embeddings...", expanded=True) as s:
@@ -3230,7 +3274,7 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
 async def run_quick_async(df, tc, sc, bn, al):
     st.session_state.update({'tokens_input': 0, 'tokens_output': 0, 'tokens_embedding': 0})
     get_embedding_cache().clear()
-    df['_txt'] = df.apply(lambda r: texto_para_embedding(str(r.get(tc, "")), str(r.get(sc, ""))), axis=1)
+    df['_txt'] = df.apply(lambda r: _construir_texto_basico(r, tc, sc, bn, al), axis=1)
     with st.status("Embeddings...", expanded=True) as s:
         _ = get_embeddings_batch(df['_txt'].tolist())
         s.update(label=f"✓ {get_embedding_cache().stats()}", state="complete")
@@ -3357,7 +3401,7 @@ async def run_custom_excel_async(file_bytes, tc, sc, bn, al, mode="API de OpenAI
     df = pd.read_excel(buf_in)
 
     df['_txt'] = df.apply(
-        lambda r: texto_para_embedding(str(r.get(tc, "")), str(r.get(sc, ""))),
+        lambda r: _construir_texto_basico(r, tc, sc, bn, al),
         axis=1
     )
 
