@@ -889,6 +889,103 @@ def string_norm_label(s):
     s = unidecode(s.lower())
     s = re.sub(r"[^a-z0-9\s]", " ", s)
     return " ".join(t for t in s.split() if t not in STOPWORDS_ES)
+# Rótulos genéricos que NUNCA deben aparecer como subtema (el usuario los rechaza).
+_ETIQUETAS_GENERICAS_INVALIDAS = {
+    "cobertura de informacion relevante",
+    "cobertura informativa general",
+    "cobertura de informacion",
+    "cobertura de noticias",
+    "cobertura noticiosa",
+    "informacion relevante",
+    "informacion importante",
+    "informacion general",
+    "noticia relevante",
+    "noticias relevantes",
+    "noticia importante",
+    "noticias importantes",
+    "sin tema", "varios", "n a", "general", "noticias", "informacion", "tema", "temas",
+    "gestion", "actividades", "acciones", "eventos",
+    "actividad corporativa", "gestion corporativa",
+    "impacto en la reputacion", "impacto reputacional",
+    "reputacion corporativa", "impacto corporativo",
+}
+
+
+def _es_etiqueta_generica(etiqueta) -> bool:
+    """True si la etiqueta es un rótulo genérico/vacío (p. ej. 'Cobertura de
+    información relevante') o una sola palabra sin hecho concreto."""
+    if not etiqueta or not str(etiqueta).strip():
+        return True
+    n = re.sub(r"[^a-z0-9\s]", " ", unidecode(str(etiqueta).lower()))
+    n = re.sub(r"\s+", " ", n).strip()
+    if not n or n in _ETIQUETAS_GENERICAS_INVALIDAS:
+        return True
+    return len(n.split()) <= 1
+
+
+_PATRON_LOCATIVO_FINAL = re.compile(
+    r'\s+(en|de|del|para)\s+(colombia|bogota|barranquilla|medellin|cali|cartagena|'
+    r'la guajira|guajira|santander|antioquia|valle|atlantico|bolivar|meta|cundinamarca|'
+    r'norte de santander|sucre|magdalena|tolima|huila|casanare|arauca|putumayo|'
+    r'el pais|el exterior|latinoamerica|america latina|la region|la ciudad|el departamento|'
+    r'nivel nacional|territorio nacional)\s*$',
+    re.IGNORECASE,
+)
+
+
+# Palabras de entidad/cantidad/verbo que no deben encabezar ni aportar 'asunto'
+# en el subtema determinista (fallback). Se usan en _construir_frase_accion y
+# _derivar_desde_titulos para mantener la etiqueta anclada al hecho, no al marco.
+_TOKENS_DEBILES_SUBTEMA_FALLBACK = {
+    "gobierno", "gobernacion", "gobernaciones", "alcaldia", "alcaldias", "ministerio",
+    "ministerios", "secretaria", "secretarias", "entidad", "entidades", "autoridad",
+    "autoridades", "empresa", "empresas", "compania", "companias", "corporacion",
+    "corporaciones", "institucion", "instituciones", "fundacion", "fundaciones",
+    "nacional", "regional", "local", "pais", "nacion", "se",
+    "colombia", "bogota", "barranquilla", "medellin", "cali", "cartagena", "santa marta",
+    "monteria", "sincelejo", "valledupar", "riohacha", "soledad", "malambo", "galapa",
+    "la guajira", "guajira", "santander", "antioquia", "atlantico", "bolivar", "magdalena",
+    "sucre", "cordoba", "cesar", "meta", "tolima", "huila", "narino", "cauca", "valle",
+    "cundinamarca", "boyaca", "casanare", "arauca", "putumayo", "quindio", "risaralda",
+    "caldas", "norte de santander",
+    "millones", "millon", "miles", "billones", "millardos", "pesos", "dolares",
+    "monto", "montos", "cifra", "cifras", "suma", "sumas",
+    "anuncia", "anuncian", "anuncio", "anunciaron", "anunciado",
+    "lanza", "lanzan", "lanzo", "lanzaron", "lanzado",
+    "presenta", "presentan", "presento", "presentaron", "presentado",
+    "inaugura", "inauguran", "inauguro", "inauguraron", "inaugurado",
+    "celebra", "celebran", "celebro", "celebraron", "celebrado",
+    "conmemora", "conmemoran", "conmemoro", "conmemoraron",
+    "realiza", "realizan", "realizo", "realizaron", "realizado",
+    "desarrolla", "desarrollan", "desarrollo", "desarrollaron", "desarrollado",
+    "organiza", "organizan", "organizo", "organizaron", "organizado",
+    "inicia", "inician", "inicio", "iniciaron", "iniciado",
+    "abre", "abrieron", "abrio", "abierto",
+    "firma", "firmaron", "firmado", "suscriben", "suscribieron", "suscribio", "suscrito",
+    "invierte", "invirtieron", "invirtio", "invertido", "destinan", "destino", "destinaron",
+    "entrega", "entregaron", "entregado",
+    "recibe", "recibieron", "recibio", "recibido",
+    "nombra", "nombraron", "nombrado", "nombrada", "nombramiento",
+    "designa", "designaron", "designado", "designada",
+    "posesiona", "posesionaron", "posesionado", "posesionada",
+    "asume", "asumieron", "asumio", "asumido",
+    "fue", "fueron", "sera", "seran", "es", "son", "era", "eran",
+    "logra", "lograron", "logrado", "alcanza", "alcanzaron", "alcanzado",
+    "supera", "superaron", "superado", "gana", "ganaron", "ganado",
+    "otorga", "otorgaron", "otorgado", "premia", "premiaron", "premiado",
+    "destaca", "destacaron", "destacado", "reconoce", "reconocieron", "reconocido",
+    "elegida", "elegido", "elegidos", "elegidas",
+}
+def _quitar_locativos_finales(frase):
+    if not frase:
+        return frase
+    s = " ".join(str(frase).split())
+    while True:
+        m = _PATRON_LOCATIVO_FINAL.search(s)
+        if not m:
+            return s
+        s = s[:m.start()].strip()
+
 
 _ACCIONES_OPUESTAS = [
     ({"aprobacion", "aprueba", "apoyo", "acuerdo", "aval", "respaldo"}, {"rechazo", "rechaza", "desacuerdo", "oposicion", "critica"}),
@@ -1366,12 +1463,13 @@ def extraer_contexto_marca_detallado(titulo, resumen, marca, aliases=None, cuerp
     }
 
 def _validar_etiqueta_completa(etiqueta, titulos_grp=None, resumenes_grp=None, marca="", aliases=None, fallback_fn=None):
-    if not etiqueta or etiqueta.strip().lower() in ("sin tema", "varios", "n/a"):
+    if (not etiqueta or etiqueta.strip().lower() in ("sin tema", "varios", "n/a")
+            or _es_etiqueta_generica(etiqueta)):
         if fallback_fn: return fallback_fn(titulos_grp or [])
-        return "Cobertura informativa general"
+        return "Sin tema"
     if _frase_esta_completa(etiqueta): return etiqueta
     recortada = _recortar_frase_completa(etiqueta, max_palabras=MAX_PALABRAS_SUBTEMA)
-    if _frase_esta_completa(recortada) and len(recortada.split()) >= 2:
+    if _frase_esta_completa(recortada) and len(recortada.split()) >= 2 and not _es_etiqueta_generica(recortada):
         return capitalizar_etiqueta(recortada)
     if titulos_grp and len(titulos_grp) > 0:
         try:
@@ -1382,7 +1480,9 @@ def _validar_etiqueta_completa(etiqueta, titulos_grp=None, resumenes_grp=None, m
                 + "\n".join(f"  · {t[:120]}" for t in titulos_grp[:4])
                 + "\n\nREGLAS: frase nominal con preposición, terminar en sustantivo/adjetivo, "
                 f"tildes y ñ correctas. La etiqueta debe explicar el hecho relacionado con '{marca}', "
-                "no limitarse al nombre de la institución.\n"
+                "no limitarse al nombre de la institución. Usa SOLO palabras que aparezcan en el "
+                "texto y NO devuelvas rótulos genéricos ('Cobertura de información relevante', "
+                "'Cobertura informativa general').\n"
                 "CORRECTO: 'Proyecto de terminal de transportes', 'Operación del Canal del Dique'\n"
                 "INCORRECTO: 'Terminal transportes', 'Operación canal'\n"
                 'JSON: {"subtema":"..."}'
@@ -1402,12 +1502,13 @@ def _validar_etiqueta_completa(etiqueta, titulos_grp=None, resumenes_grp=None, m
             raw = json.loads(resp.choices[0].message.content).get("subtema", "")
             if raw:
                 cleaned = limpiar_tema(raw)
-                if _frase_esta_completa(cleaned) and len(cleaned.split()) >= 2:
+                if (_frase_esta_completa(cleaned) and len(cleaned.split()) >= 2
+                        and not _es_etiqueta_generica(cleaned)):
                     return capitalizar_etiqueta(cleaned)
         except:
             pass
     if fallback_fn: return fallback_fn(titulos_grp or [])
-    return capitalizar_etiqueta(recortada) if recortada and len(recortada.split()) >= 2 else "Cobertura informativa general"
+    return capitalizar_etiqueta(recortada) if recortada and len(recortada.split()) >= 2 and not _es_etiqueta_generica(recortada) else "Sin tema"
 
 def dedup_labels(etiquetas, umbral=UMBRAL_DEDUP_LABEL):
     unique = list(dict.fromkeys(etiquetas))
@@ -2396,7 +2497,8 @@ class ClasificadorSubtema:
             "  2. Escribe: [tipo de hecho] + [preposición: de/del/para/sobre/en] + [objeto o asunto concreto]. "
             "La frase debe leerse como un encabezado de nota, con orden natural.\n"
             "  3. Usa SOLO palabras que aparezcan en el texto analizado (o sus derivadas directas, "
-            "ej. 'renunció' → 'renuncia'). NO inventes nombres, lugares, cargos ni términos.\n"
+            "ej. 'renunció' → 'renuncia'). NO inventes nombres, lugares, cargos ni términos. "
+            "Deriva la frase del TÍTULO o del RESUMEN-ACLARACIÓN: cada palabra de contenido debe aparecer en esos textos.\n"
             "  4. Sintetiza el hecho; NO copies el titular completo ni frases sueltas del texto.\n"
             "  5. Si el hecho NO está vinculado con la marca, describe el tema real de la noticia sin forzar la relación.\n\n"
             "PROHIBIDO (se rechaza automáticamente):\n"
@@ -2405,7 +2507,8 @@ class ClasificadorSubtema:
             "  - Verbo conjugado ('presenta', 'lanza', 'plantea', 'renunció', 'asume', 'fue').\n"
             "  - Dos sustantivos pegados sin preposición ('Guajira escenario', 'Colombia escudo').\n"
             "  - Adjetivo después de 'de' cuando debe ir pegado ('Explotación de sexual' es incorrecto; correcto: 'Explotación sexual').\n"
-            "  - Etiquetas genéricas ('Gestión corporativa', 'Actividad institucional').\n\n"
+            "  - Etiquetas genéricas ('Cobertura de información relevante', 'Cobertura informativa general', "
+            "'Información relevante', 'Gestión corporativa', 'Actividad institucional').\n\n"
             f"TÍTULOS:\n" + "\n".join(f"  · {t}" for t in tm)
             + bloq_resumenes
             + bloq_contexto
@@ -2483,7 +2586,7 @@ class ClasificadorSubtema:
                          "actividad corporativa", "gestion corporativa",
                          "impacto en la reputacion", "impacto reputacional",
                          "reputacion corporativa", "impacto corporativo"}
-            es_gen = string_norm_label(et) in {string_norm_label(g) for g in genericas}
+            es_gen = string_norm_label(et) in {string_norm_label(g) for g in genericas} or _es_etiqueta_generica(et)
             es_solo_marca = _es_nombre_o_fragmento_marca(et, self.marca, self.aliases)
             es_verboso_marca = _es_verboso_con_marca(et, self.marca, self.aliases)
             es_rob = _es_robotico(et)
@@ -2494,34 +2597,34 @@ class ClasificadorSubtema:
             if not _validar_estructura_subtema(et):
                 et = self._refinar(tm, None, rm, forzar_preposicion=True, prohibir_verbos=True)
                 if not _validar_estructura_subtema(et):
-                    et = self._fallback(titulos_grp)
+                    et = self._fallback(titulos_grp, resumenes_grp)
 
             # Refuerzo 1: nombres propios / cargos / números / siglas
             if _empieza_por_nombre_propio(et, titulos_grp) or _contiene_numero_o_acronimo(et):
                 et = self._refinar(tm, None, rm, forzar_preposicion=True, prohibir_verbos=True, prohibir_nombres=True)
             if _empieza_por_nombre_propio(et, titulos_grp) or _contiene_numero_o_acronimo(et):
-                et = self._fallback(titulos_grp)
+                et = self._fallback(titulos_grp, resumenes_grp)
 
             # Refuerzo 2: grounding (no inventos)
             if not _subtema_grounded(et, fuentes_grounding):
                 et = self._refinar(tm, None, rm, forzar_preposicion=True, prohibir_verbos=True)
             if not _subtema_grounded(et, fuentes_grounding):
-                et = self._fallback(titulos_grp)
+                et = self._fallback(titulos_grp, resumenes_grp)
 
             # Refuerzo final anti-frases-sin-sentido
             if _tiene_verbo_conjugado(et) or _primera_palabra_verbo(et) or _es_robotico(et) or _empieza_por_nombre_propio(et, titulos_grp):
-                et = self._fallback(titulos_grp)
+                et = self._fallback(titulos_grp, resumenes_grp)
 
             et = _validar_etiqueta_completa(
                 et, titulos_grp=titulos_grp, resumenes_grp=resumenes_grp,
-                marca=self.marca, aliases=self.aliases, fallback_fn=self._fallback
+                marca=self.marca, aliases=self.aliases, fallback_fn=lambda tl: self._fallback(tl, resumenes_grp)
             )
             if _es_nombre_o_fragmento_marca(et, self.marca, self.aliases):
                 et = self._refinar(tm, None, rm, forzar_preposicion=True, prohibir_verbos=True, prohibir_nombres=True)
             if _es_nombre_o_fragmento_marca(et, self.marca, self.aliases):
-                et = self._fallback(titulos_grp)
+                et = self._fallback(titulos_grp, resumenes_grp)
         except:
-            et = self._fallback(titulos_grp)
+            et = self._fallback(titulos_grp, resumenes_grp)
 
         et = capitalizar_etiqueta(et)
         self._cache[ck] = et
@@ -2547,6 +2650,7 @@ class ClasificadorSubtema:
             "Ej.: 'Convenio de cooperación científica', 'Investigación por fallas operativas', "
             "'Explotación sexual de menores'.\n"
             "Usa SOLO palabras del texto. Tildes y ñ correctas. No copies el titular literal.\n"
+            "PROHIBIDO: rótulos genéricos ('Cobertura de información relevante', 'Cobertura informativa general').\n"
             'JSON: {"subtema":"..."}'
         )
         try:
@@ -2562,33 +2666,113 @@ class ClasificadorSubtema:
             et = limpiar_tema(raw)
             if not _frase_esta_completa(et):
                 et = _recortar_frase_completa(et)
-                if not _frase_esta_completa(et): return self._fallback(titulos)
+                if not _frase_esta_completa(et): return self._fallback(titulos, resumenes)
             return et
         except:
-            return self._fallback([])
+            return self._fallback(titulos or [], resumenes)
 
-    def _fallback(self, titulos):
-        if not titulos: return "Cobertura de información relevante"
+    def _extraer_desde_texto(self, titulos, resumenes):
+        """Un intento LLM ESTRICTO: la frase se arma ÚNICAMENTE con palabras que
+        aparecen literalmente en Título / Resumen-Aclaración. '' si no valida."""
+        if not titulos and not resumenes:
+            return ""
+        tm = list(dict.fromkeys(str(t)[:160] for t in titulos if str(t).strip()))[:4]
+        rm = [str(r)[:200] for r in resumenes[:2] if r and len(str(r)) > 20]
+        if not tm and not rm:
+            return ""
+        bloq_t = ("\n".join(f"  · {t}" for t in tm)) if tm else "(no hay títulos)"
+        bloq_r = ("\n".join(f"  · {r}" for r in rm)) if rm else "(no hay resúmenes)"
+        prompt = (
+            "Eres analista de reputación. Extrae del texto periodístico la frase nominal "
+            "de 3 a 5 palabras que mejor describa EL HECHO central del grupo.\n\n"
+            f"TÍTULOS:\n{bloq_t}\n\nRESÚMENES-ACLARACIÓN:\n{bloq_r}\n\n"
+            "REGLAS ESTRICTAS:\n"
+            "  - Usa ÚNICAMENTE palabras que aparezcan literalmente en los títulos o "
+            "resúmenes (puedes eliminar palabras o cambiar su orden, pero NO añadir ni inventar ninguna).\n"
+            "  - Formato nominal: [tipo de hecho] + [preposición] + [asunto]. "
+            "Ej.: 'Convenio de cooperación científica', 'Ampliación de plataforma digital'.\n"
+            "  - PROHIBIDO: rótulos genéricos ('Cobertura de información relevante', "
+            "'Cobertura informativa general', 'Información relevante'), empezar por nombre "
+            "de persona, cargo o lugar, y verbos conjugados.\n"
+            'JSON: {"subtema":"..."}'
+        )
+        try:
+            resp = call_with_retries(
+                openai.ChatCompletion.create,
+                model=OPENAI_MODEL_CLASIFICACION,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=120,
+                temperature=0.0,
+                response_format={"type": "json_object"}
+            )
+            u = resp.get('usage', {}) if isinstance(resp, dict) else getattr(resp, 'usage', {})
+            if u:
+                st.session_state['tokens_input'] += (u.get('prompt_tokens') if isinstance(u, dict) else getattr(u, 'prompt_tokens', 0)) or 0
+                st.session_state['tokens_output'] += (u.get('completion_tokens') if isinstance(u, dict) else getattr(u, 'completion_tokens', 0)) or 0
+            raw = json.loads(resp.choices[0].message.content).get("subtema", "")
+            et = limpiar_tema(raw)
+            fuentes = [str(t) for t in titulos if str(t).strip()] + [str(r) for r in resumenes if str(r).strip()]
+            if (et and not _es_etiqueta_generica(et)
+                    and _frase_esta_completa(et)
+                    and _validar_estructura_subtema(et)
+                    and _subtema_grounded(et, fuentes)
+                    and not _empieza_por_nombre_propio(et, titulos)):
+                return et
+        except Exception:
+            pass
+        return ""
 
+    def _construir_frase_accion(self, titulos, resumenes):
+        """Frase 'Acción de asunto' con palabras reales del texto. Determinista y grounded."""
+        if not titulos and not resumenes:
+            return ""
         nombres_iniciales = set()
         for t in titulos:
             nombres_iniciales |= _nombres_propios_iniciales_titulo(t)
 
         acciones = [
-            (r"\b(lanzamiento|lanza|lanzo|estrena|estreno|presenta|presento)\b", "Lanzamiento"),
-            (r"\b(anuncia|anuncio)\b", "Anuncio"),
-            (r"\b(inaugura|inauguro|apertura|abre|abrio)\b", "Apertura"),
-            (r"\b(firma|firmo|suscribe|suscribio|convenio|alianza)\b", "Convenio"),
-            (r"\b(recibe|recibio|premio|reconocimiento|galardon|distincion|honoris|causa)\b", "Reconocimiento"),
-            (r"\b(investiga|investigacion|sancion|denuncia|demanda)\b", "Investigación"),
+            (r"\b(lanzamiento|lanza|lanzo|estrena|estreno|presenta|presento|presentacion)\b", "Lanzamiento"),
+            (r"\b(anuncia|anuncio|anuncian)\b", "Anuncio"),
+            (r"\b(inaugura|inauguro|inauguracion|apertura|abre|abrio)\b", "Apertura"),
+            (r"\b(firma|firmo|suscribe|suscribio|convenio|alianza|pacto|acuerdo)\b", "Convenio"),
+            (r"\b(recibe|recibio|premio|reconocimiento|galardon|distincion|honoris|causa|premiacion)\b", "Reconocimiento"),
+            (r"\b(investiga|investigacion|sancion|sancio|denuncia|demanda|multa)\b", "Investigación"),
             (r"\b(renuncia|renuncio|dimite|dimitio)\b", "Renuncia"),
-            (r"\b(designa|designo|nombra|nombro|asume|asumio|posesiona|posesiono|representante)\b", "Designación"),
+            (r"\b(designa|designo|nombra|nombro|nombramiento|asume|asumio|posesiona|posesiono|representante|nombrada|nombrado|designada|designado|elegida|elegido)\b", "Designación"),
+            (r"\b(invierte|inversion|inversiones|invirtio|invertira|destina|destino|destinara)\b", "Inversión"),
+            (r"\b(proyecto|proyectos)\b", "Proyecto"),
+            (r"\b(reforma|reformas)\b", "Reforma"),
+            (r"\b(convocatoria|convoca|convocan)\b", "Convocatoria"),
+            (r"\b(licitacion|licita|adjudica|adjudicacion)\b", "Licitación"),
+            (r"\b(campana|campañas)\b", "Campaña"),
+            (r"\b(foro|foros)\b", "Foro"),
+            (r"\b(congreso)\b", "Congreso"),
+            (r"\b(cumbre)\b", "Cumbre"),
+            (r"\b(encuentro|encuentros)\b", "Encuentro"),
+            (r"\b(seminario|seminarios)\b", "Seminario"),
+            (r"\b(taller|talleres)\b", "Taller"),
+            (r"\b(conversatorio|simposio)\b", "Conversatorio"),
+            (r"\b(ampliacion|amplia|ampliara)\b", "Ampliación"),
+            (r"\b(construccion|construira|construye|construyen)\b", "Construcción"),
+            (r"\b(reactivacion|reactiva|reapertura)\b", "Reactivación"),
+            (r"\b(cierre|suspension|clausura)\b", "Cierre"),
+            (r"\b(balance|balances)\b", "Balance"),
+            (r"\b(resultados|resultado)\b", "Resultados"),
+            (r"\b(estudio|estudios)\b", "Estudio"),
+            (r"\b(publicacion|publica obra|publica el libro|lanzamiento del libro)\b", "Publicación"),
+            (r"\b(capacitacion|entrenamiento)\b", "Capacitación"),
         ]
         texto_total = " ".join(str(t) for t in titulos[:5])
-        accion = next((nombre for patron, nombre in acciones if re.search(patron, unidecode(texto_total.lower()), re.IGNORECASE)), None)
+        accion_par = next(
+            ((patron, nombre) for patron, nombre in acciones
+             if re.search(patron, unidecode(texto_total.lower()), re.IGNORECASE)),
+            None,
+        )
+        accion = accion_par[1] if accion_par else None
 
         tokens_marca = set(_normalizar_mencion(" ".join([self.marca] + self.aliases)).split())
-        excluir = tokens_marca | STOPWORDS_ES | _VERBOS_LEAD_SUBTEMA | _CARGOS_SUBTEMA | nombres_iniciales | {
+        excluir = (tokens_marca | STOPWORDS_ES | _VERBOS_LEAD_SUBTEMA | _CARGOS_SUBTEMA
+                   | nombres_iniciales | _TOKENS_DEBILES_SUBTEMA_FALLBACK | {
             "universidad", "empresa", "compania", "corporacion", "fundacion", "institucion",
             "anuncio", "anuncia", "lanzamiento", "lanza", "presenta", "presencia",
             "invitado", "especial", "principal", "marca", "cliente", "noticia",
@@ -2596,8 +2780,14 @@ class ClasificadorSubtema:
             "poder", "suerte", "gran", "grande", "grandes", "coccion", "lenta", "medio",
             "parte", "manera", "forma", "tipo", "asi", "pues", "mismo", "misma",
             "escenario", "escenarios", "contexto", "contextos", "varios", "toneladas",
-        }
-        # Recolectar palabras de contenido CONSERVANDO su forma original (con acentos).
+        })
+        if accion_par:
+            # Evita que la propia cabeza ('Foro', 'Inversión', 'Campaña'...) o sus
+            # formas verbales se cuelen como 'palabra clave' del asunto.
+            excluir = excluir | {
+                _normaliza_token(w) for w in re.findall(r"[A-Za-zÁÉÍÓÚÑÜáéíóúñü]+", accion_par[0])
+            }
+
         palabras_ordenadas = []
         for t in titulos[:5]:
             for w in re.findall(r"[A-Za-zÁÉÍÓÚÑÜáéíóúñü]+", str(t)):
@@ -2606,6 +2796,15 @@ class ClasificadorSubtema:
                         and norm not in _TRAILING_INCOMPLETE
                         and not _RE_VERBO_SUBTEMA.search(norm)):
                     palabras_ordenadas.append((norm, w))
+        if not palabras_ordenadas and resumenes:
+            # Sin palabras útiles en títulos, se ancla en el resumen (también es texto real).
+            for r in resumenes[:3]:
+                for w in re.findall(r"[A-Za-zÁÉÍÓÚÑÜáéíóúñü]+", str(r)):
+                    norm = _normaliza_token(w)
+                    if (len(norm) >= 4 and norm not in excluir
+                            and norm not in _TRAILING_INCOMPLETE
+                            and not _RE_VERBO_SUBTEMA.search(norm)):
+                        palabras_ordenadas.append((norm, w))
         if palabras_ordenadas:
             cnt = Counter(p[0] for p in palabras_ordenadas)
             top_norm = [n for n, _ in cnt.most_common(3)]
@@ -2618,13 +2817,107 @@ class ClasificadorSubtema:
             elif accion:
                 frase = _recortar_frase_completa(accion, MAX_PALABRAS_SUBTEMA)
             else:
-                # NO se concatenan palabras clave sueltas (el usuario lo rechaza explícitamente).
-                # Sin un tipo de hecho claro, se devuelve un rótulo genérico limpio.
                 frase = ""
             if _frase_esta_completa(frase) and not _es_nombre_o_fragmento_marca(frase, self.marca, self.aliases):
                 return capitalizar_etiqueta(frase)
-            return "Cobertura de información relevante"
-        return "Cobertura de información relevante"
+        return ""
+
+    def _derivar_desde_titulos(self, titulos):
+        """Frase nominal tomada del título más representativo: 100% palabras del texto."""
+        for t in titulos:
+            s = str(t).strip()
+            if len(s) < 12 or len(s.split()) < 3:
+                continue
+            for n in [self.marca] + [a for a in (self.aliases or []) if a]:
+                n = str(n).strip()
+                if n:
+                    s = re.sub(r'\b' + re.escape(n) + r'\b', ' ', s, flags=re.IGNORECASE)
+            s = re.sub(r'\s+', ' ', s).strip()
+            toks = s.split()
+            nombres = _nombres_propios_iniciales_titulo(t)
+            i = 0
+            while i < len(toks):
+                tok = toks[i].lower().rstrip('.,;:!?')
+                tn = unidecode(tok)
+                if (re.match(r'^\d', tn)
+                        or tn in _ARTICULOS_SUBTEMA
+                        or tn in _CONECTORES_ETIQUETA
+                        or tn in _VERBOS_LEAD_SUBTEMA
+                        or tn in _CARGOS_SUBTEMA
+                        or tn in _TOKENS_DEBILES_SUBTEMA_FALLBACK
+                        or tn in {"nuevo", "nueva", "nuevos", "nuevas", "gran", "grande", "grandes",
+                                  "este", "esta", "estos", "estas"}
+                        or _PATRON_TITULAR.match(toks[i])
+                        or _RE_VERBO_SUBTEMA.search(tn)
+                        or (tn not in _CABEZAS_SUBTEMA_VALIDAS and tn in nombres)):
+                    i += 1
+                    continue
+                break
+            rest = toks[i:]
+            if len(rest) < 2:
+                continue
+            frase = _recortar_frase_completa(" ".join(rest), MAX_PALABRAS_SUBTEMA)
+            frase = _quitar_locativos_finales(frase)
+            if (_frase_esta_completa(frase) and len(frase.split()) >= 2
+                    and not _es_nombre_o_fragmento_marca(frase, self.marca, self.aliases)
+                    and not _es_etiqueta_generica(frase)):
+                return capitalizar_etiqueta(frase)
+        return ""
+
+    def _palabra_clave_mas_frecuente(self, titulos, resumenes):
+        """Último recurso: sustantivo de contenido más frecuente (siempre del texto)."""
+        excluir = STOPWORDS_ES | _VERBOS_LEAD_SUBTEMA | _CARGOS_SUBTEMA | _TRAILING_INCOMPLETE | {
+            "noticia", "noticias", "informe", "informacion", "comunicado", "nota",
+            "colombia", "pais", "nacional", "regional", "local", "sector", "empresa",
+            "entidad", "autoridad", "gobierno", "alcaldia", "gobernacion", "ministerio",
+            "nuevo", "nueva", "nuevos", "nuevas",
+        }
+        for n in [self.marca] + [a for a in (self.aliases or []) if a]:
+            n = str(n).strip()
+            if n:
+                excluir = excluir | set(_normalizar_mencion(n).split())
+        cnt = Counter()
+        for t in titulos[:5]:
+            for w in re.findall(r"[A-Za-zÁÉÍÓÚÑÜáéíóúñü]+", str(t)):
+                norm = _normaliza_token(w)
+                if len(norm) >= 4 and norm not in excluir and not _RE_VERBO_SUBTEMA.search(norm):
+                    cnt[norm] += 1
+        if not cnt and resumenes:
+            for r in resumenes[:3]:
+                for w in re.findall(r"[A-Za-zÁÉÍÓÚÑÜáéíóúñü]+", str(r)):
+                    norm = _normaliza_token(w)
+                    if len(norm) >= 4 and norm not in excluir and not _RE_VERBO_SUBTEMA.search(norm):
+                        cnt[norm] += 1
+        if cnt:
+            return cnt.most_common(1)[0][0].capitalize()
+        return ""
+
+    def _fallback(self, titulos, resumenes=None):
+        """Última red: SIEMPRE deriva una etiqueta del texto real (Título / Resumen-Aclaración).
+        Nunca devuelve rótulos genéricos tipo 'Cobertura de información relevante'."""
+        titulos = [t for t in (titulos or []) if t is not None and str(t).strip() and str(t).strip().lower() != 'nan']
+        resumenes = [r for r in (resumenes or []) if r is not None and str(r).strip()]
+
+        # 1) Extracción LLM estricta: frase armada SOLO con palabras del texto.
+        et = self._extraer_desde_texto(titulos, resumenes)
+        if et and not _es_etiqueta_generica(et):
+            return et
+
+        # 2) Frase nominal derivada del título más representativo (100% grounded).
+        et = self._derivar_desde_titulos(titulos)
+        if et and not _es_etiqueta_generica(et):
+            return et
+
+        # 3) Acción detectada + palabras clave del texto (100% grounded).
+        et = self._construir_frase_accion(titulos, resumenes)
+        if et and not _es_etiqueta_generica(et):
+            return et
+
+        # 4) Último recurso: palabra de contenido más frecuente (aún grounded).
+        et = self._palabra_clave_mas_frecuente(titulos, resumenes)
+        if et and not _es_etiqueta_generica(et):
+            return et
+        return "Sin tema"
 
     def _consolidar_sinonimos_llm(self, subtemas_unicos):
         if len(subtemas_unicos) <= 1:
@@ -2724,7 +3017,7 @@ class ClasificadorSubtema:
                             textos_grp, previos2, etiqueta, etiqueta,
                             min_sim=max(u['sim_minima_agrupacion'], 0.88), min_overlap=0.24,
                         ):
-                            etiqueta = capitalizar_etiqueta(self._fallback(titulos_grp))
+                            etiqueta = capitalizar_etiqueta(self._fallback(titulos_grp, resumenes_grp))
             if etiqueta not in subtemas_aprobados:
                 subtemas_aprobados.append(etiqueta)
             textos_por_subtema_aprobado[etiqueta].extend(textos_grp)
@@ -2760,6 +3053,18 @@ class ClasificadorSubtema:
 
         pbar.progress(0.93, "Fase 7 · Completitud...")
         subtemas = self._validar_completitud_final(subtemas, textos, titulos, resumenes)
+        pbar.progress(0.95, "Fase 7b · Depurando rótulos genéricos...")
+        por_etiqueta = defaultdict(list)
+        for i, s in enumerate(subtemas):
+            por_etiqueta[s].append(i)
+        for s in [s for s in por_etiqueta if _es_etiqueta_generica(s)]:
+            idxs = por_etiqueta[s]
+            muestra_t = [titulos[i] for i in idxs[:MAX_GRUPO_ETIQUETA]]
+            muestra_r = [resumenes[i] for i in idxs[:3]]
+            nueva = self._fallback(muestra_t, muestra_r)
+            nueva = capitalizar_etiqueta(nueva) if nueva else "Varios"
+            for i in idxs:
+                subtemas[i] = nueva
 
         pbar.progress(0.97, "Fase 8 · Sin dedup ni sinónimos cruzados...")
         subtemas = [capitalizar_etiqueta(s) for s in subtemas]
@@ -2782,7 +3087,7 @@ class ClasificadorSubtema:
             res_grp = [resumenes[i] for i in idxs[:3]]
             nueva = _validar_etiqueta_completa(
                 sub, titulos_grp=tit_grp, resumenes_grp=res_grp,
-                marca=self.marca, aliases=self.aliases, fallback_fn=self._fallback
+                marca=self.marca, aliases=self.aliases, fallback_fn=lambda tl: self._fallback(tl, res_grp)
             )
             for i in idxs: resultado[i] = capitalizar_etiqueta(nueva)
         return resultado
