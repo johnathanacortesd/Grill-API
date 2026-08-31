@@ -909,6 +909,11 @@ _ETIQUETAS_GENERICAS_INVALIDAS = {
     "impacto en la reputacion", "impacto reputacional",
     "reputacion corporativa", "impacto corporativo",
 }
+# Rótulos que jamás deben quedar como subtema final (marcadores vacíos o genéricos).
+# Una sola palabra REAL extraída del texto Sí vale, nunca el placeholder 'Sin tema'.
+_PLACEHOLDER_SUBTEMA = _ETIQUETAS_GENERICAS_INVALIDAS | {
+    'n/a', 'nan', '-', 'noticia', 'informe',
+}
 
 
 def _es_etiqueta_generica(etiqueta) -> bool:
@@ -2877,20 +2882,69 @@ class ClasificadorSubtema:
             if n:
                 excluir = excluir | set(_normalizar_mencion(n).split())
         cnt = Counter()
+        origen = {}
         for t in titulos[:5]:
             for w in re.findall(r"[A-Za-zÁÉÍÓÚÑÜáéíóúñü]+", str(t)):
                 norm = _normaliza_token(w)
                 if len(norm) >= 4 and norm not in excluir and not _RE_VERBO_SUBTEMA.search(norm):
                     cnt[norm] += 1
+                    origen.setdefault(norm, w)
         if not cnt and resumenes:
             for r in resumenes[:3]:
                 for w in re.findall(r"[A-Za-zÁÉÍÓÚÑÜáéíóúñü]+", str(r)):
                     norm = _normaliza_token(w)
                     if len(norm) >= 4 and norm not in excluir and not _RE_VERBO_SUBTEMA.search(norm):
                         cnt[norm] += 1
+                        origen.setdefault(norm, w)
         if cnt:
-            return cnt.most_common(1)[0][0].capitalize()
-        return ""
+            top = [origen[n] for n, _ in cnt.most_common(2)]
+            return ' '.join(w.lower() for w in top)
+        return ''
+
+    def _derivar_ultimo_recurso(self, titulos, resumenes):
+        '''Última red absoluta: SIEMPRE una etiqueta con palabras reales del texto
+        (Título / Resumen-Aclaración). Nunca 'Sin tema' mientras exista texto.'''
+        fuentes = [str(t).strip() for t in (titulos or [])
+                   if str(t).strip() and str(t).strip().lower() != 'nan']
+        if not fuentes and resumenes:
+            fuentes = [str(r).strip() for r in (resumenes or []) if str(r).strip()]
+        for s in fuentes:
+            if len(s) < 4:
+                continue
+            s2 = s
+            for n in [self.marca] + [a for a in (self.aliases or []) if a]:
+                n = str(n).strip()
+                if n:
+                    s2 = re.sub(r'\b' + re.escape(n) + r'\b', ' ', s2, flags=re.IGNORECASE)
+            toks = [w for w in s2.split() if w]
+            i = 0
+            while i < len(toks):
+                tn = unidecode(toks[i].lower().rstrip('.,;:!?'))
+                if (tn[:1].isdigit()
+                        or tn in _ARTICULOS_SUBTEMA
+                        or tn in _CONECTORES_ETIQUETA
+                        or tn in _VERBOS_LEAD_SUBTEMA
+                        or tn in _CARGOS_SUBTEMA
+                        or tn in _TOKENS_DEBILES_SUBTEMA_FALLBACK
+                        or tn in {'nuevo', 'nueva', 'nuevos', 'nuevas', 'gran', 'grande',
+                                  'grandes', 'este', 'esta', 'estos', 'estas'}
+                        or _PATRON_TITULAR.match(toks[i])
+                        or _RE_VERBO_SUBTEMA.search(tn)):
+                    i += 1
+                else:
+                    break
+            resto = toks[i:]
+            if resto:
+                frase = _recortar_frase_completa(' '.join(resto), MAX_PALABRAS_SUBTEMA)
+                frase = _quitar_locativos_finales(frase)
+                if (_frase_esta_completa(frase)
+                        and not _es_nombre_o_fragmento_marca(frase, self.marca, self.aliases)):
+                    return capitalizar_etiqueta(frase)
+            # Título reducido a nada útil (solo marca) -> se usa el título mismo.
+            frase2 = _recortar_frase_completa(s, max_palabras=4)
+            if _frase_esta_completa(frase2):
+                return capitalizar_etiqueta(frase2)
+        return ''
 
     def _fallback(self, titulos, resumenes=None):
         """Última red: SIEMPRE deriva una etiqueta del texto real (Título / Resumen-Aclaración).
@@ -2913,11 +2967,14 @@ class ClasificadorSubtema:
         if et and not _es_etiqueta_generica(et):
             return et
 
-        # 4) Último recurso: palabra de contenido más frecuente (aún grounded).
+        # 4) Palabras de contenido más frecuentes (aún grounded, exige 2+ palabras reales).
         et = self._palabra_clave_mas_frecuente(titulos, resumenes)
         if et and not _es_etiqueta_generica(et):
             return et
-        return "Sin tema"
+
+        # 5) Última red absoluta: fragmento del propio título/resumen. Nunca 'Sin tema'
+        #    mientras exista algo de texto real.
+        return self._derivar_ultimo_recurso(titulos, resumenes)
 
     def _consolidar_sinonimos_llm(self, subtemas_unicos):
         if len(subtemas_unicos) <= 1:
@@ -3063,6 +3120,39 @@ class ClasificadorSubtema:
             muestra_r = [resumenes[i] for i in idxs[:3]]
             nueva = self._fallback(muestra_t, muestra_r)
             nueva = capitalizar_etiqueta(nueva) if nueva else "Varios"
+            for i in idxs:
+                subtemas[i] = nueva
+
+        pbar.progress(0.96, 'Fase 7c · Garantizando subtema para cada noticia...')
+        por_etq = defaultdict(list)
+        for i, s in enumerate(subtemas):
+            por_etq[s].append(i)
+        for s in [s for s in por_etq]:
+            n = ' '.join(unidecode(str(s).lower()).split()) if isinstance(s, str) else ''
+            if n not in _PLACEHOLDER_SUBTEMA:
+                continue
+            idxs = por_etq[s]
+            muestra_t = [titulos[i] for i in idxs[:MAX_GRUPO_ETIQUETA]]
+            muestra_r = [resumenes[i] for i in idxs[:3]]
+            et_n = self._fallback(muestra_t, muestra_r)
+            if et_n and et_n.strip().lower() not in ('sin tema', 'varios'):
+                nueva = capitalizar_etiqueta(et_n)
+            else:
+                txt_i = ''
+                for i in idxs:
+                    t_i = titulos[i]
+                    r_i = resumenes[i]
+                    tx_i = textos[i]
+                    if t_i is not None and str(t_i).strip() and str(t_i).strip().lower() != 'nan':
+                        txt_i = str(t_i).strip()
+                        break
+                    if r_i is not None and str(r_i).strip() and str(r_i).strip().lower() != 'nan':
+                        txt_i = str(r_i).strip()
+                        break
+                    if tx_i is not None and str(tx_i).strip() and str(tx_i).strip().lower() != 'nan':
+                        txt_i = str(tx_i).strip()
+                        break
+                nueva = capitalizar_etiqueta(_recortar_frase_completa(txt_i, max_palabras=4)) if txt_i else 'Sin tema'
             for i in idxs:
                 subtemas[i] = nueva
 
@@ -4515,3 +4605,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
