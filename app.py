@@ -361,6 +361,26 @@ _NUCLEOS_HECHO_EVENTO = [
     (r"\b(operac[íi]on de la marca)\w*", "Uso"),
 ]
 
+# Cabezas de etiqueta que describen un EVENTO REAL de la marca/cliente (una acción
+# concreta) y se aceptan del resumen. Las keywords de ámbito/sector ('minería',
+# 'inversión', 'infraestructura' sueltas) NO están aquí: no son hechos del cliente.
+_HEADS_EVENTO_MARCA = {
+    "atencion", "cirugia", "traslado", "rehabilitacion", "tratamiento", "diagnostico",
+    "hospitalizacion", "rescate", "urgencia", "paciente", "victima",
+    "convenio", "alianza", "acuerdo", "pacto", "cooperacion", "colaboracion",
+    "lanzamiento", "apertura", "inauguracion", "estreno", "presentacion",
+    "premio", "reconocimiento", "galardon", "distincion", "condecoracion", "homenaje",
+    "investigacion", "denuncia", "demanda", "sancion", "multa", "condena", "querella",
+    "nombramiento", "designacion", "posesion", "renuncia", "dimision",
+    "foro", "congreso", "cumbre", "feria", "seminario", "taller", "encuentro",
+    "conversatorio", "jornada", "evento", "festival", "concierto", "campaña",
+    "donacion", "solidaridad", "ayuda", "apoyo", "voluntariado", "marcha", "protesta",
+    "subasta", "licitacion", "adjudicacion", "convocatoria", "licitación",
+    "estudio", "informe", "encuesta", "balance", "resultados", "publicacion",
+    "construccion", "obras", "restauracion", "remodelacion", "reforma", "ampliacion",
+    "contratacion", "capacitacion", "formacion", "empleo", "graduacion", "beca",
+}
+
 # Adjetivos de contexto que acompañan a un hecho (alta complejidad, cirugía compleja)
 # y se pegan al sustantivo, no tras 'de'.
 _ADJ_POSIBLE = {}
@@ -1578,10 +1598,11 @@ def _validar_estructura_subtema(etiqueta: str) -> bool:
     if len(etiqueta.split()) > MAX_PALABRAS_SUBTEMA: return False
     if _PATRON_TITULAR.match(etiqueta): return False
     if _PATRON_ESTADO.search(etiqueta): return False
-    # Un subtema es una FRASE NOMINAL, no un titular copiado. Los marcadores de
-    # encabezado periodístico (dos puntos, guiones largos, barra, punto y coma,
-    # envoltura entre comillas) delatan un titular literal -> se rechazan.
-    if re.search(r'[:：—–|;»\u201d\uff1a]', etiqueta):
+    # Un subtema es una FRASE NOMINAL, no un titular copiado ni una lista de
+    # keywords. Los marcadores de encabezado periodístico (dos puntos, guiones
+    # largos, barra, punto y coma, comas, envoltura entre comillas) delatan un
+    # titular literal o una unión de palabras sueltas -> se rechazan.
+    if re.search(r'[:：—–,|;»\u201d\uff1a]', etiqueta):
         return False
     palabras = etiqueta.split()
     if len(palabras) == 2:
@@ -3419,6 +3440,26 @@ class ClasificadorSubtema:
             pass
         return ""
 
+    def _es_hecho_de_marca_de_evento(self, etiqueta):
+        """¿La etiqueta derivada describe un EVENTO real de la marca/cliente (una
+        acción concreta: atención médica, cirugía, alianza, foro, premiación) o es
+        solo una keyword del resumen (nombre de sector, tema)?
+
+        Evita el caso real "Inversión de minería": 'inversión' + 'minería' sueltos
+        no son un hecho de la marca; sale de keywords del resumen. Un hecho real
+        debe tener un núcleo de evento.
+        """
+        cabeza = None
+        for w in (etiqueta or "").split():
+            wn = _normaliza_token(w)
+            if len(wn) >= 4 and wn not in _CONECTORES_ETIQUETA:
+                cabeza = wn
+                break
+        if not cabeza:
+            return False
+        return _stem_es(cabeza) in _HEADS_EVENTO_MARCA or any(
+            _stem_es(cabeza) == _stem_es(h) for h in _HEADS_EVENTO_MARCA)
+
     def _derivar_desde_texto_nominal(self, textos, fuentes, es_resumen=False):
         """Deriva la frase nominal DESDE la oración donde vive el hecho (prioridad:
         el resumen, que es donde suele aparecer la mención del cliente).
@@ -3880,16 +3921,17 @@ class ClasificadorSubtema:
         et = self._extraer_desde_texto(titulos, resumenes)
         if _sirve(et):
             return et
-        # 1b) La oración del RESUMEN es la fuente del hecho del cliente: derivar
-        #     de ella directamente da subtemas como 'Atención de urgencia' en lugar
-        #     de recortar el titular.
-        et = self._derivar_desde_texto_nominal(resumenes or titulos, fuentes, es_resumen=True)
-        if _sirve(et):
-            return et
-
-        # 2) Frase nominal derivada del título más representativo (100% grounded).
+        # 2) Frase nominal derivada del TÍTULO (100% grounded). El título es la
+        #    fuente prioritaria: da el hecho central sin keywords sueltas de sectores
+        #    que aparecen solo en el resumen (caso real: "Infraestructura, inversión,
+        #    minería..." del resumen -> el título daba "Nuevas rutas para crecer").
         et = self._derivar_desde_titulos(titulos)
         if _sirve(et):
+            return et
+        # 2b) Hecho de la marca en el RESUMEN cuando describe un EVENTO de la marca
+        #     (atención médica, cirugía, foro, alianza) y el título es genérico.
+        et = self._derivar_desde_texto_nominal(resumenes, fuentes, es_resumen=True)
+        if _sirve(et) and self._es_hecho_de_marca_de_evento(et):
             return et
 
         # 3) Acción detectada + palabras clave del texto (100% grounded).
@@ -3897,7 +3939,7 @@ class ClasificadorSubtema:
         if _sirve(et):
             return et
 
-        # 4) Palabras de contenido más frecuentes (aún grounded, exige 2+ palabras reales).
+        # 4) Palabras de contenido más frecuentes del TÍTULO (aún grounded).
         et = self._palabra_clave_mas_frecuente(titulos, resumenes)
         if _sirve(et):
             return et
