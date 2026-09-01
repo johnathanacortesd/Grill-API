@@ -298,7 +298,7 @@ def _contiene_numero_o_acronimo(etiqueta):
     return False
 
 
-def _subtema_grounded(etiqueta, fuentes):
+def _subtema_grounded(etiqueta, fuentes, estricto=False):
     """True si TODA palabra de contenido (≥4 letras, no conector) del subtema aparece
     (o deriva de forma evidente por _stem_es) en el TEXTO FUENTE. Evita 'inventos'."""
     if not etiqueta or not fuentes:
@@ -327,9 +327,10 @@ def _subtema_grounded(etiqueta, fuentes):
                for fs in fuente_stems):
             continue
         no_coinciden += 1
-    # Antes rechazaba con 1 sola palabra no anclada, lo que tiraba a fallback etiquetas
-    # legítimas (el tema no siempre aparece literal en un contexto corto). Ahora solo rechaza
-    # si MÁS DE LA MITAD de las palabras de contenido no tiene anclaje (label casi entera inventada).
+    # Rechaza si alguna palabra de contenido no está anclada. `estricto=False`
+    # permite hasta la mitad (etiquetas LLM con un sinónimo); el anclaje por ítem usa estricto.
+    if estricto:
+        return no_coinciden == 0
     return no_coinciden * 2 <= len(contenido)
 
 
@@ -914,13 +915,15 @@ _ACCIONES_OPUESTAS = [
     ({"demanda", "denuncia", "investigacion", "sancion", "multa"}, {"absolucion", "archivo", "exoneracion", "acuerdo"}),
 ]
 
-_TOKENS_DEBILES_AGRUPACION = STOPWORDS_ES | {
+_TOKENS_DEBILES_AGRUPACION = STOPWORDS_ES | _CARGOS_SUBTEMA | {
     "noticia", "noticias", "informe", "informacion", "comunicado", "anuncio",
     "colombia", "pais", "nacional", "regional", "local", "sector", "sectores",
     "empresa", "empresas", "entidad", "entidades", "autoridad", "autoridades",
     "gobierno", "alcaldia", "gobernacion", "ministerio", "nuevo", "nueva",
     "nuevos", "nuevas", "plan", "programa", "proyecto", "iniciativa",
     "actividad", "actividades", "gestion", "tema", "caso", "casos",
+    "dirigente", "exgerente", "exdirector", "exdirectora", "funcionario",
+    "funcionarios", "directivo", "directivos", "panelista", "invitado",
 }
 
 def _tokens_distintivos(texto: str, min_len: int = 4) -> set:
@@ -954,6 +957,69 @@ def _overlap_distintivo_historia(a: str, b: str, marca="", aliases=None) -> floa
         return 0.0
     return len(ta & tb) / max(1, min(len(ta), len(tb)))
 
+
+def _historias_son_el_mismo_hecho(texto_a, texto_b, marca="", aliases=None, min_overlap=0.40) -> bool:
+    """True solo si ambos textos describen el mismo hecho / la misma corriente informativa.
+
+    Compartir un cargo ('presidente'), una persona en roles distintos o una entidad
+    que solo uno de los textos desarrolla NO basta para agrupar.
+    """
+    a = str(texto_a or "").strip()
+    b = str(texto_b or "").strip()
+    if not a or not b:
+        return False
+    if _hay_conflicto_accion(a, b):
+        return False
+    na = normalize_title_for_comparison(a)
+    nb = normalize_title_for_comparison(b)
+    if na and nb and SequenceMatcher(None, na, nb).ratio() >= 0.96:
+        return True
+    oa = _tokens_distintivos_historia(a, marca, aliases)
+    ob = _tokens_distintivos_historia(b, marca, aliases)
+    if not oa or not ob:
+        return False
+    inter = oa & ob
+    if len(inter) < 2:
+        return False
+    ratio = len(inter) / max(1, min(len(oa), len(ob)))
+    if ratio < min_overlap:
+        return False
+    excl_a, excl_b = oa - ob, ob - oa
+    if len(excl_a) >= 2 and len(excl_b) >= 2 and ratio < 0.60:
+        return False
+    return True
+
+
+def _grupo_mismo_hecho(textos, idxs, marca="", aliases=None) -> bool:
+    """True si todos los índices describen el mismo hecho (no basta compartir lote o entidad)."""
+    if not idxs:
+        return False
+    base = textos[idxs[0]]
+    return all(
+        _historias_son_el_mismo_hecho(base, textos[i], marca, aliases)
+        for i in idxs[1:]
+    )
+
+
+def _etiqueta_pertenece_al_texto(etiqueta, texto) -> bool:
+    """El tema/subtema debe ser un concepto anclado en EL texto de ese ítem, no del lote."""
+    if not etiqueta or _es_etiqueta_generica(etiqueta):
+        return False
+    if not str(texto or "").strip():
+        return False
+    return _subtema_grounded(etiqueta, [texto], estricto=True)
+
+
+def _sanear_etiquetas_por_item(etiquetas, textos, marca="", aliases=None, es_subtema=True):
+    """Regenera cualquier etiqueta que no esté anclada en el texto de análisis de esa fila."""
+    out = []
+    for et, tx in zip(etiquetas, textos):
+        if _etiqueta_pertenece_al_texto(et, tx):
+            out.append(capitalizar_etiqueta(_sin_comas_etiqueta(str(et))))
+        else:
+            out.append(_asegurar_etiqueta_especifica("", tx, marca, aliases, es_subtema=es_subtema))
+    return out
+
 def _hay_conflicto_accion(a: str, b: str) -> bool:
     ta, tb = _tokens_distintivos(a, min_len=3), _tokens_distintivos(b, min_len=3)
     for grupo_a, grupo_b in _ACCIONES_OPUESTAS:
@@ -983,13 +1049,11 @@ def _grupos_contenido_compatibles(
     texto_b = " ".join(muestra_b)[:2500]
     if _hay_conflicto_accion(f"{etiqueta_a} {texto_a}", f"{etiqueta_b} {texto_b}"):
         return False
-    overlap = _overlap_distintivo(f"{etiqueta_a} {texto_a}", f"{etiqueta_b} {texto_b}")
-    labels_muy_cercanas = _etiquetas_compatibles(etiqueta_a, etiqueta_b, min_overlap=0.55)
-    if overlap < min_overlap and not labels_muy_cercanas:
+    if not _historias_son_el_mismo_hecho(texto_a, texto_b, min_overlap=max(min_overlap, 0.40)):
         return False
     embs = get_embeddings_batch([texto_a, texto_b])
     if len(embs) < 2 or embs[0] is None or embs[1] is None:
-        return labels_muy_cercanas and overlap >= min_overlap
+        return True
     sim = cosine_similarity(
         np.array(embs[0]).reshape(1, -1),
         np.array(embs[1]).reshape(1, -1)
@@ -1084,6 +1148,7 @@ _ACCIONES_SUBTEMA = [
     (r"\b(designa|designo|nombra|nombro|asume|asumio|posesion|nombramiento)\b", "Designación"),
     (r"\b(inversion|invierte|invirtio)\b", "Inversión"),
     (r"\b(campana|campaña)\b", "Campaña"),
+    (r"\b(encuentro)\b", "Encuentro"),
     (r"\b(foro|congreso|cumbre|seminario|taller)\b", "Foro"),
     (r"\b(proyecto|programa|plan)\b", "Proyecto"),
     (r"\b(construccion|infraestructura|obra)\b", "Construcción"),
@@ -2051,10 +2116,11 @@ def construir_grupos_consistentes(titulos, resumenes, marca="", aliases=None):
                 np.array(embs[i]).reshape(1, -1), np.array(embs[j]).reshape(1, -1)
             )[0][0]
         if title_sim >= SIMILARITY_THRESHOLD_TITULOS or (semantic >= SIMILARITY_THRESHOLD_TONO and overlap >= 0.45):
-            dsu.union(i, j)
+            if _historias_son_el_mismo_hecho(textos[i], textos[j], marca, aliases):
+                dsu.union(i, j)
     return dsu.grupos(n)
 
-def construir_grafo_equivalencia(titulos, resumenes, contextos=None):
+def construir_grafo_equivalencia(titulos, resumenes, contextos=None, marca="", aliases=None):
     # Grafo UNICO de 'noticias equivalentes' (misma historia), con criterios ESTRICTOS.
     # Reutilizado por tono, tema y subtema para que no se contradigan entre si.
     n = len(titulos)
@@ -2062,6 +2128,14 @@ def construir_grafo_equivalencia(titulos, resumenes, contextos=None):
     tn = [norm_key(str(t or "")) for t in titulos]
     rn = [norm_key(str(r or "")) for r in resumenes] if resumenes is not None else None
     cn = [norm_key(str(c or "")) for c in contextos] if contextos is not None else None
+
+    def _analisis(i):
+        if contextos is not None and str(contextos[i] or "").strip():
+            return str(contextos[i])
+        if resumenes is not None and str(resumenes[i] or "").strip():
+            return str(resumenes[i])
+        return str(titulos[i] or "")
+
     for i in range(n):
         if not tn[i]:
             continue
@@ -2070,15 +2144,27 @@ def construir_grafo_equivalencia(titulos, resumenes, contextos=None):
             tj = tn[j]
             if not tj or dsu.find(i) == dsu.find(j):
                 continue
-            igual = (ti == tj)
-            if not igual and len(ti) >= 10 and len(tj) >= 10:
-                igual = (ti in tj or tj in ti)                     # mismo titular con/sin subtitulo
-            if not igual and SequenceMatcher(None, ti, tj).ratio() >= 0.88:
+            igual = False
+            if ti == tj:
+                # Título idéntico no agrupa hechos distintos (p.ej. dos notas
+                # "Presidente de Fenavi" con contextos de avicultura vs FLA).
+                if cn and cn[i] and cn[j] and cn[i] != cn[j]:
+                    igual = _historias_son_el_mismo_hecho(
+                        _analisis(i), _analisis(j), marca, aliases
+                    )
+                else:
+                    igual = True
+            elif cn and cn[i] and cn[i] == cn[j]:
                 igual = True
-            if not igual and rn and rn[i] and rn[j] and SequenceMatcher(None, ti, tj).ratio() >= 0.80 and SequenceMatcher(None, rn[i], rn[j]).ratio() >= 0.70:
-                igual = True                                       # titulo parecido Y cuerpo parecido
-            if not igual and cn and cn[i] and cn[i] == cn[j]:
-                igual = True                                       # mismo Contexto analizado
+            if not igual:
+                title_sim = SequenceMatcher(None, ti, tj).ratio() if len(ti) >= 10 and len(tj) >= 10 else 0.0
+                mismo_titular = title_sim >= 0.92 or (
+                    len(ti) >= 20 and len(tj) >= 20 and (ti in tj or tj in ti)
+                )
+                if mismo_titular or title_sim >= 0.80:
+                    igual = _historias_son_el_mismo_hecho(
+                        _analisis(i), _analisis(j), marca, aliases
+                    )
             if igual:
                 dsu.union(i, j)
     return dsu
@@ -2110,13 +2196,16 @@ def aplicar_consistencia_grupos(df, titulo_col, resumen_col,
     contextos = ([str(x) for x in df['Contexto analizado'].fillna('')]
                  if 'Contexto analizado' in df.columns else None)
 
-    dsu = construir_grafo_equivalencia(titulos, resumenes, contextos)
+    dsu = construir_grafo_equivalencia(titulos, resumenes, contextos, marca, aliases)
     por_grupo = defaultdict(list)
     for i in range(n):
         g = str(df.iloc[i].get('Grupo noticia') or "").strip()
         if g and g.lower() not in ("", "nan", "none"):
             por_grupo[g].append(i)
-    # Solo une miembros del grupo semántico si comparten el hecho (tokens no-marca o título casi igual).
+    def _analisis_fila(i):
+        if contextos and str(contextos[i] or "").strip():
+            return str(contextos[i])
+        return f"{titulos[i]} {resumenes[i]}"
     for idxs in por_grupo.values():
         if len(idxs) < 2:
             continue
@@ -2125,17 +2214,7 @@ def aplicar_consistencia_grupos(df, titulo_col, resumen_col,
                 i, j = idxs[a], idxs[b]
                 if dsu.find(i) == dsu.find(j):
                     continue
-                ta = f"{titulos[i]} {resumenes[i]} {(contextos[i] if contextos else '')}"
-                tb = f"{titulos[j]} {resumenes[j]} {(contextos[j] if contextos else '')}"
-                if _hay_conflicto_accion(ta, tb):
-                    continue
-                title_sim = SequenceMatcher(
-                    None,
-                    normalize_title_for_comparison(titulos[i]),
-                    normalize_title_for_comparison(titulos[j]),
-                ).ratio()
-                overlap = _overlap_distintivo_historia(ta, tb, marca, aliases)
-                if title_sim >= 0.88 or overlap >= 0.35:
+                if _historias_son_el_mismo_hecho(_analisis_fila(i), _analisis_fila(j), marca, aliases):
                     dsu.union(i, j)
 
     grupos_eq = defaultdict(list)
@@ -2165,7 +2244,8 @@ def aplicar_consistencia_grupos(df, titulo_col, resumen_col,
                 canon = _canon_mas_frecuente(idxs, col)
                 if canon:
                     for i in idxs:
-                        df.at[df.index[i], col] = capitalizar_etiqueta(canon)
+                        if _etiqueta_pertenece_al_texto(canon, _analisis_fila(i)):
+                            df.at[df.index[i], col] = capitalizar_etiqueta(canon)
         # Tono: Positivo/Negativo 'gana' sobre Neutro; conflicto Pos+Neg no se toca.
         if tono_col in df.columns:
             tvals = [str(df.iloc[i][tono_col]).strip().title() for i in idxs]
@@ -2177,6 +2257,16 @@ def aplicar_consistencia_grupos(df, titulo_col, resumen_col,
                     cur = str(df.iloc[i][tono_col]).strip().title()
                     if cur in ("Neutro", "N/A", "", "Nan"):
                         df.at[df.index[i], tono_col] = canon_tono
+
+    textos_anclaje = [_analisis_fila(i) for i in range(n)]
+    if subtema_col in df.columns:
+        df[subtema_col] = _sanear_etiquetas_por_item(
+            [str(x) for x in df[subtema_col].tolist()], textos_anclaje, marca, aliases, es_subtema=True
+        )
+    if tema_col in df.columns:
+        df[tema_col] = _sanear_etiquetas_por_item(
+            [str(x) for x in df[tema_col].tolist()], textos_anclaje, marca, aliases, es_subtema=False
+        )
     return df
 
 
@@ -2382,19 +2472,21 @@ class ClasificadorTono:
             for i in idxs: final[i] = r
 
         tonos = [f["tono"] if f else "Neutro" for f in final]
-        tonos = _propagar_tono_equivalentes(tonos, titulos.tolist(), resumenes.tolist(), contextos)
+        tonos = _propagar_tono_equivalentes(
+            tonos, titulos.tolist(), resumenes.tolist(), contextos, self.marca, self.aliases
+        )
         final = [{"tono": t} for t in tonos]
             
         pbar.progress(1.0, "Análisis de Tono completado")
         return final
 
-def _propagar_tono_equivalentes(tonos, titulos, resumenes, contextos=None):
+def _propagar_tono_equivalentes(tonos, titulos, resumenes, contextos=None, marca="", aliases=None):
     # Noticias equivalentes (mismo grafo de equivalencia que tema/subtema):
     # si una es Positivo/Negativo y otra Neutro, se alinean. No propaga conflictos Pos+Neg.
     n = len(tonos)
     if n < 2:
         return list(tonos)
-    dsu = construir_grafo_equivalencia(titulos, resumenes, contextos)
+    dsu = construir_grafo_equivalencia(titulos, resumenes, contextos, marca, aliases)
     out = list(tonos)
     for idxs in dsu.grupos(n).values():
         if len(idxs) < 2:
@@ -2475,12 +2567,14 @@ def analizar_tono_con_pkl(textos, pkl_file, titulos=None, resumenes=None, marca=
                     result[i] = {"tono": _norm_pred(p)}
             contextos_tono = [snippets[i] if flags[i] else "" for i in range(n)]
             tonos = _propagar_tono_equivalentes(
-                [r["tono"] for r in result], list(titulos), list(resumenes), contextos_tono
+                [r["tono"] for r in result], list(titulos), list(resumenes), contextos_tono, marca, aliases
             )
             return [{"tono": t} for t in tonos]
         preds = [{"tono": _norm_pred(p)} for p in _predict_pkl_in_batches(pipeline, textos, progress)]
         if titulos is not None and resumenes is not None:
-            tonos = _propagar_tono_equivalentes([r["tono"] for r in preds], list(titulos), list(resumenes))
+            tonos = _propagar_tono_equivalentes(
+                [r["tono"] for r in preds], list(titulos), list(resumenes), None, marca, aliases
+            )
             return [{"tono": t} for t in tonos]
         return preds
     except Exception as e:
@@ -2506,16 +2600,29 @@ def etiquetar_sin_llm(titulos, resumenes, marca, aliases=None, cuerpos=None):
         txt, hay = _texto_clasificacion(titulos[i], resumenes[i], marca, aliases, cuerpo)
         textos.append(txt)
         contextos.append(txt if hay else "")
-    dsu = construir_grafo_equivalencia(titulos, resumenes, contextos)
-    subtemas = [""] * n
-    temas = [""] * n
+    dsu = construir_grafo_equivalencia(titulos, resumenes, contextos, marca, aliases)
+    subtemas = [_extraer_subtema_especifico(textos[i], marca, aliases) for i in range(n)]
+    temas = [_extraer_tema_especifico(subtemas[i], textos[i], marca, aliases) for i in range(n)]
     for idxs in dsu.grupos(n).values():
-        blob = " ".join(textos[i] for i in idxs[:4] if textos[i])
-        sub = _extraer_subtema_especifico(blob, marca, aliases)
-        tema = _extraer_tema_especifico(sub, blob, marca, aliases)
-        for i in idxs:
-            subtemas[i] = sub
-            temas[i] = tema
+        if len(idxs) < 2:
+            continue
+        miembros = [i for i in idxs if textos[i]]
+        if len(miembros) < 2:
+            continue
+        # Solo unifica si TODOS los miembros son el mismo hecho y la etiqueta canónica
+        # está anclada en el texto de cada uno. Si no, cada fila conserva la suya.
+        base = miembros[0]
+        if not all(_historias_son_el_mismo_hecho(textos[base], textos[i], marca, aliases) for i in miembros[1:]):
+            continue
+        sub_canon = Counter(subtemas[i] for i in miembros).most_common(1)[0][0]
+        tema_canon = Counter(temas[i] for i in miembros).most_common(1)[0][0]
+        for i in miembros:
+            if _etiqueta_pertenece_al_texto(sub_canon, textos[i]):
+                subtemas[i] = sub_canon
+            if _etiqueta_pertenece_al_texto(tema_canon, textos[i]):
+                temas[i] = tema_canon
+    subtemas = _sanear_etiquetas_por_item(subtemas, textos, marca, aliases, es_subtema=True)
+    temas = _sanear_etiquetas_por_item(temas, textos, marca, aliases, es_subtema=False)
     return temas, subtemas
 
 
@@ -2543,7 +2650,7 @@ class ClasificadorSubtema:
         self._cache = {}
         self._umbrales: dict = {}
 
-    def _paso1(self, titulos, resumenes, dsu):
+    def _paso1(self, titulos, resumenes, dsu, textos=None):
         def nt(t, n):
             return ' '.join(re.sub(r'[^a-z0-9\s]', '', unidecode(str(t).lower())).split()[:n])
         bt, br = defaultdict(list), defaultdict(list)
@@ -2554,9 +2661,14 @@ class ClasificadorSubtema:
             if len(b.split()) >= 25: br[hashlib.md5(b.encode()).hexdigest()].append(i)
         for bk in (bt, br):
             for idxs in bk.values():
-                for j in idxs[1:]: dsu.union(idxs[0], j)
+                for j in idxs[1:]:
+                    if textos is not None and not _historias_son_el_mismo_hecho(
+                        textos[idxs[0]], textos[j], self.marca, self.aliases
+                    ):
+                        continue
+                    dsu.union(idxs[0], j)
 
-    def _paso2(self, titulos, dsu):
+    def _paso2(self, titulos, dsu, textos=None):
         norm = [normalize_title_for_comparison(t) for t in titulos]
         n = len(norm)
         for i in range(n):
@@ -2566,9 +2678,13 @@ class ClasificadorSubtema:
                 ratio = SequenceMatcher(None, norm[i], norm[j]).ratio()
                 comparte_asunto = _overlap_distintivo(norm[i], norm[j]) >= 0.40
                 if ratio >= SIMILARITY_THRESHOLD_TITULOS and comparte_asunto and not _hay_conflicto_accion(norm[i], norm[j]):
+                    if textos is not None and not _historias_son_el_mismo_hecho(
+                        textos[i], textos[j], self.marca, self.aliases
+                    ):
+                        continue
                     dsu.union(i, j)
 
-    def _paso2b_keywords(self, titulos, dsu, ae):
+    def _paso2b_keywords(self, titulos, dsu, ae, textos=None):
         sim_min = self._umbrales.get('sim_minima_keywords', SIM_MINIMA_KEYWORDS_RARAS)
         stop = {
             'el','la','los','las','un','una','unos','unas','de','del','al',
@@ -2610,7 +2726,10 @@ class ClasificadorSubtema:
                         np.array(eb).reshape(1, -1)
                     )[0][0]
                     if sim >= sim_min and not _hay_conflicto_accion(str(titulos[ia]), str(titulos[ib])):
-                        dsu.union(ia, ib)
+                        ta = textos[ia] if textos is not None else titulos[ia]
+                        tb = textos[ib] if textos is not None else titulos[ib]
+                        if _historias_son_el_mismo_hecho(ta, tb, self.marca, self.aliases):
+                            dsu.union(ia, ib)
 
     def _paso3(self, et, ae, dsu, pbar, ps):
         umbral_cluster = max(self._umbrales.get('subtema', UMBRAL_SUBTEMA), 0.82)
@@ -2621,19 +2740,7 @@ class ClasificadorSubtema:
         def _puede_unir(i, j):
             if _hay_conflicto_accion(et[i], et[j]):
                 return False
-            oa = _tokens_distintivos_historia(et[i], self.marca, self.aliases)
-            ob = _tokens_distintivos_historia(et[j], self.marca, self.aliases)
-            title_sim = SequenceMatcher(
-                None,
-                normalize_title_for_comparison(et[i]),
-                normalize_title_for_comparison(et[j])
-            ).ratio()
-            if title_sim >= 0.96:
-                return True
-            if not oa or not ob:
-                return False
-            ratio = len(oa & ob) / max(1, min(len(oa), len(ob)))
-            return ratio >= 0.45
+            return _historias_son_el_mismo_hecho(et[i], et[j], self.marca, self.aliases)
 
         B = 500
         if n <= B:
@@ -2738,7 +2845,7 @@ class ClasificadorSubtema:
                         "",
                         "",
                         min_sim=umbral_efectivo,
-                        min_overlap=0.16,
+                        min_overlap=0.40,
                     ):
                         dsu.union(ri, rj)
                         fus += 1
@@ -2749,7 +2856,12 @@ class ClasificadorSubtema:
         tn = sorted(set(normalize_title_for_comparison(t) for t in titulos_grp if t))
         existentes_key = "|".join(sorted(string_norm_label(s) for s in (subtemas_existentes or []))[:20])
         evitar_key = string_norm_label(evitar_etiqueta) if evitar_etiqueta else ""
-        ck = hashlib.md5(("|".join(tn[:12]) + f"#{len(titulos_grp)}#{existentes_key}#{evitar_key}").encode()).hexdigest()
+        blob_key = hashlib.md5(
+            (" ".join(str(t)[:400] for t in (textos_grp or [])[:4])).encode()
+        ).hexdigest()[:12]
+        ck = hashlib.md5(
+            ("|".join(tn[:12]) + f"#{len(titulos_grp)}#{existentes_key}#{evitar_key}#{blob_key}").encode()
+        ).hexdigest()
         if ck in self._cache: return self._cache[ck]
 
         tm = list(dict.fromkeys(str(t)[:160] for t in titulos_grp if pd.notna(t) and str(t).strip() and str(t).strip().lower() != 'nan'))[:6]
@@ -2762,12 +2874,21 @@ class ClasificadorSubtema:
         self._last_blob = " ".join(fuentes_grounding[:8])
 
         lista_existentes = ""
-        if subtemas_existentes and len(subtemas_existentes) > 0:
+        existentes_anclados = [
+            s for s in (subtemas_existentes or [])
+            if s and textos_grp and all(
+                _etiqueta_pertenece_al_texto(s, t) for t in textos_grp if str(t).strip()
+            )
+        ]
+        if existentes_anclados:
             lista_existentes = (
-                "\n\nSUBTEMAS YA CREADOS (REUTILÍZALOS SOLO SI ES EXACTAMENTE EL MISMO HECHO):\n"
-                + ", ".join(f"'{s}'" for s in subtemas_existentes[:15])
+                "\n\nSUBTEMAS YA CREADOS (REUTILÍZALOS SOLO SI ES EXACTAMENTE EL MISMO HECHO "
+                "Y EL TEXTO DE ESTE GRUPO CONTIENE ESE CONCEPTO):\n"
+                + ", ".join(f"'{s}'" for s in existentes_anclados[:15])
                 + "\nSi este grupo de noticias trata EXACTAMENTE el mismo hecho que uno de los subtemas ya creados, "
-                "responde con ese subtema palabra por palabra. Si es otro hecho, crea uno nuevo."
+                "responde con ese subtema palabra por palabra. Si es otro hecho, crea uno nuevo. "
+                "NUNCA copies un subtema de otra noticia del lote solo porque comparte una persona, "
+                "un cargo o una entidad que este texto no desarrolla."
             )
         if evitar_etiqueta:
             lista_existentes += f"\nNO uses '{evitar_etiqueta}': es un hecho distinto, genera un subtema nuevo y específico."
@@ -2923,7 +3044,16 @@ class ClasificadorSubtema:
         except:
             et = self._fallback(titulos_grp)
 
-        et = _asegurar_etiqueta_especifica(et, getattr(self, "_last_blob", "") or " ".join(str(t) for t in titulos_grp[:4]), self.marca, self.aliases)
+        et = _asegurar_etiqueta_especifica(
+            et,
+            getattr(self, "_last_blob", "") or " ".join(str(t) for t in titulos_grp[:4]),
+            self.marca,
+            self.aliases,
+        )
+        anclados = [t for t in (textos_grp or []) if str(t).strip()]
+        if anclados and not all(_etiqueta_pertenece_al_texto(et, t) for t in anclados):
+            if len(anclados) == 1:
+                et = _extraer_subtema_especifico(anclados[0], self.marca, self.aliases)
         self._cache[ck] = et
         return et
 
@@ -3025,17 +3155,17 @@ class ClasificadorSubtema:
 
         pbar.progress(0.05, "Fase 1 · Idénticas...")
         dsu = DSU(n)
-        self._paso1(titulos, resumenes, dsu)
+        self._paso1(titulos, resumenes, dsu, et)
         
         pbar.progress(0.12, "Fase 2 · Títulos...")
-        self._paso2(titulos, dsu)
+        self._paso2(titulos, dsu, et)
 
         pbar.progress(0.18, "Embeddings...")
         ae = get_embeddings_batch(et)
 
         if u['usar_paso2b']:
             pbar.progress(0.15, "Fase 2b · Keywords raras (con validación semántica)...")
-            self._paso2b_keywords(titulos, dsu, ae)
+            self._paso2b_keywords(titulos, dsu, ae, et)
 
         pbar.progress(0.20, "Fase 3 · Clustering...")
         self._paso3(et, ae, dsu, pbar, 0.20)
@@ -3048,45 +3178,76 @@ class ClasificadorSubtema:
         subtemas_aprobados = []
         textos_por_subtema_aprobado = defaultdict(list)
 
+        def _existentes_anclados(textos_grp):
+            return [
+                s for s in subtemas_aprobados
+                if s and textos_grp and all(
+                    _etiqueta_pertenece_al_texto(s, t) for t in textos_grp if str(t).strip()
+                )
+            ]
+
+        def _etiqueta_de_item(i):
+            et_i = self._generar_etiqueta(
+                [textos[i]], [titulos[i]], [resumenes[i]],
+                subtemas_existentes=_existentes_anclados([textos[i]]),
+            )
+            if not _etiqueta_pertenece_al_texto(et_i, textos[i]):
+                et_i = _extraer_subtema_especifico(textos[i], self.marca, self.aliases)
+            return et_i
+
+        def _registrar(etiqueta, textos_grp):
+            if etiqueta and etiqueta not in subtemas_aprobados:
+                subtemas_aprobados.append(etiqueta)
+            if etiqueta:
+                textos_por_subtema_aprobado[etiqueta].extend(textos_grp)
+
         def _generar_etiqueta_segura(idxs):
-            # Cada miembro del grupo DSU comparte la etiqueta; reutiliza los subtemas ya
-            # aprobados para que noticias equivalentes compartan EXACTAMENTE el mismo subtema.
+            """Una etiqueta de grupo solo si es el mismo hecho y está anclada en CADA ítem."""
             sample = idxs[:MAX_GRUPO_ETIQUETA]
             textos_grp = [textos[i] for i in sample]
             titulos_grp = [titulos[i] for i in sample]
             resumenes_grp = [resumenes[i] for i in sample]
-            etiqueta = self._generar_etiqueta(
-                textos_grp, titulos_grp, resumenes_grp,
-                subtemas_existentes=subtemas_aprobados
-            )
-            if etiqueta in textos_por_subtema_aprobado:
-                previos = textos_por_subtema_aprobado.get(etiqueta, [])
-                if not _grupos_contenido_compatibles(
-                    textos_grp, previos, etiqueta, etiqueta,
-                    min_sim=max(u['sim_minima_agrupacion'], 0.88), min_overlap=0.24,
-                ):
-                    rechazada = etiqueta
-                    etiqueta = self._generar_etiqueta(
-                        textos_grp, titulos_grp, resumenes_grp,
-                        subtemas_existentes=subtemas_aprobados,
-                        evitar_etiqueta=rechazada
-                    )
-                    if etiqueta in textos_por_subtema_aprobado:
-                        previos2 = textos_por_subtema_aprobado.get(etiqueta, [])
-                        if not _grupos_contenido_compatibles(
-                            textos_grp, previos2, etiqueta, etiqueta,
-                            min_sim=max(u['sim_minima_agrupacion'], 0.88), min_overlap=0.24,
-                        ):
-                            etiqueta = capitalizar_etiqueta(self._fallback(titulos_grp))
-            if etiqueta not in subtemas_aprobados:
-                subtemas_aprobados.append(etiqueta)
-            textos_por_subtema_aprobado[etiqueta].extend(textos_grp)
-            return etiqueta
+            asignadas = {}
+            if _grupo_mismo_hecho(textos, idxs, self.marca, self.aliases):
+                etiqueta = self._generar_etiqueta(
+                    textos_grp, titulos_grp, resumenes_grp,
+                    subtemas_existentes=_existentes_anclados(textos_grp),
+                )
+                if etiqueta in textos_por_subtema_aprobado:
+                    previos = textos_por_subtema_aprobado.get(etiqueta, [])
+                    if not _grupos_contenido_compatibles(
+                        textos_grp, previos, etiqueta, etiqueta,
+                        min_sim=max(u['sim_minima_agrupacion'], 0.88), min_overlap=0.40,
+                    ):
+                        rechazada = etiqueta
+                        etiqueta = self._generar_etiqueta(
+                            textos_grp, titulos_grp, resumenes_grp,
+                            subtemas_existentes=_existentes_anclados(textos_grp),
+                            evitar_etiqueta=rechazada
+                        )
+                        if etiqueta in textos_por_subtema_aprobado:
+                            previos2 = textos_por_subtema_aprobado.get(etiqueta, [])
+                            if not _grupos_contenido_compatibles(
+                                textos_grp, previos2, etiqueta, etiqueta,
+                                min_sim=max(u['sim_minima_agrupacion'], 0.88), min_overlap=0.40,
+                            ):
+                                etiqueta = capitalizar_etiqueta(self._fallback(titulos_grp))
+                for i in idxs:
+                    if _etiqueta_pertenece_al_texto(etiqueta, textos[i]):
+                        asignadas[i] = etiqueta
+                    else:
+                        asignadas[i] = _etiqueta_de_item(i)
+            else:
+                for i in idxs:
+                    asignadas[i] = _etiqueta_de_item(i)
+            for i, e in asignadas.items():
+                _registrar(e, [textos[i]])
+            return asignadas
 
         for k, (lid, idxs) in enumerate(sg):
             if k % 10 == 0: pbar.progress(0.55 + 0.25 * (k / max(ng, 1)), f"Etiquetando {k + 1}/{ng}...")
-            e = _generar_etiqueta_segura(idxs)
-            for i in idxs: mapa[i] = e
+            for i, e in _generar_etiqueta_segura(idxs).items():
+                mapa[i] = e
 
         subtemas = [mapa.get(i, "") for i in range(n)]
 
@@ -3107,27 +3268,37 @@ class ClasificadorSubtema:
         if indices_reclass:
             pbar.progress(0.93, f"Fase 6b · Reclasificando...")
             for i in indices_reclass:
-                et_ind = self._generar_etiqueta([textos[i]], [titulos[i]], [resumenes[i]], subtemas_existentes=subtemas_aprobados)
+                et_ind = _etiqueta_de_item(i)
                 subtemas[i] = capitalizar_etiqueta(et_ind)
-                if et_ind not in subtemas_aprobados: subtemas_aprobados.append(et_ind)
+                if et_ind not in subtemas_aprobados:
+                    subtemas_aprobados.append(et_ind)
 
         pbar.progress(0.93, "Fase 7 · Completitud...")
         subtemas = self._validar_completitud_final(subtemas, textos, titulos, resumenes)
 
-        pbar.progress(0.97, "Fase 8 · Sin dedup ni sinónimos cruzados...")
+        pbar.progress(0.97, "Fase 8 · Anclaje por ítem...")
         subtemas = [capitalizar_etiqueta(_sin_comas_etiqueta(s)) for s in subtemas]
         for i, s in enumerate(subtemas):
-            if _es_etiqueta_generica(s) or "," in str(s) or not str(s).strip():
-                subtemas[i] = _asegurar_etiqueta_especifica(s, textos[i], self.marca, self.aliases)
+            if (
+                _es_etiqueta_generica(s) or "," in str(s) or not str(s).strip()
+                or not _etiqueta_pertenece_al_texto(s, textos[i])
+            ):
+                subtemas[i] = _asegurar_etiqueta_especifica("", textos[i], self.marca, self.aliases)
         for _, idxs in sg:
             if len(idxs) < 2:
+                continue
+            if not _grupo_mismo_hecho(textos, idxs, self.marca, self.aliases):
                 continue
             vals = [subtemas[i] for i in idxs if not _es_etiqueta_generica(subtemas[i])]
             if not vals:
                 continue
             canon = Counter(vals).most_common(1)[0][0]
             for i in idxs:
-                subtemas[i] = canon
+                if _etiqueta_pertenece_al_texto(canon, textos[i]):
+                    subtemas[i] = canon
+        subtemas = _sanear_etiquetas_por_item(
+            subtemas, textos, self.marca, self.aliases, es_subtema=True
+        )
         nf = len(set(subtemas))
         pbar.progress(1.0, f"{nf} subtemas")
         st.info(f"Subtemas: **{nf}** · Grupos originales: **{ng}**")
@@ -3141,7 +3312,13 @@ class ClasificadorSubtema:
             if _frase_esta_completa(sub): continue
             recortada = _recortar_frase_completa(sub)
             if _frase_esta_completa(recortada) and len(recortada.split()) >= 2:
-                for i in idxs: resultado[i] = capitalizar_etiqueta(recortada)
+                for i in idxs:
+                    if _etiqueta_pertenece_al_texto(recortada, textos[i]):
+                        resultado[i] = capitalizar_etiqueta(recortada)
+                    else:
+                        resultado[i] = _extraer_subtema_especifico(
+                            textos[i], self.marca, self.aliases
+                        )
                 continue
             tit_grp = [titulos[i] for i in idxs[:6]]
             res_grp = [resumenes[i] for i in idxs[:3]]
@@ -3149,7 +3326,11 @@ class ClasificadorSubtema:
                 sub, titulos_grp=tit_grp, resumenes_grp=res_grp,
                 marca=self.marca, aliases=self.aliases, fallback_fn=self._fallback
             )
-            for i in idxs: resultado[i] = capitalizar_etiqueta(nueva)
+            for i in idxs:
+                cand = nueva
+                if not _etiqueta_pertenece_al_texto(cand, textos[i]):
+                    cand = _extraer_subtema_especifico(textos[i], self.marca, self.aliases)
+                resultado[i] = capitalizar_etiqueta(cand)
         return resultado
 
     def _consistencia(self, subtemas, ae, pbar, umbrales=None):
@@ -3481,6 +3662,7 @@ def consolidar_temas(subtemas, textos, pbar, marca=""):
         for i, t in enumerate(tf_validado)
     ]
     tf_validado = _unificar_tema_por_subtema(tf_validado, subtemas)
+    tf_validado = _sanear_etiquetas_por_item(tf_validado, textos, marca, es_subtema=False)
     st.info(f"Temas: **{len(set(tf_validado))}** (de {len(set(subtemas))} subtemas) · Máx: {num_temas_max}")
     pbar.progress(1.0, "Temas listos")
     return tf_validado

@@ -245,5 +245,116 @@ class TestPklYHeuristica(unittest.TestCase):
         self.assertNotIn(",", temas[0])
 
 
+CTX_FENAVI_AVICOLA = (
+    "PRESIDENTE DE FENAVI El sector avícola realizará su encuentro anual "
+    "para analizar las oportunidades de exportación, las perspectivas de "
+    "crecimiento de la Industria y las estrategias ante la volatilidad de la tasa de cambio."
+)
+CTX_FLA_PERSONAS = (
+    "Presidente - Fenavi Javier Díaz Presidente - Analdex Dirigente y "
+    "exgerente - Fábrica de licores de Antioquia, FLA"
+)
+TITULO_FENAVI = "Presidente de Fenavi"
+
+
+def _habla_de_fla(texto: str) -> bool:
+    n = app.unidecode(str(texto or "").lower())
+    return any(tok in n for tok in ("licor", "fla", "fabrica"))
+
+
+class TestFenaviNoHeredaFla(unittest.TestCase):
+    """Una nota del encuentro avícola no puede heredar FLA de otra nota del lote."""
+
+    def test_no_son_el_mismo_hecho(self):
+        self.assertFalse(
+            app._historias_son_el_mismo_hecho(
+                CTX_FENAVI_AVICOLA, CTX_FLA_PERSONAS, "Fenavi", None
+            )
+        )
+        self.assertFalse(
+            app._historias_son_el_mismo_hecho(CTX_FENAVI_AVICOLA, CTX_FLA_PERSONAS)
+        )
+
+    def test_subtema_propio_no_menciona_fla(self):
+        sub_a = app._extraer_subtema_especifico(CTX_FENAVI_AVICOLA, "Fenavi", None)
+        self.assertFalse(app._es_etiqueta_generica(sub_a), sub_a)
+        self.assertFalse(_habla_de_fla(sub_a), sub_a)
+        blob = app.unidecode(sub_a.lower())
+        self.assertTrue(
+            any(tok in blob for tok in ("encuentro", "avicol", "export", "volatil", "cambio")),
+            sub_a,
+        )
+        self.assertFalse(
+            app._etiqueta_pertenece_al_texto(
+                "Fábrica de licores de Antioquia", CTX_FENAVI_AVICOLA
+            )
+        )
+        self.assertTrue(
+            app._etiqueta_pertenece_al_texto(
+                "Fábrica de licores de Antioquia", CTX_FLA_PERSONAS
+            )
+        )
+
+    def test_etiquetar_sin_llm_no_copia_fla(self):
+        titulos = [TITULO_FENAVI, TITULO_FENAVI]
+        resumenes = [CTX_FENAVI_AVICOLA, CTX_FLA_PERSONAS]
+        temas, subtemas = app.etiquetar_sin_llm(titulos, resumenes, "Fenavi", None)
+        self.assertFalse(_habla_de_fla(subtemas[0]), subtemas[0])
+        self.assertFalse(_habla_de_fla(temas[0]), temas[0])
+        self.assertNotEqual(
+            app.string_norm_label(subtemas[0]),
+            app.string_norm_label(subtemas[1]),
+        )
+        self.assertFalse(app._es_etiqueta_generica(subtemas[0]), subtemas[0])
+        self.assertFalse(app._es_etiqueta_generica(subtemas[1]), subtemas[1])
+        self.assertNotIn(",", subtemas[0])
+        self.assertNotIn(",", subtemas[1])
+
+    def test_grupo_noticia_compartido_no_contamina(self):
+        pd = __import__("pandas")
+        df = pd.DataFrame({
+            "Título": [TITULO_FENAVI, TITULO_FENAVI],
+            "Resumen - Aclaracion": [CTX_FENAVI_AVICOLA, CTX_FLA_PERSONAS],
+            "Contexto analizado": [CTX_FENAVI_AVICOLA, CTX_FLA_PERSONAS],
+            "Grupo noticia": ["G00001", "G00001"],
+            "Tono IA": ["Neutro", "Neutro"],
+            "Tema": ["Fábrica de licores de Antioquia", "Fábrica de licores de Antioquia"],
+            "Subtema": ["Fábrica de licores de Antioquia", "Fábrica de licores de Antioquia"],
+        })
+        with patch.object(app, "get_embeddings_batch", return_value=[None, None]):
+            out = app.aplicar_consistencia_grupos(
+                df, "Título", "Resumen - Aclaracion",
+                marca="Fenavi", aliases=None,
+            )
+        self.assertFalse(_habla_de_fla(out.loc[0, "Subtema"]), out.loc[0, "Subtema"])
+        self.assertFalse(_habla_de_fla(out.loc[0, "Tema"]), out.loc[0, "Tema"])
+        self.assertNotEqual(
+            app.string_norm_label(out.loc[0, "Subtema"]),
+            app.string_norm_label("Fábrica de licores de Antioquia"),
+        )
+
+    def test_llm_no_reutiliza_fla_del_lote(self):
+        pd = __import__("pandas")
+        clf = app.ClasificadorSubtema("Fenavi", None)
+        pbar = MagicMock()
+        col = pd.Series([CTX_FENAVI_AVICOLA, CTX_FLA_PERSONAS])
+        res = pd.Series([CTX_FENAVI_AVICOLA, CTX_FLA_PERSONAS])
+        tit = pd.Series([TITULO_FENAVI, TITULO_FENAVI])
+        with patch.object(app, "get_embeddings_batch", return_value=[None, None]), \
+             patch.object(
+                 clf, "_generar_etiqueta",
+                 return_value="Fábrica de licores de Antioquia",
+             ):
+            subtemas = clf.procesar_lote(col, pbar, res, tit)
+        self.assertEqual(len(subtemas), 2)
+        self.assertFalse(_habla_de_fla(subtemas[0]), subtemas[0])
+        self.assertFalse(app._es_etiqueta_generica(subtemas[0]), subtemas[0])
+        self.assertNotIn(",", subtemas[0])
+        self.assertNotEqual(
+            app.string_norm_label(subtemas[0]),
+            app.string_norm_label(subtemas[1]),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
