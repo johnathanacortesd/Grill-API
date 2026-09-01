@@ -361,26 +361,6 @@ _NUCLEOS_HECHO_EVENTO = [
     (r"\b(operac[íi]on de la marca)\w*", "Uso"),
 ]
 
-# Cabezas de etiqueta que describen un EVENTO REAL de la marca/cliente (una acción
-# concreta) y se aceptan del resumen. Las keywords de ámbito/sector ('minería',
-# 'inversión', 'infraestructura' sueltas) NO están aquí: no son hechos del cliente.
-_HEADS_EVENTO_MARCA = {
-    "atencion", "cirugia", "traslado", "rehabilitacion", "tratamiento", "diagnostico",
-    "hospitalizacion", "rescate", "urgencia", "paciente", "victima",
-    "convenio", "alianza", "acuerdo", "pacto", "cooperacion", "colaboracion",
-    "lanzamiento", "apertura", "inauguracion", "estreno", "presentacion",
-    "premio", "reconocimiento", "galardon", "distincion", "condecoracion", "homenaje",
-    "investigacion", "denuncia", "demanda", "sancion", "multa", "condena", "querella",
-    "nombramiento", "designacion", "posesion", "renuncia", "dimision",
-    "foro", "congreso", "cumbre", "feria", "seminario", "taller", "encuentro",
-    "conversatorio", "jornada", "evento", "festival", "concierto", "campaña",
-    "donacion", "solidaridad", "ayuda", "apoyo", "voluntariado", "marcha", "protesta",
-    "subasta", "licitacion", "adjudicacion", "convocatoria", "licitación",
-    "estudio", "informe", "encuesta", "balance", "resultados", "publicacion",
-    "construccion", "obras", "restauracion", "remodelacion", "reforma", "ampliacion",
-    "contratacion", "capacitacion", "formacion", "empleo", "graduacion", "beca",
-}
-
 # Adjetivos de contexto que acompañan a un hecho (alta complejidad, cirugía compleja)
 # y se pegan al sustantivo, no tras 'de'.
 _ADJ_POSIBLE = {}
@@ -1469,40 +1449,6 @@ _NO_ADJETIVOS = {
 }
 
 
-def _termina_en_marca(etiqueta, marca, aliases=None):
-    """True si el ÚLTIMO token de contenido del subtema es parte del nombre del
-    cliente. Un subtema no debe terminar en la marca ('Atención médica en fundación
-    santa'): eso significa que no dice QUÉ hecho, solo que se relaciona con la marca.
-    Es el caso real que el usuario reportó varias veces."""
-    cont = []
-    for w in re.findall(r"[a-z]+", unidecode(str(etiqueta or "").lower())):
-        if len(w) >= 4 and w not in _CONECTORES_ETIQUETA and w not in _VERBOS_LEAD_SUBTEMA:
-            cont.append(w)
-    if not cont:
-        return False
-    ultimo = cont[-1]
-    nombre = set()
-    for n in ([marca] + list(aliases or [])):
-        nombre.update(re.findall(r"[a-z]+", unidecode(str(n).lower())))
-    return ultimo in nombre
-
-
-def _es_fragmento_de_titulo(subtema, titulo):
-    """True si el subtema repite un tramo literal (>=3 tokens contiguos, mismo
-    orden) del TÍTULO. Un subtema es una CATEGORÍA; si es un fragmento del titular,
-    no lo es ('Colombia se convierte', 'Más grandes por activos')."""
-    def _t(s):
-        return re.findall(r"[a-z]+", unidecode(str(s or "").lower()))
-    st = _t(subtema)
-    tt = _t(titulo)
-    if len(st) < 3 or len(tt) < len(st):
-        return False
-    for i in range(len(tt) - len(st) + 1):
-        if tt[i:i + len(st)] == st:
-            return True
-    return False
-
-
 def _es_cabeza_subtema_valida(token) -> bool:
     """¿El token es un sustantivo de evento que puede encabezar el subtema?
     Compara por stem Y por prefijo, porque _stem_es no une siempre singular y
@@ -1632,11 +1578,10 @@ def _validar_estructura_subtema(etiqueta: str) -> bool:
     if len(etiqueta.split()) > MAX_PALABRAS_SUBTEMA: return False
     if _PATRON_TITULAR.match(etiqueta): return False
     if _PATRON_ESTADO.search(etiqueta): return False
-    # Un subtema es una FRASE NOMINAL, no un titular copiado ni una lista de
-    # keywords. Los marcadores de encabezado periodístico (dos puntos, guiones
-    # largos, barra, punto y coma, comas, envoltura entre comillas) delatan un
-    # titular literal o una unión de palabras sueltas -> se rechazan.
-    if re.search(r'[:：—–,|;»\u201d\uff1a]', etiqueta):
+    # Un subtema es una FRASE NOMINAL, no un titular copiado. Los marcadores de
+    # encabezado periodístico (dos puntos, guiones largos, barra, punto y coma,
+    # envoltura entre comillas) delatan un titular literal -> se rechazan.
+    if re.search(r'[:：—–|;»\u201d\uff1a]', etiqueta):
         return False
     palabras = etiqueta.split()
     if len(palabras) == 2:
@@ -2117,9 +2062,7 @@ def _validar_etiqueta_completa(etiqueta, titulos_grp=None, resumenes_grp=None, m
             fuentes = [str(t) for t in titulos_grp if str(t).strip()]
             if resumenes_grp:
                 fuentes += [str(r) for r in resumenes_grp if str(r).strip()]
-            if (not _head_anclada(etiqueta, fuentes)
-                    or _termina_en_marca(etiqueta, marca, aliases)
-                    or any(_es_fragmento_de_titulo(etiqueta, t) for t in titulos_grp[:3])):
+            if not _head_anclada(etiqueta, fuentes):
                 return fallback_fn(titulos_grp)
         return etiqueta
     recortada = _recortar_frase_completa(etiqueta, max_palabras=MAX_PALABRAS_SUBTEMA)
@@ -3360,15 +3303,6 @@ class ClasificadorSubtema:
                 et = self._refinar(tm, None, rm, forzar_preposicion=True, prohibir_verbos=True)
             if not _head_anclada(et, fuentes_grounding):
                 et = self._fallback(titulos_grp, resumenes_grp)
-            # Refuerzo 2d: no puede terminar en el nombre del cliente ('Atención
-            # médica en fundación santa') ni repetir un tramo literal del titular
-            # ('Colombia se convierte', 'Más grandes por activos').
-            if _termina_en_marca(et, self.marca, self.aliases):
-                et = self._refinar(tm, None, rm, forzar_preposicion=True, prohibir_verbos=True, prohibir_nombres=True)
-            if _termina_en_marca(et, self.marca, self.aliases):
-                et = self._fallback(titulos_grp, resumenes_grp)
-            if any(_es_fragmento_de_titulo(et, t) for t in titulos_grp[:3]):
-                et = self._fallback(titulos_grp, resumenes_grp)
             # Refuerzo 2c: sin marcadores de titular (dos puntos, guion) -> recorte
             # crudo, no un subtema real.
             if not _validar_estructura_subtema(et):
@@ -3484,26 +3418,6 @@ class ClasificadorSubtema:
         except Exception:
             pass
         return ""
-
-    def _es_hecho_de_marca_de_evento(self, etiqueta):
-        """¿La etiqueta derivada describe un EVENTO real de la marca/cliente (una
-        acción concreta: atención médica, cirugía, alianza, foro, premiación) o es
-        solo una keyword del resumen (nombre de sector, tema)?
-
-        Evita el caso real "Inversión de minería": 'inversión' + 'minería' sueltos
-        no son un hecho de la marca; sale de keywords del resumen. Un hecho real
-        debe tener un núcleo de evento.
-        """
-        cabeza = None
-        for w in (etiqueta or "").split():
-            wn = _normaliza_token(w)
-            if len(wn) >= 4 and wn not in _CONECTORES_ETIQUETA:
-                cabeza = wn
-                break
-        if not cabeza:
-            return False
-        return _stem_es(cabeza) in _HEADS_EVENTO_MARCA or any(
-            _stem_es(cabeza) == _stem_es(h) for h in _HEADS_EVENTO_MARCA)
 
     def _derivar_desde_texto_nominal(self, textos, fuentes, es_resumen=False):
         """Deriva la frase nominal DESDE la oración donde vive el hecho (prioridad:
@@ -3808,7 +3722,6 @@ class ClasificadorSubtema:
     # ── Construcción de FRASE NOMINAL (evita pegotes de keywords) ───────────────
     # Núcleo de hecho detectado en el texto → se usa como cabeza de la etiqueta.
     _NUCLEOS_HECHO = [
-        (r"\b(ranking|clasificacion|top\s+\d+|listado|listado de)\w*", "Ranking"),
         (r"\b(alza|aumento|incremento|encarec|subida|sube|subio)\w*", "Alza"),
         (r"\b(caida|baja|reduccion|descenso|disminucion)\w*", "Reducción"),
         (r"\b(precio|tarifa|costo)\w*", "Precio"),
@@ -3961,25 +3874,22 @@ class ClasificadorSubtema:
             return (et and _validar_estructura_subtema(et)
                     and not _es_etiqueta_generica(et)
                     and not _es_nombre_o_fragmento_marca(et, self.marca, self.aliases)
-                    and not _termina_en_marca(et, self.marca, self.aliases)
-                    and not any(_es_fragmento_de_titulo(et, t) for t in titulos[:3])
                     and _head_anclada(et, fuentes))
 
         # 1) Extracción LLM estricta: frase armada SOLO con palabras del texto.
         et = self._extraer_desde_texto(titulos, resumenes)
         if _sirve(et):
             return et
-        # 2) Frase nominal derivada del TÍTULO (100% grounded). El título es la
-        #    fuente prioritaria: da el hecho central sin keywords sueltas de sectores
-        #    que aparecen solo en el resumen (caso real: "Infraestructura, inversión,
-        #    minería..." del resumen -> el título daba "Nuevas rutas para crecer").
-        et = self._derivar_desde_titulos(titulos)
+        # 1b) La oración del RESUMEN es la fuente del hecho del cliente: derivar
+        #     de ella directamente da subtemas como 'Atención de urgencia' en lugar
+        #     de recortar el titular.
+        et = self._derivar_desde_texto_nominal(resumenes or titulos, fuentes, es_resumen=True)
         if _sirve(et):
             return et
-        # 2b) Hecho de la marca en el RESUMEN cuando describe un EVENTO de la marca
-        #     (atención médica, cirugía, foro, alianza) y el título es genérico.
-        et = self._derivar_desde_texto_nominal(resumenes, fuentes, es_resumen=True)
-        if _sirve(et) and self._es_hecho_de_marca_de_evento(et):
+
+        # 2) Frase nominal derivada del título más representativo (100% grounded).
+        et = self._derivar_desde_titulos(titulos)
+        if _sirve(et):
             return et
 
         # 3) Acción detectada + palabras clave del texto (100% grounded).
@@ -3987,21 +3897,14 @@ class ClasificadorSubtema:
         if _sirve(et):
             return et
 
-        # 4) Palabras de contenido más frecuentes del TÍTULO (aún grounded).
+        # 4) Palabras de contenido más frecuentes (aún grounded, exige 2+ palabras reales).
         et = self._palabra_clave_mas_frecuente(titulos, resumenes)
         if _sirve(et):
             return et
 
         # 5) Última red: oración que menciona al cliente en el resumen/título, si
         #    existe, recortada a frase nominal válida; sino fragmento del texto.
-        et = self._derivar_ultimo_recurso(titulos, resumenes)
-        if _sirve(et):
-            return et
-        # 6) Red absoluta con núcleo de evento del RESUMEN (evita fragmento crudo).
-        et = self._derivar_desde_texto_nominal(resumenes, fuentes, es_resumen=True)
-        if _sirve(et) and self._es_hecho_de_marca_de_evento(et):
-            return et
-        return ""
+        return self._derivar_ultimo_recurso(titulos, resumenes)
 
     def _consolidar_sinonimos_llm(self, subtemas_unicos):
         if len(subtemas_unicos) <= 1:
@@ -5895,4 +5798,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
