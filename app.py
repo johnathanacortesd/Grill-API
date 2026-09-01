@@ -1469,6 +1469,40 @@ _NO_ADJETIVOS = {
 }
 
 
+def _termina_en_marca(etiqueta, marca, aliases=None):
+    """True si el ÚLTIMO token de contenido del subtema es parte del nombre del
+    cliente. Un subtema no debe terminar en la marca ('Atención médica en fundación
+    santa'): eso significa que no dice QUÉ hecho, solo que se relaciona con la marca.
+    Es el caso real que el usuario reportó varias veces."""
+    cont = []
+    for w in re.findall(r"[a-z]+", unidecode(str(etiqueta or "").lower())):
+        if len(w) >= 4 and w not in _CONECTORES_ETIQUETA and w not in _VERBOS_LEAD_SUBTEMA:
+            cont.append(w)
+    if not cont:
+        return False
+    ultimo = cont[-1]
+    nombre = set()
+    for n in ([marca] + list(aliases or [])):
+        nombre.update(re.findall(r"[a-z]+", unidecode(str(n).lower())))
+    return ultimo in nombre
+
+
+def _es_fragmento_de_titulo(subtema, titulo):
+    """True si el subtema repite un tramo literal (>=3 tokens contiguos, mismo
+    orden) del TÍTULO. Un subtema es una CATEGORÍA; si es un fragmento del titular,
+    no lo es ('Colombia se convierte', 'Más grandes por activos')."""
+    def _t(s):
+        return re.findall(r"[a-z]+", unidecode(str(s or "").lower()))
+    st = _t(subtema)
+    tt = _t(titulo)
+    if len(st) < 3 or len(tt) < len(st):
+        return False
+    for i in range(len(tt) - len(st) + 1):
+        if tt[i:i + len(st)] == st:
+            return True
+    return False
+
+
 def _es_cabeza_subtema_valida(token) -> bool:
     """¿El token es un sustantivo de evento que puede encabezar el subtema?
     Compara por stem Y por prefijo, porque _stem_es no une siempre singular y
@@ -2083,7 +2117,9 @@ def _validar_etiqueta_completa(etiqueta, titulos_grp=None, resumenes_grp=None, m
             fuentes = [str(t) for t in titulos_grp if str(t).strip()]
             if resumenes_grp:
                 fuentes += [str(r) for r in resumenes_grp if str(r).strip()]
-            if not _head_anclada(etiqueta, fuentes):
+            if (not _head_anclada(etiqueta, fuentes)
+                    or _termina_en_marca(etiqueta, marca, aliases)
+                    or any(_es_fragmento_de_titulo(etiqueta, t) for t in titulos_grp[:3])):
                 return fallback_fn(titulos_grp)
         return etiqueta
     recortada = _recortar_frase_completa(etiqueta, max_palabras=MAX_PALABRAS_SUBTEMA)
@@ -3324,6 +3360,15 @@ class ClasificadorSubtema:
                 et = self._refinar(tm, None, rm, forzar_preposicion=True, prohibir_verbos=True)
             if not _head_anclada(et, fuentes_grounding):
                 et = self._fallback(titulos_grp, resumenes_grp)
+            # Refuerzo 2d: no puede terminar en el nombre del cliente ('Atención
+            # médica en fundación santa') ni repetir un tramo literal del titular
+            # ('Colombia se convierte', 'Más grandes por activos').
+            if _termina_en_marca(et, self.marca, self.aliases):
+                et = self._refinar(tm, None, rm, forzar_preposicion=True, prohibir_verbos=True, prohibir_nombres=True)
+            if _termina_en_marca(et, self.marca, self.aliases):
+                et = self._fallback(titulos_grp, resumenes_grp)
+            if any(_es_fragmento_de_titulo(et, t) for t in titulos_grp[:3]):
+                et = self._fallback(titulos_grp, resumenes_grp)
             # Refuerzo 2c: sin marcadores de titular (dos puntos, guion) -> recorte
             # crudo, no un subtema real.
             if not _validar_estructura_subtema(et):
@@ -3763,6 +3808,7 @@ class ClasificadorSubtema:
     # ── Construcción de FRASE NOMINAL (evita pegotes de keywords) ───────────────
     # Núcleo de hecho detectado en el texto → se usa como cabeza de la etiqueta.
     _NUCLEOS_HECHO = [
+        (r"\b(ranking|clasificacion|top\s+\d+|listado|listado de)\w*", "Ranking"),
         (r"\b(alza|aumento|incremento|encarec|subida|sube|subio)\w*", "Alza"),
         (r"\b(caida|baja|reduccion|descenso|disminucion)\w*", "Reducción"),
         (r"\b(precio|tarifa|costo)\w*", "Precio"),
@@ -3915,6 +3961,8 @@ class ClasificadorSubtema:
             return (et and _validar_estructura_subtema(et)
                     and not _es_etiqueta_generica(et)
                     and not _es_nombre_o_fragmento_marca(et, self.marca, self.aliases)
+                    and not _termina_en_marca(et, self.marca, self.aliases)
+                    and not any(_es_fragmento_de_titulo(et, t) for t in titulos[:3])
                     and _head_anclada(et, fuentes))
 
         # 1) Extracción LLM estricta: frase armada SOLO con palabras del texto.
@@ -3946,7 +3994,14 @@ class ClasificadorSubtema:
 
         # 5) Última red: oración que menciona al cliente en el resumen/título, si
         #    existe, recortada a frase nominal válida; sino fragmento del texto.
-        return self._derivar_ultimo_recurso(titulos, resumenes)
+        et = self._derivar_ultimo_recurso(titulos, resumenes)
+        if _sirve(et):
+            return et
+        # 6) Red absoluta con núcleo de evento del RESUMEN (evita fragmento crudo).
+        et = self._derivar_desde_texto_nominal(resumenes, fuentes, es_resumen=True)
+        if _sirve(et) and self._es_hecho_de_marca_de_evento(et):
+            return et
+        return ""
 
     def _consolidar_sinonimos_llm(self, subtemas_unicos):
         if len(subtemas_unicos) <= 1:
