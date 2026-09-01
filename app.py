@@ -343,6 +343,83 @@ def _subtema_grounded(etiqueta, fuentes):
     return no_coinciden * 2 <= len(contenido)
 
 
+# Núcleos de HECHO de contexto (eventos del cliente) que no están en la lista de
+# clase `_NUCLEOS_HECHO`: cubren los casos de una clínica/hospital que ATIENDE a
+# alguien (no lo reconoce). Usados por `_derivar_desde_texto_nominal`.
+_NUCLEOS_HECHO_EVENTO = [
+    (r"\b(atendio|atendida|atendido|atenci[oó]n)\w*", "Atención"),
+    (r"\b(trasladad[oa]|remitid[oa]|traslado)\w*", "Traslado"),
+    (r"\b(cirug[íi]a|operad[oa]|quir[úu]rgic[oa])\w*", "Cirugía"),
+    (r"\b(rehabilitaci[oó]n|terapia|terapeutica)\w*", "Rehabilitación"),
+    (r"\b(tratamiento|tratad[oa])\w*", "Tratamiento"),
+    (r"\b(diagn[oó]stic[oa]|diagnostica)\w*", "Diagnóstico"),
+    (r"\b(hospitalizado|internad[oa]|ingres[oa] al hospital)\w*", "Hospitalización"),
+    (r"\b(rescate|rescatad[oa]) \w*", "Rescate"),
+    (r"\b(v[íi]ctima|victim[oa])\w*", "Atención a víctima"),
+    (r"\b(paciente)\w*", "Atención a paciente"),
+    (r"\b(urgencia|emergencias?)\w*", "Atención de urgencia"),
+    (r"\b(operac[íi]on de la marca)\w*", "Uso"),
+]
+
+# Adjetivos de contexto que acompañan a un hecho (alta complejidad, cirugía compleja)
+# y se pegan al sustantivo, no tras 'de'.
+_ADJ_POSIBLE = {}
+
+
+# ── Regla de CABEZA ANCLADA (anti-invención) ──────────────────────────────────
+# El núcleo del subtema (su primera palabra de hecho: "Reconocimiento", "Alianza",
+# "Premio", "Inversión"...) DEBE estar respaldado en el texto del cliente. Detiene
+# el caso real "Reconocimiento a fundación santa fe": 'reconocimiento' no aparece ni
+# como palabra ni como verbo derivado ('reconocer') en un texto que solo dice que
+# atendieron a un paciente — el LLM lo inventó del titular. Un subtema cuyo NÚCLEO
+# no está en el texto es semánticamente falso.
+def _head_anclada(etiqueta, fuentes):
+    if not etiqueta or not fuentes:
+        return False
+    contenido = []
+    for w in etiqueta.split():
+        wt = _normaliza_token(w)
+        if not wt or len(wt) < 4 or wt in _CONECTORES_ETIQUETA:
+            continue
+        contenido.append(wt)
+    if not contenido:
+        return False
+    cabeza = contenido[0]
+    fuente_tokens, fuente_stems = set(), set()
+    for f in fuentes:
+        for w in re.findall(r"[a-z0-9]{4,}", unidecode(str(f).lower())):
+            fuente_tokens.add(w)
+            fuente_stems.add(_stem_es(w))
+    # 1) aparece literal o por stem
+    if cabeza in fuente_tokens or _stem_es(cabeza) in fuente_stems:
+        return True
+    # 2) por prefijo largo compartido (reconocimiento vs reconocer del texto)
+    if any((fs.startswith(cabeza) or cabeza.startswith(fs)) and min(len(fs), len(cabeza)) >= 5
+           for fs in fuente_stems):
+        return True
+    # 3) Cabeza derivada de verbo del texto: reconocimiento<-reconocer, alianza<-aliar,
+    #    inversión<-invertir, premio<-premiar, campaña<-campaña. Busca la raíz común.
+    raiz_cabeza = _stem_es_nominal(cabeza)
+    if raiz_cabeza and len(raiz_cabeza) >= 4:
+        if any(fs == raiz_cabeza or (fs.startswith(raiz_cabeza) or raiz_cabeza.startswith(fs))
+               for fs in fuente_stems):
+            return True
+    return False
+
+
+def _stem_es_nominal(w):
+    """Raíz verbal/nominal de un sustantivo de hecho: reconocimiento->reconoc,
+    alianza->ali, inversión->invers, construcción->construc."""
+    w = _normaliza_token(str(w or ""))
+    for suf in ("amientos", "imiento", "imientos", "aciones", "acion", "ación",
+                "miento", "amient", "siones", "sion", "ción", "cion",
+                "encia", "idad", "anzas", "anza", "aje", "tura", "uracion",
+                "acion", "cciones", "ccion", "acion", "ores", "oras", "dor"):
+        if w.endswith(suf) and len(w) - len(suf) >= 4:
+            return w[:len(w) - len(suf)]
+    return w
+
+
 _PATRON_TITULAR = re.compile(
     r"^(nuevo|nueva|anuncia|lanza|presenta|inaugura|llega|abre|inicia|"
     r"logra|alcanza|supera|confirma|destaca|revela|señala|advierte|"
@@ -1048,7 +1125,17 @@ def _es_calificador_de_ambito(token) -> bool:
              "local", "publico", "publica", "privado", "privada", "global"}:
         return True
     if _es_cabeza_subtema_valida(w):
-        return False        # es un sustantivo de hecho: NO es simple calificador
+        return False        # es un sustantivo de evento conocido
+    # Adjetivos de contexto clínico/periodístico que no caen en sufijos estándar.
+    if w in {"compleja", "complejas", "complejo", "complejos", "alta", "altas",
+             "alto", "altos", "corta", "cortas", "corto", "cortos", "larga", "largas",
+             "largo", "largos", "nueva", "nuevas", "nuevo", "nuevos", "especial",
+             "especiales", "directa", "directas", "directo", "directos", "abierta",
+             "abiertas", "abierto", "abiertos", "privada", "privadas", "privado",
+             "privados", "extranjera", "extranjeras", "extranjero", "extranjeros",
+             "local", "locales", "rural", "rurales", "urbana", "urbanas", "urbano",
+             "urbanos", "publica", "publicas", "publico", "publicos"}:
+        return True
     if w in _SUSTANTIVOS_SEGUROS_FINALES:
         return False
     return bool(re.search(
@@ -1395,6 +1482,14 @@ def _parece_adjetivo_es(palabra) -> bool:
         return False
     if _es_cabeza_subtema_valida(w):
         return False        # es un sustantivo de evento conocido
+    # Adjetivos de contexto clínico/periodístico que no caen en sufijos estándar.
+    if w in {"compleja", "complejas", "complejo", "complejos", "alta", "altas",
+             "alto", "altos", "corta", "cortas", "corto", "cortos", "larga", "largas",
+             "largo", "largos", "especial", "especiales", "directa", "directas",
+             "directo", "directos", "abierta", "abiertas", "abierto", "abiertos",
+             "extranjera", "extranjeras", "extranjero", "extranjeros", "local",
+             "locales", "rural", "rurales", "urbana", "urbanas", "urbano", "urbanos"}:
+        return True
     return w.endswith(_TERMINACIONES_ADJETIVO)
 
 
@@ -1483,7 +1578,17 @@ def _validar_estructura_subtema(etiqueta: str) -> bool:
     if len(etiqueta.split()) > MAX_PALABRAS_SUBTEMA: return False
     if _PATRON_TITULAR.match(etiqueta): return False
     if _PATRON_ESTADO.search(etiqueta): return False
+    # Un subtema es una FRASE NOMINAL, no un titular copiado. Los marcadores de
+    # encabezado periodístico (dos puntos, guiones largos, barra, punto y coma,
+    # envoltura entre comillas) delatan un titular literal -> se rechazan.
+    if re.search(r'[:：—–|;»\u201d\uff1a]', etiqueta):
+        return False
     palabras = etiqueta.split()
+    if len(palabras) == 2:
+        # 'Sustantivo + adjetivo' ('Cirugía compleja', 'Cobertura regional') es un
+        # subtema válido SIN preposición; 'keyword + keyword' ('precio pollo') no.
+        if _parece_adjetivo_es(palabras[1]):
+            return True
     if len(palabras) <= 4:
         nexos = {
             "de","del","para","sobre","en","con","por","ante","hacia",
@@ -1947,7 +2052,19 @@ def _validar_etiqueta_completa(etiqueta, titulos_grp=None, resumenes_grp=None, m
             or _es_etiqueta_generica(etiqueta)):
         if fallback_fn: return fallback_fn(titulos_grp or [])
         return "Sin tema"
-    if _frase_esta_completa(etiqueta): return etiqueta
+    # Un subtema real no es un titular copiado ni inventa su núcleo de hecho.
+    if not _validar_estructura_subtema(etiqueta):
+        if fallback_fn: return fallback_fn(titulos_grp or [])
+        return "Sin tema"
+    if _frase_esta_completa(etiqueta):
+        # CABEZA ANCLADA: el núcleo del hecho debe estar respaldado en el texto.
+        if fallback_fn and titulos_grp:
+            fuentes = [str(t) for t in titulos_grp if str(t).strip()]
+            if resumenes_grp:
+                fuentes += [str(r) for r in resumenes_grp if str(r).strip()]
+            if not _head_anclada(etiqueta, fuentes):
+                return fallback_fn(titulos_grp)
+        return etiqueta
     recortada = _recortar_frase_completa(etiqueta, max_palabras=MAX_PALABRAS_SUBTEMA)
     if _frase_esta_completa(recortada) and len(recortada.split()) >= 2 and not _es_etiqueta_generica(recortada):
         return capitalizar_etiqueta(recortada)
@@ -3042,14 +3159,23 @@ class ClasificadorSubtema:
 
         prompt = (
             f"Eres analista de reputación que monitorea noticias sobre '{self.marca}'.\n"
-            "Lee las noticias de este grupo y resume EL HECHO periodístico central en UNA sola "
-            "frase nominal descriptiva de 3 a 5 palabras, gramaticalmente correcta y con sentido lógico completo.\n\n"
+            "Lee las noticias y resume EL HECHO periodístico central RELACIONADO CON "
+            f"'{self.marca}' en UNA sola frase nominal descriptiva de 2 a 5 palabras, "
+            "gramaticalmente correcta y con sentido lógico completo.\n\n"
+            "REGLAS DE HECHO:\n"
+            "  - El hecho debe describir QUÉ HIZO O QUÉ LE PASÓ a la marca/cliente según el texto. "
+            "  - Si la marca solo ATIENDE a un paciente o víctima (hospital, clínica), el hecho es de "
+            "ATENCIÓN, TRATAMIENTO, CIRUGÍA o REHABILITACIÓN, NO un reconocimiento ni un premio. "
+            "  - NO inventes el tipo de hecho: si no hay premio, no digas 'Reconocimiento'. "
+            "  - Cada palabra de contenido del subtema debe aparecer (o derivar de) el texto. "
+            "  - NO copies el titular casi literal ni uses dos puntos o guiones (eso es un titular, no un subtema).\n"
             "CÓMO CONSTRUIRLA:\n"
             "  1. Identifica primero el TIPO de hecho: lanzamiento, convenio, alianza, inversión, "
             "proyecto, campaña, foro, premiación, reconocimiento, nombramiento, designación, posesión, "
-            "renuncia, investigación, sanción, publicación de un libro, apertura, intercambio, etc.\n"
+            "renuncia, investigación, sanción, publicación de un libro, apertura, intercambio, "
+            "atención médica, cirugía, tratamiento, etc.\n"
             "  2. Escribe: [tipo de hecho] + [preposición: de/del/para/sobre/en] + [objeto o asunto concreto]. "
-            "La frase debe leerse como un encabezado de nota, con orden natural.\n"
+            "La frase debe leerse como una categoría, no copiar un titular.\n"
             "  3. Usa SOLO palabras que aparezcan en el texto analizado (o sus derivadas directas, "
             "ej. 'renunció' → 'renuncia'). NO inventes nombres, lugares, cargos ni términos. "
             "Deriva la frase del TÍTULO o del RESUMEN-ACLARACIÓN: cada palabra de contenido debe aparecer en esos textos.\n"
@@ -3170,6 +3296,18 @@ class ClasificadorSubtema:
             if not _subtema_grounded(et, fuentes_grounding):
                 et = self._fallback(titulos_grp, resumenes_grp)
 
+            # Refuerzo 2b: CABEZA ANCLADA. El núcleo de hecho del subtema debe estar
+            # en el texto. Mata 'Reconocimiento a fundación santa fe' cuando el texto
+            # solo dice que atendieron a un paciente: 'reconocimiento' no aparece.
+            if not _head_anclada(et, fuentes_grounding):
+                et = self._refinar(tm, None, rm, forzar_preposicion=True, prohibir_verbos=True)
+            if not _head_anclada(et, fuentes_grounding):
+                et = self._fallback(titulos_grp, resumenes_grp)
+            # Refuerzo 2c: sin marcadores de titular (dos puntos, guion) -> recorte
+            # crudo, no un subtema real.
+            if not _validar_estructura_subtema(et):
+                et = self._fallback(titulos_grp, resumenes_grp)
+
             # Refuerzo final anti-frases-sin-sentido
             if _tiene_verbo_conjugado(et) or _primera_palabra_verbo(et) or _es_robotico(et) or _empieza_por_nombre_propio(et, titulos_grp):
                 et = self._fallback(titulos_grp, resumenes_grp)
@@ -3279,6 +3417,86 @@ class ClasificadorSubtema:
                 return et
         except Exception:
             pass
+        return ""
+
+    def _derivar_desde_texto_nominal(self, textos, fuentes, es_resumen=False):
+        """Deriva la frase nominal DESDE la oración donde vive el hecho (prioridad:
+        el resumen, que es donde suele aparecer la mención del cliente).
+
+        Para la fila real "Fue trasladado de urgencia a la Fundación Santa Fe y sometido
+        a una cirugía compleja", produce 'Cirugía de alta complejidad' (hecho anclado)
+        en lugar de 'Reconocimiento a fundación santa fe' (inventado) o de recortar el
+        titular. Detecta el hecho y toma el OBJETO de la propia oración del hecho.
+        """
+        for t in (textos or [])[:4]:
+            s = _sanear_frase_nominal(str(t), max_palabras=60)
+            if not s or len(s) < 8:
+                continue
+            sl = unidecode(s.lower())
+            # Todos los hechos detectables, con su posición; prioriza los de salud.
+            hits = []
+            for pat, nom in (_NUCLEOS_HECHO_EVENTO + self._NUCLEOS_HECHO):
+                m = re.search(pat, sl)
+                if m:
+                    hits.append((m.start(), len(nom) if nom != "Cirugía" else 2, nom))
+            if not hits:
+                continue
+            # El hecho más relevante: el de salud primero (cirugía/atención/traslado).
+            _PRIO_SALUD = {"Cirugía": 6, "Rehabilitación": 5, "Hospitalización": 5,
+                           "Tratamiento": 5, "Atención a paciente": 5, "Atención a víctima": 5,
+                           "Diagnóstico": 4, "Atención": 4, "Atención de urgencia": 3,
+                           "Traslado": 2, "Uso": 1}
+            def _cla(h):
+                pos, _, nom = h
+                return (_PRIO_SALUD.get(nom, 0), -pos)
+            pos, _, hecho = max(hits, key=_cla)
+            # Si el hecho YA incluye complemento ('Atención a víctima', 'Atención de
+            # urgencia'), es completo: no agregar objeto adicional.
+            if re.match(r"^[A-Za-zÁÉÍÓÚÑÜáéíóúñü]+\s+(?:a|de|del|a\s+la|de\s+la|al)\b", hecho):
+                return capitalizar_etiqueta(_sanear_frase_nominal(hecho))
+            # OBJETO: la palabra de contenido que SIGUE al hecho dentro de la misma
+            # oración (evita 'nació parálisis' del inicio del texto).
+            palabras_hecho = {_normaliza_token(w) for w in hecho.lower().split()}
+            seg = sl[pos: len(sl)]
+            objeto = ""
+            for w in re.findall(r"[a-z]+", seg):
+                wn = _normaliza_token(w)
+                if (len(wn) >= 4 and wn not in _CONECTORES_ETIQUETA
+                        and wn not in _VERBOS_LEAD_SUBTEMA
+                        and not _RE_VERBO_SUBTEMA.search(wn)
+                        and not _es_forma_verbal_es(wn)
+                        and wn not in _CARGOS_SUBTEMA
+                        and wn not in _TOKENS_DEBILES_SUBTEMA_FALLBACK
+                        and wn not in _NUCLEOS_ACONTECIMIENTO
+                        and wn not in palabras_hecho          # no repetir el hecho
+                        and not _es_nombre_o_fragmento_marca(wn, self.marca, self.aliases)
+                        and wn not in {_normaliza_token(x) for x in self.aliases + [self.marca]}):
+                    objeto = wn
+                    break
+            if not objeto:
+                continue
+            if _parece_adjetivo_es(objeto) or objeto in {"alta", "alta", "compleja"}:
+                # 'Cirugía compleja': el adjetivo va pegado, no tras 'de'. Si el
+                # objeto es un participio verbal ('trasladada'), no sirve de objeto.
+                if objeto.startswith(("activ", "traslad", "atend", "realiz", "llev",
+                                      "somet", "oper", "trat", "intern", "hosp", "ingres")):
+                    continue
+                frase = f"{hecho} {_ADJ_POSIBLE.get(objeto, objeto)}"
+            else:
+                frase = f"{hecho} de {objeto}"
+                nxt = ""
+                seg2 = seg[seg.find(objeto) + len(objeto):]
+                for w in re.findall(r"[a-z]+", seg2):
+                    if w != objeto and _parece_adjetivo_es(w):
+                        nxt = w
+                        break
+                if nxt and len(f"{frase} {nxt}".split()) <= MAX_PALABRAS_SUBTEMA:
+                    frase = f"{frase} {nxt}"
+            frase = capitalizar_etiqueta(_sanear_frase_nominal(frase))
+            if (_frase_esta_completa(frase) and len(frase.split()) >= 2
+                    and not _es_etiqueta_generica(frase)
+                    and not _es_nombre_o_fragmento_marca(frase, self.marca, self.aliases)):
+                return frase
         return ""
 
     def _construir_frase_accion(self, titulos, resumenes):
@@ -3644,32 +3862,48 @@ class ClasificadorSubtema:
 
     def _fallback(self, titulos, resumenes=None):
         """Última red: SIEMPRE deriva una etiqueta del texto real (Título / Resumen-Aclaración).
-        Nunca devuelve rótulos genéricos tipo 'Cobertura de información relevante'."""
+        Nunca devuelve rótulos genéricos tipo 'Cobertura de información relevante'.
+        Cada candidato se valida ANTES de devolverse (estructura de subtema real,
+        sin titulares copiados, sin cabezas inventadas). Para los casos del cliente,
+        la oración del RESUMEN (donde suele vivivir la mención) tiene prioridad."""
         titulos = [t for t in (titulos or []) if t is not None and str(t).strip() and str(t).strip().lower() != 'nan']
         resumenes = [r for r in (resumenes or []) if r is not None and str(r).strip()]
+        fuentes = list(titulos) + list(resumenes)
+
+        def _sirve(et):
+            return (et and _validar_estructura_subtema(et)
+                    and not _es_etiqueta_generica(et)
+                    and not _es_nombre_o_fragmento_marca(et, self.marca, self.aliases)
+                    and _head_anclada(et, fuentes))
 
         # 1) Extracción LLM estricta: frase armada SOLO con palabras del texto.
         et = self._extraer_desde_texto(titulos, resumenes)
-        if et and not _es_etiqueta_generica(et):
+        if _sirve(et):
+            return et
+        # 1b) La oración del RESUMEN es la fuente del hecho del cliente: derivar
+        #     de ella directamente da subtemas como 'Atención de urgencia' en lugar
+        #     de recortar el titular.
+        et = self._derivar_desde_texto_nominal(resumenes or titulos, fuentes, es_resumen=True)
+        if _sirve(et):
             return et
 
         # 2) Frase nominal derivada del título más representativo (100% grounded).
         et = self._derivar_desde_titulos(titulos)
-        if et and not _es_etiqueta_generica(et):
+        if _sirve(et):
             return et
 
         # 3) Acción detectada + palabras clave del texto (100% grounded).
         et = self._construir_frase_accion(titulos, resumenes)
-        if et and not _es_etiqueta_generica(et):
+        if _sirve(et):
             return et
 
         # 4) Palabras de contenido más frecuentes (aún grounded, exige 2+ palabras reales).
         et = self._palabra_clave_mas_frecuente(titulos, resumenes)
-        if et and not _es_etiqueta_generica(et):
+        if _sirve(et):
             return et
 
-        # 5) Última red absoluta: fragmento del propio título/resumen. Nunca 'Sin tema'
-        #    mientras exista algo de texto real.
+        # 5) Última red: oración que menciona al cliente en el resumen/título, si
+        #    existe, recortada a frase nominal válida; sino fragmento del texto.
         return self._derivar_ultimo_recurso(titulos, resumenes)
 
     def _consolidar_sinonimos_llm(self, subtemas_unicos):
