@@ -140,6 +140,16 @@ _VERBOS_LEAD_SUBTEMA = {
     "asume", "asumen", "asumio", "asumieron", "posesiona", "posesionan", "posesiono",
     "nombra", "nombran", "nombro", "nombramiento", "designa", "designan", "designo",
     "designacion", "representante", "representa", "representan", "dimite", "dimitio",
+    # Verbos inequívocos que faltaban y encabezaban etiquetas ('Investiga a ...').
+    "investiga", "investigan", "investigo", "investigaron", "indaga", "indagan",
+    "sanciona", "sancionan", "sanciono", "cuestiona", "cuestionan", "cuestiono",
+    "critica", "critican", "rechaza", "rechazan", "rechazo", "aprueba", "aprueban",
+    "advierte", "advierten", "confirma", "confirman", "confirmo", "revela", "revelan",
+    "asegura", "aseguran", "explica", "explican", "afirma", "afirman", "sostiene",
+    "sostienen", "responde", "responden", "niega", "niegan", "acusa", "acusan",
+    "exige", "exigen", "pide", "piden", "denuncian", "demandan", "multan",
+    "suspende", "suspenden", "cancela", "cancelan", "retira", "retiran",
+    "amplia", "amplian", "reduce", "reducen", "cierra", "cierran", "reabre",
 }
 
 _RE_VERBO_SUBTEMA = re.compile(
@@ -908,6 +918,62 @@ _ETIQUETAS_GENERICAS_INVALIDAS = {
     "actividad corporativa", "gestion corporativa",
     "impacto en la reputacion", "impacto reputacional",
     "reputacion corporativa", "impacto corporativo",
+    # ── Rótulos "de relleno" que el modelo inventa cuando no deriva el hecho ──
+    # (el usuario los reporta explícitamente: "destacados del sector" y variantes)
+    "destacados del sector", "destacados sectoriales", "destacados del gremio",
+    "panorama del sector", "panorama sectorial", "panorama general",
+    "actualidad del sector", "actualidad sectorial", "actualidad empresarial",
+    "actualidad institucional", "actividad institucional", "actividad del sector",
+    "noticias del sector", "noticias sectoriales", "informacion del sector",
+    "contexto del sector", "contexto general", "contexto general del sector",
+    "situacion del sector", "dinamica del sector", "temas del sector",
+    "sector", "sectorial", "el sector", "del sector",
+    "menciones de la marca", "mencion de la marca", "menciones en medios",
+    "presencia en medios", "presencia mediatica", "cobertura mediatica",
+    "cobertura en medios", "apariciones en medios", "vision general",
+    "resumen de noticias", "resumen informativo", "diversos temas",
+    "otros temas", "temas varios", "aspectos generales", "generalidades",
+    "declaraciones", "declaraciones de la marca", "comunicado de la marca",
+}
+
+# Patrones de etiqueta-relleno: no describen un HECHO, solo el marco/soporte.
+# REGLA ESTRUCTURAL, NO LÉXICA POR SECTOR: la etiqueta es relleno si su CABEZA es
+# un marco informativo y su complemento es otro término de marco, seguido de
+# cualquier calificador de industria ('financiero', 'minero', 'público', 'avícola'...).
+# Así funciona para cualquier cliente sin listar sectores uno por uno.
+# OJO: el marco solo es relleno si NO va seguido de un asunto real. Por eso el
+# complemento debe ser vacío, un adjetivo de marco o un núcleo de marco; así
+# 'Cobertura de vacunación infantil' (subtema legítimo) NO se rechaza, pero
+# 'Cobertura en medios' / 'Panorama del sector financiero' sí.
+_ADJ_MARCO = (r"general(?:es)?|informativ[oa]s?|mediatic[oa]s?|corporativ[oa]s?|"
+              r"institucional(?:es)?|sectorial(?:es)?|empresarial(?:es)?|"
+              r"relevantes?|importantes?|destacad[oa]s?|varios|varias|diversos|diversas")
+_NUC_MARCO = (r"sector(?:es)?|gremio(?:s)?|marca(?:s)?|medios?|mercado(?:s)?|industria(?:s)?|"
+              r"empresa(?:s)?|compania(?:s)?|noticia(?:s)?|informacion|informe(?:s)?|"
+              r"tema(?:s)?|actualidad|panorama|contexto|prensa|pais|colombia|region|"
+              r"entidad(?:es)?|institucion(?:es)?|organizacion(?:es)?|negocio(?:s)?|"
+              r"agenda|coyuntura|ambito|entorno|escenario|rubro|ramo|clientes?|publico")
+_RE_ETIQUETA_RELLENO = re.compile(
+    r"^(?:destacad[oa]s?|panorama|actualidad|generalidades|vision|resumen|"
+    r"contexto|situacion|dinamica|coyuntura|menciones?|presencia|cobertura|aparicion(?:es)?|"
+    r"informacion|noticias?|novedades|tema|temas|aspectos?|otros|otras|varios|diversos)"
+    r"(?:\s+(?:" + _ADJ_MARCO + r"))*"
+    r"(?:\s+(?:de|del|de\s+la|en|sobre|para|al|a)\s+"
+    r"(?:la\s+|el\s+|los\s+|las\s+)?(?:" + _NUC_MARCO + r")"
+    # Calificador de industria/ámbito: CUALQUIER palabra (financiero, minero,
+    # público, avícola, energético...). No aporta hecho, solo nombra el rubro.
+    r"(?:\s+[a-z]+){0,2}"
+    r")?\s*$",
+    re.IGNORECASE,
+)
+
+# Núcleos que por sí solos NO son un hecho: si la etiqueta es solo marco + lugar
+# o marco + 'sector/marca/medios', es relleno.
+_NUCLEOS_RELLENO_SUBTEMA = {
+    "sector", "sectores", "gremio", "gremios", "marca", "marcas", "medios",
+    "mercado", "industria", "empresa", "empresas", "compania", "companias",
+    "noticia", "noticias", "informacion", "informe", "cobertura", "presencia",
+    "mencion", "menciones", "actualidad", "panorama", "contexto", "generalidades",
 }
 # Rótulos que jamás deben quedar como subtema final (marcadores vacíos o genéricos).
 # Una sola palabra REAL extraída del texto Sí vale, nunca el placeholder 'Sin tema'.
@@ -916,16 +982,120 @@ _PLACEHOLDER_SUBTEMA = _ETIQUETAS_GENERICAS_INVALIDAS | {
 }
 
 
+# Sustantivos de ACONTECIMIENTO: denotan que algo PASÓ. Se distinguen de los
+# nombres de materia/rubro ('salud', 'educación', 'tecnología'), que describen un
+# campo pero no un hecho. Sirve para exigir que la etiqueta diga QUÉ PASÓ, en
+# cualquier cliente y sector.
+_NUCLEOS_ACONTECIMIENTO = {
+    "alza", "aumento", "incremento", "subida", "reduccion", "caida", "baja",
+    "descenso", "disminucion", "crecimiento", "contraccion",
+    "convenio", "alianza", "acuerdo", "pacto", "cooperacion", "colaboracion",
+    "memorando", "consorcio", "negociacion",
+    "inversion", "expansion", "ampliacion", "adquisicion", "compra", "venta",
+    "fusion", "capitalizacion", "financiamiento", "financiacion", "credito",
+    "lanzamiento", "estreno", "presentacion", "apertura", "inauguracion",
+    "reapertura", "activacion", "cierre", "suspension", "clausura", "cancelacion",
+    "investigacion", "indagacion", "denuncia", "demanda", "sancion", "multa",
+    "condena", "querella", "imputacion", "fallo", "sentencia", "auditoria",
+    "litigio", "captura", "allanamiento", "extincion",
+    "premio", "reconocimiento", "galardon", "distincion", "condecoracion",
+    "certificacion", "acreditacion", "homenaje", "ranking",
+    "nombramiento", "designacion", "posesion", "renuncia", "dimision", "relevo",
+    "sucesion", "eleccion", "votacion", "asamblea",
+    "reforma", "regulacion", "ley", "decreto", "norma", "normativa", "resolucion",
+    "aprobacion", "rechazo", "veto", "sancion presidencial",
+    "obra", "construccion", "restauracion", "rehabilitacion", "remodelacion",
+    "modernizacion", "renovacion", "mantenimiento", "instalacion", "adecuacion",
+    "crisis", "emergencia", "desastre", "sismo", "terremoto", "inundacion",
+    "incendio", "derrame", "accidente", "colapso", "falla", "fallas",
+    "racionamiento", "apagon", "paro", "bloqueo", "protesta", "marcha", "huelga",
+    "brote", "contagio", "epidemia", "pandemia", "vacunacion", "intoxicacion",
+    "balance", "resultados", "utilidad", "utilidades", "ingresos", "perdidas",
+    "ganancias", "rentabilidad", "presupuesto", "recaudo", "deficit", "superavit",
+    "campana", "publicidad", "patrocinio", "comunicado", "declaracion",
+    "donacion", "solidaridad", "ayuda", "apoyo", "voluntariado", "asistencia",
+    "empleo", "contratacion", "capacitacion", "formacion", "despidos", "vacantes",
+    "estudio", "informe", "encuesta", "analisis", "diagnostico", "evaluacion",
+    "foro", "congreso", "cumbre", "feria", "seminario", "taller", "encuentro",
+    "conversatorio", "jornada", "evento", "festival", "concierto",
+    "proyecto", "programa", "plan", "iniciativa", "estrategia", "convocatoria",
+    "licitacion", "adjudicacion", "contrato", "concesion",
+    "exportaciones", "importaciones", "produccion", "consumo", "demanda",
+    "oferta", "ventas", "precio", "precios", "tarifa", "tarifas", "costo", "costos",
+    "subasta", "remate", "escasez", "desabastecimiento", "abastecimiento",
+    "beca", "becas", "matricula", "graduacion", "publicacion", "hallazgo",
+    "descubrimiento", "acuerdo comercial", "alianza estrategica",
+}
+
+
+def _es_calificador_de_ambito(token) -> bool:
+    """¿El token es un simple calificador de industria/ámbito, sin hecho propio?
+
+    Detección MORFOLÓGICA, independiente del cliente: los adjetivos relacionales
+    de sector en español terminan en -ero/-era, -ario/-aria, -ico/-ica, -al,
+    -ivo/-iva, -ano/-ana, -uario, -ista, -tor/-tora ('financiero', 'minero',
+    'portuario', 'energético', 'institucional', 'automotor', 'avícola').
+    Así 'Destacados del sector X' se rechaza para CUALQUIER sector, sin listarlos.
+
+    No marca sustantivos de hecho ('convenio', 'inversión'): esos se protegen con
+    `_es_cabeza_subtema_valida` antes de aplicar el sufijo.
+    """
+    w = _normaliza_token(str(token or ""))
+    if not w or len(w) < 4:
+        return False
+    if w in {"general", "generales", "relevante", "relevantes", "importante",
+             "importantes", "nacional", "nacionales", "internacional", "regional",
+             "local", "publico", "publica", "privado", "privada", "global"}:
+        return True
+    if _es_cabeza_subtema_valida(w):
+        return False        # es un sustantivo de hecho: NO es simple calificador
+    if w in _SUSTANTIVOS_SEGUROS_FINALES:
+        return False
+    return bool(re.search(
+        r"(?:ero|era|eros|eras|ario|aria|arios|arias|uario|uaria|"
+        r"ico|ica|icos|icas|ivo|iva|ivos|ivas|al|ales|"
+        r"ano|ana|anos|anas|ista|istas|tor|tora|tores|"
+        r"ense|enses|il|iles|ola|olas|udo|uda)$", w))
+
+
 def _es_etiqueta_generica(etiqueta) -> bool:
     """True si la etiqueta es un rótulo genérico/vacío (p. ej. 'Cobertura de
-    información relevante') o una sola palabra sin hecho concreto."""
+    información relevante', 'Destacados del sector') o una sola palabra sin hecho
+    concreto. Un subtema debe nombrar un HECHO, no el marco ni el soporte."""
     if not etiqueta or not str(etiqueta).strip():
         return True
     n = re.sub(r"[^a-z0-9\s]", " ", unidecode(str(etiqueta).lower()))
     n = re.sub(r"\s+", " ", n).strip()
     if not n or n in _ETIQUETAS_GENERICAS_INVALIDAS:
         return True
-    return len(n.split()) <= 1
+    if len(n.split()) <= 1:
+        return True
+    # Rótulo-relleno: empieza por un marco informativo ('destacados', 'panorama',
+    # 'actualidad', 'menciones'...) y no aporta un hecho.
+    if _RE_ETIQUETA_RELLENO.match(n):
+        return True
+    # 'Sector/Mercado/Industria + <rubro>' sin hecho: 'Sector salud', 'Sector
+    # tecnológico', 'Mercado asegurador'. La cabeza es el marco y el resto solo
+    # nombra el rubro -> no dice QUÉ PASÓ. Vale para cualquier cliente.
+    if re.match(r"^(?:sector(?:es)?|mercado(?:s)?|industria(?:s)?|gremio(?:s)?|"
+                r"rubro|ramo|ambito|entorno|negocio(?:s)?)\b", n):
+        resto = [t for t in n.split()[1:] if t not in _CONECTORES_ETIQUETA and len(t) >= 3]
+        # 'Sector <rubro>' nunca dice QUÉ PASÓ: solo hay hecho si aparece un
+        # sustantivo de acontecimiento (alza, convenio, sanción...). Los nombres de
+        # rubro ('salud', 'tecnológico', 'asegurador') NO cuentan como hecho.
+        if not any(t in _NUCLEOS_ACONTECIMIENTO for t in resto):
+            return True
+    # 'Marco + núcleo vacío': todos los tokens de contenido son marco/soporte o
+    # meros calificadores de industria/ámbito ('Temas del sector financiero').
+    # Se detecta por MORFOLOGÍA (sufijos de adjetivo relacional), no por una lista
+    # de sectores: funciona igual para minero, portuario, avícola o farmacéutico.
+    contenido = [t for t in n.split() if t not in _CONECTORES_ETIQUETA and len(t) >= 3]
+    if contenido and all(
+        (t in _NUCLEOS_RELLENO_SUBTEMA or _es_calificador_de_ambito(t))
+        for t in contenido
+    ):
+        return True
+    return False
 
 
 _PATRON_LOCATIVO_FINAL = re.compile(
@@ -990,6 +1160,251 @@ def _quitar_locativos_finales(frase):
         if not m:
             return s
         s = s[:m.start()].strip()
+
+
+# Sustantivos que terminan en -o/-an/-en y son núcleo válido al final de la
+# etiqueta: sin esta lista blanca, la limpieza de verbos los cortaría.
+_SUSTANTIVOS_SEGUROS_FINALES = {
+    "pollo", "huevo", "precio", "costo", "consumo", "mercado", "gremio", "sector",
+    "empleo", "servicio", "producto", "proyecto", "convenio", "acuerdo", "premio",
+    "reconocimiento", "nombramiento", "lanzamiento", "financiamiento", "crecimiento",
+    "aumento", "incremento", "descuento", "documento", "instrumento", "presupuesto",
+    "impuesto", "contrato", "decreto", "informe", "balance", "estudio", "cambio",
+    "riesgo", "trabajo", "salario", "ingreso", "egreso", "recurso", "proceso",
+    "acceso", "negocio", "comercio", "turismo", "periodismo", "programa", "sistema",
+    "problema", "esquema", "plan", "pan", "tren", "examen", "origen", "margen",
+    "volumen", "resumen", "comun", "dictamen", "certamen", "orden", "aval", "grano",
+    "terreno", "gobierno", "cuaderno", "invierno", "puerto", "aeropuerto", "distrito",
+    "municipio", "territorio", "laboratorio", "inventario", "salario", "horario",
+    "usuario", "beneficiario", "empresario", "ganado", "mercadeo", "bono", "fondo",
+    "predio", "credito", "deficit", "vehiculo", "articulo", "capitulo", "titulo",
+    "kilo", "kilos", "litro", "litros", "peso", "pesos", "dato", "datos",
+    # ── Recursos y materias (cualquier cliente extractivo/agro) ────────────────
+    # Sustantivos que terminan en vocal y NO deben tratarse como verbos ni
+    # calificadores de rubro: petróleo, carbón, oro, cobre, acero, cemento, etc.
+    "petroleo", "petroleos", "carbon", "carbones", "oro", "oras", "cobre", "cobres",
+    "acero", "aceros", "cemento", "cementos", "niquel", "niqueles", "platino",
+    "esmeralda", "esmeraldas", "sal", "sales", "gas", "gases", "crudo", "crudos",
+    "gasolina", "gasolinas", "diesel", "granos", "cafe", "cafes", "cacao", "cacaos",
+    "algodon", "arroz", "maiz", "trigo", "soya", "papa", "platanos", "banano",
+    "flores", "carne", "carnes", "leche", "lacteos", "azucar", "panela", "tabaco",
+    "madera", "maderas", "arena", "grava", "arcilla", "caliza", "fosfato", "ureas",
+    "hidrogeno", "litio", "litios", "zinc", "plomo", "estano", "mercurio",
+    "polvora", "explosivos", "fertilizantes", "agroquimicos", "semillas",
+} | {  # áridos y minerales con acentos
+    "petróleo", "carbón", "níquel", "plátano", "azúcar", "energía", "eléctrica",
+}
+
+def _es_forma_verbal_es(token) -> bool:
+    """¿El token es una forma verbal conjugada? Detección MORFOLÓGICA, para no
+    depender de una lista cerrada de verbos (que siempre deja huecos por sector).
+
+    Reconoce futuros (-rá/-rán), pretéritos (-ó/-aron/-ieron), presentes de 3ª
+    (-a/-an/-e/-en tras raíz verbal), gerundios (-ando/-iendo) y participios.
+    Protege sustantivos con `_SUSTANTIVOS_SEGUROS_FINALES` y los núcleos de hecho.
+    """
+    w = _normaliza_token(str(token or ""))
+    if not w or len(w) < 4:
+        return False
+    if w in _SUSTANTIVOS_SEGUROS_FINALES or w in _NUCLEOS_ACONTECIMIENTO:
+        return False
+    if _es_cabeza_subtema_valida(w):
+        return False
+    if w in _VERBOS_LEAD_SUBTEMA or _RE_VERBO_SUBTEMA.fullmatch(w):
+        return True
+    # Futuro / condicional: invertira, construira, pagaria
+    if re.search(r"(?:ara|era|ira|aran|eran|iran|aria|erian|irian)$", w) and len(w) >= 7:
+        return True
+    # Pretérito perfecto simple 3ª persona: invirtio, afecto, presento, aumentaron
+    if re.search(r"(?:aron|ieron|yeron)$", w) and len(w) >= 6:
+        return True
+    # Gerundio
+    if re.search(r"(?:ando|iendo|yendo)$", w) and len(w) >= 6:
+        return True
+    # Presente 3ª persona de verbos en -ar/-er/-ir muy comunes en titulares:
+    # 'afecta', 'genera', 'supera'. Solo si la raíz no es un sustantivo conocido.
+    if re.search(r"(?:ecta|enera|upera|nvierte|eporta|resenta|nuncia|onfirma)$", w):
+        return True
+    return False
+
+
+def _quitar_verbos_finales(frase):
+    """Elimina verbos conjugados en cola: 'Precio del pollo subió' -> 'Precio del pollo'.
+    Un subtema debe ser una FRASE NOMINAL; un verbo final la convierte en titular."""
+    if not frase:
+        return frase
+    palabras = str(frase).split()
+    while palabras:
+        ultima = unidecode(palabras[-1].lower().rstrip(".,;:!?"))
+        if ultima in _VERBOS_LEAD_SUBTEMA or _RE_VERBO_SUBTEMA.fullmatch(ultima):
+            palabras.pop()
+            continue
+        break
+    # No dejes preposición/artículo colgando tras quitar el verbo.
+    while palabras and unidecode(palabras[-1].lower().rstrip(".,;:!?")) in _TRAILING_INCOMPLETE:
+        palabras.pop()
+    return " ".join(palabras)
+
+
+# Verbos en pasado/participio frecuentes en titulares que no deben quedar DENTRO
+# de la etiqueta ('Huevo aumentaron 8%'), más allá de los ya listados.
+_RE_VERBO_INTERNO_ETIQUETA = re.compile(
+    r"\b\w+(?:aron|ieron|aba|abia|aria|arian|ara|iera|ando|iendo|"
+    r"ado|ada|ados|adas|ido|ida|idos|idas|o|an|en)\b", re.IGNORECASE)
+
+
+def _sanear_frase_nominal(frase, max_palabras=None):
+    """Saneo único de una etiqueta candidata para que sea FRASE NOMINAL limpia:
+      - quita cifras/porcentajes y deícticos temporales ('8%', 'este año')
+      - quita verbos conjugados internos y finales
+      - quita locativos finales y preposiciones colgantes
+      - elimina locuciones adverbiales sueltas ('per cápita') que no son asunto
+    'Huevo aumentaron 8% este año' -> 'Exportaciones de huevo' (via el caller)."""
+    if not frase:
+        return ""
+    s = " ".join(str(frase).split())
+    # Locución 'per cápita' (y su resto 'capita'): modifica una cifra, no es asunto.
+    s = re.sub(r"\bper\s+c[aá]pita\b", " ", s, flags=re.IGNORECASE)
+    s = re.sub(r"(?<!\w)c[aá]pita(?!\w)", " ", s, flags=re.IGNORECASE)
+    s = " ".join(s.split())
+    # Cifras, porcentajes y montos: no describen la categoría.
+    s = re.sub(r"\b\d[\d.,]*\s*(?:%|por ciento|mil|millones?|billones?|kilos?|toneladas?)?\b",
+               " ", s, flags=re.IGNORECASE)
+    # Símbolos/unidades que quedan huérfanos tras borrar la cifra ('%', 'kg', 'm²').
+    s = re.sub(r"[%$€°]+", " ", s)
+    s = re.sub(r"\b(?:por ciento|puntos porcentuales|kg|kilos?|toneladas?|"
+               r"millones?|billones?|mil)\b", " ", s, flags=re.IGNORECASE)
+    # Deícticos temporales.
+    s = re.sub(r"\b(?:este|esta|estos|estas|el|la)\s+(?:ano|año|mes|semana|dia|día|"
+               r"trimestre|semestre|periodo)\b", " ", s, flags=re.IGNORECASE)
+    # Periodo suelto tras preposición ('de trimestre', 'en semestre'): no es asunto.
+    s = re.sub(r"\b(?:de|del|en|al|para)\s+(?:ano|año|mes|semana|dia|día|trimestre|"
+               r"semestre|periodo|bimestre|quincena)\b", " ", s, flags=re.IGNORECASE)
+    s = re.sub(r"\b(?:hoy|ayer|manana|mañana|actualmente|recientemente)\b", " ", s,
+               flags=re.IGNORECASE)
+    s = " ".join(s.split())
+    # Verbos conjugados internos (mantiene sustantivos como 'mercado', 'estado').
+    palabras, limpias = s.split(), []
+    for w in palabras:
+        wn = unidecode(w.lower().rstrip(".,;:!?"))
+        if wn in _VERBOS_LEAD_SUBTEMA or _RE_VERBO_SUBTEMA.fullmatch(wn) or _es_forma_verbal_es(wn):
+            continue
+        limpias.append(w)
+    s = " ".join(limpias) if limpias else s
+    # Preposiciones/artículos consecutivos tras quitar palabras ('a por', 'de en').
+    toks, comp = s.split(), []
+    for w in toks:
+        wn = unidecode(w.lower().rstrip(".,;:!?"))
+        if comp and wn in _CONECTORES_ETIQUETA:
+            prev = unidecode(comp[-1].lower().rstrip(".,;:!?"))
+            if prev in _CONECTORES_ETIQUETA:
+                continue          # 'a por' -> 'por'
+        comp.append(w)
+    s = " ".join(comp)
+    s = _recortar_frase_completa(s, max_palabras or MAX_PALABRAS_SUBTEMA)
+    s = _quitar_locativos_finales(s)
+    s = _quitar_verbos_finales(s)
+    # Verbo conjugado en cola no listado ('llegó', 'alcanzó', 'creció'): si la
+    # última palabra tiene forma verbal clara y la frase mantiene ≥2 palabras, se cae.
+    toks = s.split()
+    if len(toks) >= 3:
+        ult = unidecode(toks[-1].lower().rstrip(".,;:!?"))
+        if (len(ult) >= 4 and re.search(r"(?:o|aron|ieron|ara|era|ira|an|en)$", ult)
+                and ult not in _SUSTANTIVOS_SEGUROS_FINALES
+                and not _es_cabeza_subtema_valida(ult)):
+            toks = toks[:-1]
+            s = " ".join(toks)
+    # Preposición inicial huérfana tras la limpieza.
+    toks = s.split()
+    while toks and unidecode(toks[0].lower()) in _CONECTORES_ETIQUETA:
+        toks.pop(0)
+    # Preposición final huérfana.
+    while toks and unidecode(toks[-1].lower().rstrip(".,;:!?")) in _TRAILING_INCOMPLETE:
+        toks.pop()
+    # Cola 'preposición + término de marco' sin valor ('... a industria', '... del sector'):
+    # el asunto ya está en la cabeza; la cola solo repite el ámbito.
+    if len(toks) >= 4:
+        cola = unidecode(" ".join(toks[-2:]).lower())
+        if re.fullmatch(r"(?:a|al|de|del|en|para|con|sobre)\s+"
+                        r"(?:la\s+|el\s+|los\s+|las\s+)?(?:" + _NUC_MARCO + r")", cola):
+            toks = toks[:-2]
+            while toks and unidecode(toks[-1].lower().rstrip(".,;:!?")) in _TRAILING_INCOMPLETE:
+                toks.pop()
+    return " ".join(toks).strip()
+
+
+# ── Concordancia mínima para armar frases nominales idiomáticas ───────────────
+_SUSTANTIVOS_MASC_SING_COMUNES = {
+    "precio", "costo", "consumo", "mercado", "producto", "proyecto", "convenio",
+    "acuerdo", "premio", "reconocimiento", "informe", "balance", "estudio",
+    "pollo", "huevo", "sector", "gremio", "empleo", "servicio", "programa",
+    "plan", "foro", "congreso", "evento", "lanzamiento", "nombramiento",
+    "cierre", "aumento", "incremento", "descenso", "sistema", "modelo",
+}
+_TERMINACIONES_ADJETIVO = (
+    "ico", "ica", "icos", "icas", "ivo", "iva", "ivos", "ivas",
+    "oso", "osa", "osos", "osas", "able", "ible", "ables", "ibles",
+    "al", "ales", "ante", "antes", "iente", "ientes", "ario", "aria",
+    "arios", "arias", "ense", "enses", "il", "iles",
+    # Gentilicios y relacionales: 'caleños', 'bogotanos', 'andina'
+    "eno", "ena", "enos", "enas", "ano", "ana", "anos", "anas",
+    "ino", "ina", "inos", "inas",
+)
+_NO_ADJETIVOS = {
+    "digital", "ambiental", "nacional", "regional", "local", "social", "laboral",
+    "hospital", "capital", "animal", "canal", "personal", "material", "total",
+    "general", "central", "final", "legal", "fiscal", "sanitario", "avicola",
+    "plan", "pollo", "huevo", "grano", "mercado", "estado", "gobierno",
+    "programa", "sistema", "problema", "empresario", "empresarios",
+    "usuario", "usuarios", "beneficiario", "beneficiarios", "diario",
+    "ciudadano", "ciudadanos", "colombiano", "colombianos", "campesino",
+    "campesinos", "vecino", "vecinos", "alumno", "alumnos", "terreno",
+}
+
+
+def _es_cabeza_subtema_valida(token) -> bool:
+    """¿El token es un sustantivo de evento que puede encabezar el subtema?
+    Compara por stem Y por prefijo, porque _stem_es no une siempre singular y
+    plural ('exportaciones' -> 'export' vs 'exportacion' -> 'exportacion')."""
+    w = _normaliza_token(str(token or ""))
+    if not w or len(w) < 4:
+        return False
+    if w in _CABEZAS_SUBTEMA_VALIDAS:
+        return True
+    sw = _stem_es(w)
+    for h in _CABEZAS_SUBTEMA_VALIDAS:
+        if len(h) < 4:
+            continue
+        sh = _stem_es(h)
+        if sw == sh or w == h:
+            return True
+        # prefijo común largo: exportacion/exportaciones, inversion/inversiones
+        base = min(len(sw), len(sh))
+        if base >= 5 and (sw.startswith(sh[:base]) or sh.startswith(sw[:base])):
+            return True
+    return False
+
+
+def _parece_adjetivo_es(palabra) -> bool:
+    """Heurística: ¿la palabra es un adjetivo? Evita 'Explotación de sexual'.
+    Los adjetivos van pegados al sustantivo, no tras preposición."""
+    w = _normaliza_token(str(palabra or ""))
+    if not w or len(w) < 4:
+        return False
+    if w in _NO_ADJETIVOS or w in _SUSTANTIVOS_MASC_SING_COMUNES:
+        return False
+    if _es_cabeza_subtema_valida(w):
+        return False        # es un sustantivo de evento conocido
+    return w.endswith(_TERMINACIONES_ADJETIVO)
+
+
+def _preposicion_de(palabra) -> str:
+    """'de' + 'el' -> 'del' cuando el complemento es masculino singular común.
+    Da 'Alza del precio' en lugar del más pobre 'Alza de precio'."""
+    w = _normaliza_token(str(palabra or ""))
+    if w in _SUSTANTIVOS_MASC_SING_COMUNES:
+        return "del"
+    return "de"
 
 
 _ACCIONES_OPUESTAS = [
@@ -1354,6 +1769,16 @@ def _safe_filename_part(value):
     return cleaned.strip('_') or 'marca'
 
 _TERMINAL_PUNCT = re.compile(r'[.!?…]')
+# Fin de oración REAL: excluye decimales (1.6), miles (3.200), siglas (S.A.S.),
+# abreviaturas comunes y URLs. Antes '1.6 litros' cortaba el contexto en '1.'.
+_RE_FIN_ORACION_REAL = re.compile(
+    r'(?<![A-Z])'                     # no tras inicial de sigla: 'J. Pérez'
+    r'(?<!\b[Ss]r)(?<!\b[Ss]ra)(?<!\b[Dd]r)(?<!\b[Dd]ra)'
+    r'(?<!\bEE\.\sUU)(?<!\bpág)(?<!\bNo)(?<!\bnúm)(?<!\betc)'
+    r'[.!?…]+'
+    r'(?!\d)'                         # no seguido de dígito: 1.6 / 3.200
+    r'(?=\s+[«"“(¿¡A-ZÁÉÍÓÚÑ0-9]|\s*$)'   # arranca oración nueva o fin de texto
+)
 MIN_PALABRAS_CONTEXTO = 10
 # Contexto amplio: más caracteres alrededor de la mención de la marca/alias para un análisis
 # más preciso de tono y subtema (el usuario pidió ampliarlo). ~600 carácter. mínimos garantizados,
@@ -1365,7 +1790,7 @@ def _texto_hasta_terminal(texto, n=1):
     """Recorta 'texto' para que termine justo tras el enésimo signo de cierre (punto)."""
     if not texto:
         return ""
-    for m in _TERMINAL_PUNCT.finditer(texto):
+    for m in _RE_FIN_ORACION_REAL.finditer(texto):
         n -= 1
         if n == 0:
             return texto[:m.end()].strip(" \n\t")
@@ -1405,7 +1830,10 @@ def _extraer_parrafo_marca(fuente, marca, aliases):
         parrafos = [fuente.strip()]
     con_hits = [i for i, p in enumerate(parrafos) if _menciona_marca_o_alias(p, marca, aliases)]
     if not con_hits:
-        return ""
+        # Respaldo por ORACIÓN: el párrafo puede ser demasiado largo o venir sin
+        # saltos, pero la mención existe en alguna oración. Se devuelve la oración
+        # con la marca más su vecina, para no perder el fragmento a analizar.
+        return _extraer_oracion_marca(fuente, marca, aliases)
     i = con_hits[0]  # primer párrafo que menciona la marca
     partes = [parrafos[i]]
     acum = len(parrafos[i])
@@ -1422,6 +1850,36 @@ def _extraer_parrafo_marca(fuente, marca, aliases):
     tramo = " ".join(p for p in partes if p).strip()
     return tramo[:MAX_CONTEXTO_CHARS]
 
+
+_RE_FIN_ORACION = _RE_FIN_ORACION_REAL
+
+
+def _extraer_oracion_marca(fuente, marca, aliases):
+    """Fragmento centrado en la ORACIÓN que menciona la marca (+ la siguiente).
+    Segundo nivel de extracción cuando la división por párrafos no encuentra la
+    mención: garantiza que el tono se evalúe sobre el texto donde aparece el
+    cliente, en lugar de devolver '' (que antes forzaba 'Neutro' sin análisis)."""
+    txt = " ".join(str(fuente or "").split())
+    if not txt:
+        return ""
+    oraciones = [o.strip() for o in _RE_FIN_ORACION_REAL.split(txt) if o and o.strip()]
+    if not oraciones:
+        oraciones = [txt]
+    idx = next((k for k, o in enumerate(oraciones)
+                if _menciona_marca_o_alias(o, marca, aliases)), None)
+    if idx is None:
+        return ""
+    partes = [oraciones[idx]]
+    acum = len(oraciones[idx])
+    # Contexto inmediato: oración siguiente y, si sigue corto, la anterior.
+    if idx + 1 < len(oraciones) and acum < CONTEXTO_MIN_CHARS:
+        partes.append(oraciones[idx + 1])
+        acum += len(oraciones[idx + 1])
+    if idx > 0 and acum < CONTEXTO_MIN_CHARS:
+        partes.insert(0, oraciones[idx - 1])
+    return " ".join(partes).strip()[:MAX_CONTEXTO_CHARS]
+
+
 def _brand_audit(titulo, resumen, marca, aliases, cuerpo=None):
     d = extraer_contexto_marca_detallado(titulo, resumen, marca, aliases, cuerpo)
     return d['contexto'], d['coincidencia'], d['origen']
@@ -1429,7 +1887,13 @@ def _brand_audit(titulo, resumen, marca, aliases, cuerpo=None):
 def extraer_contexto_marca(titulo, resumen, marca, aliases=None, cuerpo=None, ventana=320):
     """Contexto analizado de la marca: párrafo completo desde su inicio hasta su
     punto final. Prioridad de fuentes: Cuerpo Completo → Resumen → Título. Si el
-    tramo queda muy corto, extiende hasta el segundo punto del texto siguiente."""
+    tramo queda muy corto, extiende hasta el segundo punto del texto siguiente.
+
+    El fragmento SIEMPRE se ancla en la mención del cliente. Si la marca aparece
+    solo en el título, se devuelve el título más la primera oración del resumen
+    (contexto mínimo para juzgar el impacto); si aparece solo en el resumen/cuerpo,
+    se devuelve ese fragmento. Nunca devuelve '' cuando la marca está en el texto.
+    """
     titulo   = clean_text(str(titulo or "")).strip()
     resumen  = clean_text(str(resumen or "")).strip()
     cuerpo   = clean_text(str(cuerpo or "")).strip()
@@ -1446,7 +1910,18 @@ def extraer_contexto_marca(titulo, resumen, marca, aliases=None, cuerpo=None, ve
             break
     if not fuente:
         return ""
-    return _extraer_parrafo_marca(fuente, marca, aliases)
+    ctx = _extraer_parrafo_marca(fuente, marca, aliases)
+    # La marca solo está en el TÍTULO: el título por sí solo suele ser muy corto
+    # para evaluar impacto; se añade la primera oración del resumen como apoyo.
+    if fuente == titulo and resumen:
+        apoyo = _texto_hasta_terminal(resumen, n=1)
+        if apoyo and apoyo not in ctx:
+            ctx = f"{ctx} {apoyo}".strip()
+    if not ctx:
+        # Última red: la marca se menciona partida entre título y resumen.
+        combinado = f"{titulo}. {resumen}".strip(" .")
+        ctx = _extraer_oracion_marca(combinado, marca, aliases)
+    return ctx[:MAX_CONTEXTO_CHARS]
 
 def extraer_contexto_marca_detallado(titulo, resumen, marca, aliases=None, cuerpo=None):
     """Return auditable brand match metadata for sentiment analysis."""
@@ -1829,6 +2304,9 @@ def construir_grafo_equivalencia(titulos, resumenes, contextos=None):
     tn = [norm_key(str(t or "")) for t in titulos]
     rn = [norm_key(str(r or "")) for r in resumenes] if resumenes is not None else None
     cn = [norm_key(str(c or "")) for c in contextos] if contextos is not None else None
+    # Tokens distintivos por título: exige asunto compartido antes de unir por
+    # similitud de cadena, para no pegar noticias distintas de redacción parecida.
+    tok = [_tokens_distintivos(str(t or "")) for t in titulos]
     for i in range(n):
         if not tn[i]:
             continue
@@ -1837,13 +2315,36 @@ def construir_grafo_equivalencia(titulos, resumenes, contextos=None):
             tj = tn[j]
             if not tj or dsu.find(i) == dsu.find(j):
                 continue
+            if _hay_conflicto_accion(str(titulos[i] or ""), str(titulos[j] or "")):
+                continue          # aprobación vs rechazo: nunca son la misma noticia
             igual = (ti == tj)
             if not igual and len(ti) >= 10 and len(tj) >= 10:
                 igual = (ti in tj or tj in ti)                     # mismo titular con/sin subtitulo
-            if not igual and SequenceMatcher(None, ti, tj).ratio() >= 0.88:
+            ratio_t = SequenceMatcher(None, ti, tj).ratio()
+            if not igual and ratio_t >= 0.88:
                 igual = True
-            if not igual and rn and rn[i] and rn[j] and SequenceMatcher(None, ti, tj).ratio() >= 0.80 and SequenceMatcher(None, rn[i], rn[j]).ratio() >= 0.70:
+            # CUERPO IDÉNTICO y sustancial = republicación con titular reescrito.
+            # Es la señal más fuerte de "misma noticia" y cubre el caso del usuario:
+            # el mismo despacho publicado por varios medios con otro titular.
+            # Se exige además asunto compartido (≥2 tokens distintivos o cobertura
+            # ≥0.5) para no unir notas distintas que comparten un cuerpo boilerplate.
+            if not igual and rn and rn[i] and rn[i] == rn[j] and len(rn[i]) >= 60:
+                comp = len(tok[i] & tok[j])
+                cob_t = comp / max(1, min(len(tok[i]), len(tok[j]))) if tok[i] and tok[j] else 0.0
+                if comp >= 2 or cob_t >= 0.5:
+                    igual = True
+            if not igual and rn and rn[i] and rn[j] and ratio_t >= 0.80 and SequenceMatcher(None, rn[i], rn[j]).ratio() >= 0.70:
                 igual = True                                       # titulo parecido Y cuerpo parecido
+            # Reescritura de titular con el MISMO asunto: los títulos comparten casi
+            # todos sus tokens distintivos y el cuerpo es muy parecido. Cubre el caso
+            # del usuario: "noticias iguales o muy parecidas deben compartir etiquetas".
+            if not igual and rn and rn[i] and rn[j] and tok[i] and tok[j]:
+                inter = len(tok[i] & tok[j])
+                jacc = inter / max(1, len(tok[i] | tok[j]))
+                cobertura = inter / max(1, min(len(tok[i]), len(tok[j])))
+                sim_cuerpo = SequenceMatcher(None, rn[i], rn[j]).ratio()
+                if (jacc >= 0.60 or cobertura >= 0.80) and sim_cuerpo >= 0.75:
+                    igual = True
             if not igual and cn and cn[i] and cn[i] == cn[j]:
                 igual = True                                       # mismo Contexto analizado
             if igual:
@@ -1908,15 +2409,49 @@ def aplicar_consistencia_grupos(df, titulo_col, resumen_col,
         freq = {v: vals.count(v) for v in order}
         return max(order, key=lambda v: (freq[v], -order.index(v)))
 
+    def _canon_par_mas_frecuente(idxs):
+        """Canoniza (Tema, Subtema) como PAR ATÓMICO.
+
+        Antes se elegía el Tema más frecuente y el Subtema más frecuente por
+        separado: si el grupo traía (A,x) y (B,y), el resultado podía ser (B,x),
+        un par que NUNCA existió en los datos -> 'subtema que no corresponde al
+        tema'. Ahora se vota el par completo, así el Tema siempre es el que
+        realmente acompañaba a ese Subtema.
+        """
+        vacios = ("nan", "none", "-", "n/a", "")
+        pares = []
+        for i in idxs:
+            sub = str(df.iloc[i][subtema_col]).strip() if subtema_col in df.columns else ""
+            tem = str(df.iloc[i][tema_col]).strip() if tema_col in df.columns else ""
+            if sub.lower() in vacios and tem.lower() in vacios:
+                continue
+            if _es_etiqueta_generica(sub) and sub.lower() not in vacios:
+                continue          # no dejes que un genérico gane la votación
+            pares.append((tem, sub))
+        if not pares:
+            return None
+        orden = []
+        for p in pares:
+            if p not in orden:
+                orden.append(p)
+        freq = {p: pares.count(p) for p in orden}
+        # Empate -> gana el par cuyo Tema y Subtema son ambos no vacíos y el más antiguo.
+        def _score(p):
+            completo = 1 if (p[0].strip().lower() not in vacios and p[1].strip().lower() not in vacios) else 0
+            return (freq[p], completo, -orden.index(p))
+        return max(orden, key=_score)
+
     for idxs in grupos_eq.values():
         if len(idxs) < 2:
             continue
-        for col in (subtema_col, tema_col):
-            if col in df.columns:
-                canon = _canon_mas_frecuente(idxs, col)
-                if canon:
-                    for i in idxs:
-                        df.at[df.index[i], col] = capitalizar_etiqueta(canon)
+        par = _canon_par_mas_frecuente(idxs)
+        if par:
+            tem_c, sub_c = par
+            for i in idxs:
+                if subtema_col in df.columns and sub_c.strip():
+                    df.at[df.index[i], subtema_col] = capitalizar_etiqueta(sub_c)
+                if tema_col in df.columns and tem_c.strip():
+                    df.at[df.index[i], tema_col] = capitalizar_etiqueta(tem_c)
         # Tono: Positivo/Negativo 'gana' sobre Neutro; conflicto Pos+Neg no se toca.
         if tono_col in df.columns:
             tvals = [str(df.iloc[i][tono_col]).strip().title() for i in idxs]
@@ -2107,7 +2642,21 @@ class ClasificadorTono:
                 ri, _ = seleccionar_representante(con_marca, contextos)
                 reps[cid] = (ri, contextos[ri])
             else:
-                reps[cid] = (idxs[0], "")
+                # Sin contexto extraído: NO se asume Neutro a ciegas. Si la marca
+                # aparece en título/resumen, se analiza ese texto (título + 1ª
+                # oración del resumen). Solo queda Neutro si no hay mención real.
+                ri = idxs[0]
+                respaldo = ""
+                for i in idxs:
+                    t_i = str(titulos.iloc[i] or "")
+                    r_i = str(resumenes.iloc[i] or "")
+                    if self._menciona_marca(t_i) or self._menciona_marca(r_i):
+                        combinado = f"{t_i}. {r_i}".strip(" .")
+                        respaldo = (_extraer_oracion_marca(combinado, self.marca, self.aliases)
+                                    or combinado[:MAX_CONTEXTO_CHARS])
+                        ri = i
+                        break
+                reps[cid] = (ri, respaldo)
         
         sem = asyncio.Semaphore(CONCURRENT_REQUESTS)
         cids = list(reps.keys())
@@ -2513,7 +3062,12 @@ class ClasificadorSubtema:
             "  - Dos sustantivos pegados sin preposición ('Guajira escenario', 'Colombia escudo').\n"
             "  - Adjetivo después de 'de' cuando debe ir pegado ('Explotación de sexual' es incorrecto; correcto: 'Explotación sexual').\n"
             "  - Etiquetas genéricas ('Cobertura de información relevante', 'Cobertura informativa general', "
-            "'Información relevante', 'Gestión corporativa', 'Actividad institucional').\n\n"
+            "'Información relevante', 'Gestión corporativa', 'Actividad institucional').\n"
+            "  - RÓTULOS DE RELLENO que describen el marco y no el hecho: 'Destacados del sector', "
+            "'Panorama del sector', 'Actualidad del sector', 'Noticias del sector', 'Menciones de la marca', "
+            "'Presencia en medios', 'Cobertura mediática', 'Contexto general', 'Otros temas', 'Aspectos generales'. "
+            "Si dudas, pregúntate: ¿mi etiqueta dice QUÉ PASÓ? Si solo dice DÓNDE se publicó o DE QUÉ SECTOR es, está mal.\n"
+            "  - Solo una palabra clave suelta ('Pollo', 'Precio'): debe ser una categoría, no un keyword.\n\n"
             f"TÍTULOS:\n" + "\n".join(f"  · {t}" for t in tm)
             + bloq_resumenes
             + bloq_contexto
@@ -2828,7 +3382,9 @@ class ClasificadorSubtema:
         return ""
 
     def _derivar_desde_titulos(self, titulos):
-        """Frase nominal tomada del título más representativo: 100% palabras del texto."""
+        """Frase nominal tomada del título más representativo: 100% palabras del texto.
+        La cabeza debe ser un SUSTANTIVO: si el título arranca por verbo, se
+        nominaliza con el núcleo de hecho ('investiga' -> 'Investigación por ...')."""
         for t in titulos:
             s = str(t).strip()
             if len(s) < 12 or len(s.split()) < 3:
@@ -2841,13 +3397,15 @@ class ClasificadorSubtema:
             toks = s.split()
             nombres = _nombres_propios_iniciales_titulo(t)
             i = 0
+            verbo_saltado = None
             while i < len(toks):
                 tok = toks[i].lower().rstrip('.,;:!?')
                 tn = unidecode(tok)
+                es_verbo = (tn in _VERBOS_LEAD_SUBTEMA or bool(_RE_VERBO_SUBTEMA.search(tn)))
                 if (re.match(r'^\d', tn)
                         or tn in _ARTICULOS_SUBTEMA
                         or tn in _CONECTORES_ETIQUETA
-                        or tn in _VERBOS_LEAD_SUBTEMA
+                        or es_verbo
                         or tn in _CARGOS_SUBTEMA
                         or tn in _TOKENS_DEBILES_SUBTEMA_FALLBACK
                         or tn in {"nuevo", "nueva", "nuevos", "nuevas", "gran", "grande", "grandes",
@@ -2855,22 +3413,64 @@ class ClasificadorSubtema:
                         or _PATRON_TITULAR.match(toks[i])
                         or _RE_VERBO_SUBTEMA.search(tn)
                         or (tn not in _CABEZAS_SUBTEMA_VALIDAS and tn in nombres)):
+                    if es_verbo and verbo_saltado is None:
+                        verbo_saltado = tn      # recuerda el hecho para nominalizar
                     i += 1
                     continue
                 break
             rest = toks[i:]
             if len(rest) < 2:
                 continue
-            frase = _recortar_frase_completa(" ".join(rest), MAX_PALABRAS_SUBTEMA)
-            frase = _quitar_locativos_finales(frase)
+            frase = _sanear_frase_nominal(" ".join(rest))
+            # Tras el saneo puede quedar un resto sin cabeza de hecho ('Gas a
+            # industria', 'Energía solar'): se re-ancla con el núcleo del texto
+            # ('Racionamiento de gas', 'Inversión en energía solar').
+            if frase:
+                toks_f = [_normaliza_token(w) for w in frase.split()]
+                tiene_hecho = any(t in _NUCLEOS_ACONTECIMIENTO or _es_cabeza_subtema_valida(t)
+                                  for t in toks_f if t)
+                if not tiene_hecho:
+                    nucleo = self._nucleo_hecho_de_texto(f"{t} {verbo_saltado or ''}")
+                    if nucleo and _normaliza_token(nucleo) not in set(toks_f):
+                        frase = _sanear_frase_nominal(
+                            f"{nucleo} {_preposicion_de(frase.split()[0])} {frase}")
+            # La cabeza no puede ser un adjetivo/adverbio suelto ('Per capita de pollo'):
+            # se antepone el núcleo de hecho detectado en el título.
+            if frase:
+                cabeza = unidecode(frase.split()[0].lower())
+                necesita_nucleo = (
+                    cabeza in _CONECTORES_ETIQUETA
+                    or cabeza in {"per", "mas", "menos", "muy", "solo", "casi", "tras"}
+                    or _parece_adjetivo_es(cabeza)
+                    or not _es_cabeza_subtema_valida(cabeza)
+                )
+                if necesita_nucleo:
+                    nucleo = self._nucleo_hecho_de_texto(f"{t} {verbo_saltado or ''}")
+                    if nucleo and _normaliza_token(nucleo) not in {
+                            _normaliza_token(w) for w in frase.split()}:
+                        frase = _sanear_frase_nominal(f"{nucleo} de {frase}")
+            # Locuciones adverbiales que no aportan asunto por sí solas.
+            if frase and re.fullmatch(r"(?i)\w+\s+de\s+per\s+capita", unidecode(frase)):
+                frase = _sanear_frase_nominal(frase.split()[0])
             if (_frase_esta_completa(frase) and len(frase.split()) >= 2
                     and not _es_nombre_o_fragmento_marca(frase, self.marca, self.aliases)
                     and not _es_etiqueta_generica(frase)):
                 return capitalizar_etiqueta(frase)
         return ""
 
+    def _nucleo_hecho_de_texto(self, texto):
+        """Sustantivo de hecho ('Investigación', 'Consumo', 'Alza') presente en el texto."""
+        tnorm = unidecode(str(texto or "").lower())
+        return next((nom for pat, nom in self._NUCLEOS_HECHO if re.search(pat, tnorm)), None)
+
     def _palabra_clave_mas_frecuente(self, titulos, resumenes):
-        """Último recurso: sustantivo de contenido más frecuente (siempre del texto)."""
+        """Sustantivos de contenido más frecuentes, unidos como FRASE NOMINAL real.
+
+        Antes devolvía el pegote 'precio pollo' / 'consumo pollo': dos keywords
+        pegadas, que es justo lo que el usuario rechaza ("subtemas que son solo
+        palabras clave"). Ahora se antepone un núcleo de hecho y se inserta la
+        preposición, produciendo 'Precio del pollo' o 'Alza del precio del pollo'.
+        """
         excluir = STOPWORDS_ES | _VERBOS_LEAD_SUBTEMA | _CARGOS_SUBTEMA | _TRAILING_INCOMPLETE | {
             "noticia", "noticias", "informe", "informacion", "comunicado", "nota",
             "colombia", "pais", "nacional", "regional", "local", "sector", "empresa",
@@ -2896,9 +3496,105 @@ class ClasificadorSubtema:
                     if len(norm) >= 4 and norm not in excluir and not _RE_VERBO_SUBTEMA.search(norm):
                         cnt[norm] += 1
                         origen.setdefault(norm, w)
-        if cnt:
-            top = [origen[n] for n, _ in cnt.most_common(2)]
-            return ' '.join(w.lower() for w in top)
+        if not cnt:
+            return ''
+        tops = [origen[n] for n, _ in cnt.most_common(3)]
+        return self._frase_nominal_desde_tokens(tops, titulos, resumenes)
+
+    # ── Construcción de FRASE NOMINAL (evita pegotes de keywords) ───────────────
+    # Núcleo de hecho detectado en el texto → se usa como cabeza de la etiqueta.
+    _NUCLEOS_HECHO = [
+        (r"\b(alza|aumento|incremento|encarec|subida|sube|subio)\w*", "Alza"),
+        (r"\b(caida|baja|reduccion|descenso|disminucion)\w*", "Reducción"),
+        (r"\b(precio|tarifa|costo)\w*", "Precio"),
+        (r"\b(consumo|demanda)\w*", "Consumo"),
+        (r"\b(venta|ventas|comercializacion)\w*", "Ventas"),
+        (r"\b(exportacion|exporta)\w*", "Exportaciones"),
+        (r"\b(importacion|importa)\w*", "Importaciones"),
+        (r"\b(produccion|produce|produjo)\w*", "Producción"),
+        (r"\b(inversion|invierte|invirtio)\w*", "Inversión"),
+        (r"\b(lanzamiento|lanza|estreno|presentacion)\w*", "Lanzamiento"),
+        (r"\b(convenio|alianza|acuerdo|pacto|cooperacion)\w*", "Convenio"),
+        (r"\b(premio|galardon|reconocimiento|distincion)\w*", "Reconocimiento"),
+        (r"\b(investigacion|investiga|indaga|denuncia|demanda|sancion|multa)\w*", "Investigación"),
+        (r"\b(nombramiento|designacion|posesion|nombra|designa)\w*", "Nombramiento"),
+        (r"\b(renuncia|dimision|dimite)\w*", "Renuncia"),
+        (r"\b(apertura|inauguracion|inaugura|abre)\w*", "Apertura"),
+        (r"\b(cierre|suspension|clausura)\w*", "Cierre"),
+        (r"\b(ampliacion|expansion|amplia)\w*", "Ampliación"),
+        (r"\b(construccion|obra|construye)\w*", "Construcción"),
+        (r"\b(reforma|regulacion|decreto|ley)\w*", "Reforma"),
+        (r"\b(racionamiento|raciona|apagon|desabastecimiento|escasez)\w*", "Racionamiento"),
+        (r"\b(crisis|emergencia|desastre|sismo|inundacion)\w*", "Crisis"),
+        (r"\b(campana|publicidad|patrocinio)\w*", "Campaña"),
+        (r"\b(foro|congreso|cumbre|seminario|encuentro|feria)\w*", "Foro"),
+        (r"\b(proyecto|iniciativa|programa|plan)\w*", "Proyecto"),
+        (r"\b(balance|resultado|utilidad|ingreso)\w*", "Balance"),
+        (r"\b(estudio|informe|encuesta|analisis)\w*", "Estudio"),
+        (r"\b(donacion|solidaridad|ayuda|apoyo)\w*", "Apoyo"),
+        (r"\b(capacitacion|formacion|curso|taller)\w*", "Capacitación"),
+        (r"\b(vacunacion|brote|contagio|virus|gripe|influenza)\w*", "Situación sanitaria"),
+        (r"\b(empleo|contratacion|trabajador|nomina)\w*", "Empleo"),
+    ]
+
+    def _frase_nominal_desde_tokens(self, tokens, titulos=None, resumenes=None):
+        """Convierte tokens de contenido en una frase nominal con preposición.
+        'precio', 'pollo' -> 'Alza del precio del pollo'. NUNCA devuelve dos
+        sustantivos pegados sin nexo, ni un adjetivo tras 'de'."""
+        toks = [str(t).strip() for t in (tokens or []) if str(t).strip()]
+        if not toks:
+            return ''
+        texto = " ".join(str(x) for x in (list(titulos or [])[:5] + list(resumenes or [])[:2]))
+        tnorm = unidecode(texto.lower())
+        nucleo = next((nom for pat, nom in self._NUCLEOS_HECHO if re.search(pat, tnorm)), None)
+
+        vistos, limpios = set(), []
+        for t in toks:
+            k = _normaliza_token(t)
+            if not k or k in vistos:
+                continue
+            vistos.add(k)
+            limpios.append(t.lower())
+        if not limpios:
+            return ''
+
+        # 1) Si uno de los tokens centrales (top-2) ya es un sustantivo de evento
+        #    válido ('exportaciones', 'convenio'), ese es el mejor núcleo: viene del
+        #    texto. 2) Si no, el núcleo léxico detectado. 3) Si no, el primer token.
+        cabeza, resto = None, list(limpios)
+        for cand in limpios[:2]:
+            if _es_cabeza_subtema_valida(cand):
+                cabeza = cand.capitalize()
+                resto = [x for x in limpios if _normaliza_token(x) != _normaliza_token(cand)]
+                break
+        if cabeza is None and nucleo:
+            if _normaliza_token(nucleo) in {_normaliza_token(x) for x in limpios}:
+                cabeza = nucleo
+                resto = [x for x in limpios if _normaliza_token(x) != _normaliza_token(nucleo)]
+            else:
+                cabeza, resto = nucleo, limpios
+        if cabeza is None:
+            cabeza, resto = limpios[0].capitalize(), limpios[1:]
+
+        frase = cabeza
+        usados = 0
+        for comp in resto:
+            if usados >= 2:
+                break
+            if _parece_adjetivo_es(comp) and usados >= 1:
+                # Adjetivo: se pega al sustantivo anterior, nunca tras 'de'.
+                cand = f"{frase} {comp}"
+            else:
+                cand = f"{frase} {_preposicion_de(comp)} {comp}"
+            if len(cand.split()) > MAX_PALABRAS_SUBTEMA:
+                break
+            frase = cand
+            usados += 1
+        frase = _sanear_frase_nominal(frase)
+        if (len(frase.split()) >= 2 and _frase_esta_completa(frase)
+                and not _es_etiqueta_generica(frase)
+                and not _es_nombre_o_fragmento_marca(frase, self.marca, self.aliases)):
+            return capitalizar_etiqueta(frase)
         return ''
 
     def _derivar_ultimo_recurso(self, titulos, resumenes):
@@ -2935,14 +3631,14 @@ class ClasificadorSubtema:
                     break
             resto = toks[i:]
             if resto:
-                frase = _recortar_frase_completa(' '.join(resto), MAX_PALABRAS_SUBTEMA)
-                frase = _quitar_locativos_finales(frase)
-                if (_frase_esta_completa(frase)
+                frase = _sanear_frase_nominal(' '.join(resto))
+                if (_frase_esta_completa(frase) and len(frase.split()) >= 2
+                        and not _es_etiqueta_generica(frase)
                         and not _es_nombre_o_fragmento_marca(frase, self.marca, self.aliases)):
                     return capitalizar_etiqueta(frase)
             # Título reducido a nada útil (solo marca) -> se usa el título mismo.
-            frase2 = _recortar_frase_completa(s, max_palabras=4)
-            if _frase_esta_completa(frase2):
+            frase2 = _sanear_frase_nominal(s, max_palabras=4)
+            if _frase_esta_completa(frase2) and len(frase2.split()) >= 2:
                 return capitalizar_etiqueta(frase2)
         return ''
 
@@ -3234,6 +3930,8 @@ def _validar_estructura_tema(tema: str) -> bool:
     if num_palabras.match(tema): return False
     if _PATRON_TITULAR.match(tema): return False
     if _PATRON_ESTADO.search(tema): return False
+    # Un TEMA tampoco puede ser un rótulo de relleno ('Destacados del sector').
+    if _es_etiqueta_generica(tema): return False
     genericos = {
         "economia", "politica", "tecnologia", "seguridad", "justicia",
         "actualidad", "nacional", "internacional", "empresas", "sociedad",
@@ -3241,6 +3939,256 @@ def _validar_estructura_tema(tema: str) -> bool:
     }
     if string_norm_label(tema) in genericos: return False
     return True
+
+
+# ── Taxonomía editorial de respaldo: garantiza que NINGUNA fila quede sin Tema ──
+# Cada entrada es (Tema, patrón de disparo). Se evalúa contra el subtema + el
+# título/contexto, así el Tema queda derivado del texto y no de un default fijo.
+_TAXONOMIA_TEMAS = [
+    ("Resultados y desempeño financiero",
+     r"\b(utilidad(es)?|ingreso(s)?|ganancia(s)?|perdida(s)?|balance|ebitda|"
+     r"facturacion|ventas|rentabilidad|dividendo(s)?|trimestre|estado(s) financiero)\b"),
+    ("Inversión y expansión",
+     r"\b(inversion(es)?|invertira|expansion|nueva(s)? sede(s)?|apertura|ampliacion|"
+     r"planta|adquisicion|compra de|fusion|capitalizacion|infraestructura)\b"),
+    ("Lanzamiento de productos y servicios",
+     r"\b(lanzamiento|nuevo producto|nueva linea|portafolio|servicio nuevo|"
+     r"estreno|presentacion de|innovacion|prototipo|modelo)\b"),
+    ("Precios y comportamiento del mercado",
+     r"\b(precio(s)?|tarifa(s)?|costo(s)?|inflacion|alza|encarecimiento|"
+     r"demanda|oferta|consumo|mercado|competencia|exportacion(es)?|importacion(es)?)\b"),
+    ("Regulación y política pública",
+     r"\b(ley|decreto|reforma|regulacion|norma(tiva)?|proyecto de ley|congreso|"
+     r"ministerio|superintendencia|resolucion|arancel|impuesto|politica publica)\b"),
+    ("Litigios, investigaciones y sanciones",
+     r"\b(demanda|denuncia|investigacion|sancion|multa|fiscalia|procuraduria|"
+     r"contraloria|juzgado|tribunal|condena|imputacion|querella|fallo|litigio)\b"),
+    ("Sostenibilidad y medio ambiente",
+     r"\b(sostenibilidad|ambiental|medio ambiente|emisiones|carbono|reciclaje|"
+     r"energia (limpia|renovable)|agua|residuos|deforestacion|huella)\b"),
+    ("Responsabilidad social y comunidad",
+     r"\b(donacion|solidaridad|ayuda humanitaria|voluntariado|fundacion|"
+     r"responsabilidad social|comunidad(es)?|damnificado(s)?|beneficiario(s)?|obra social)\b"),
+    ("Talento humano y gestión interna",
+     r"\b(empleo(s)?|contratacion(es)?|nomina|trabajador(es)?|sindicato|huelga|"
+     r"despido(s)?|capacitacion|bienestar laboral|clima laboral|vacante(s)?)\b"),
+    ("Nombramientos y gobierno corporativo",
+     r"\b(nombramiento|designacion|posesion|renuncia|dimision|junta directiva|"
+     r"presidente de|gerente|ceo|relevo|sucesion|asamblea de accionistas)\b"),
+    ("Reconocimientos y premios",
+     r"\b(premio(s)?|galardon|reconocimiento|distincion|condecoracion|ranking|"
+     r"certificacion|acreditacion|honoris causa|mejor(es)? empresa)\b"),
+    ("Alianzas y convenios",
+     r"\b(convenio(s)?|alianza(s)?|acuerdo(s)?|cooperacion|memorando|"
+     r"colaboracion|pacto|union temporal|consorcio)\b"),
+    ("Tecnología e innovación digital",
+     r"\b(tecnologia|digital(izacion)?|inteligencia artificial|software|plataforma|"
+     r"app|aplicacion|ciberseguridad|datos|automatizacion|transformacion digital)\b"),
+    ("Salud pública y bioseguridad",
+     r"\b(salud|sanitario|epidemia|pandemia|virus|gripe aviar|influenza|"
+     r"vacunacion|bioseguridad|brote|contagio|hospital|eps)\b"),
+    ("Infraestructura y operaciones",
+     r"\b(obra(s)?|via(s)?|carretera|puerto|aeropuerto|terminal|construccion|"
+     r"mantenimiento|logistica|transporte|cadena de suministro|operacion(es)?)\b"),
+    ("Crisis y emergencias",
+     r"\b(crisis|emergencia|desastre|sismo|terremoto|inundacion|incendio|"
+     r"derrame|accidente|falla(s)?|colapso|paro|bloqueo)\b"),
+    ("Educación y formación",
+     r"\b(educacion|universidad|colegio|estudiante(s)?|beca(s)?|academico|"
+     r"formacion|curso(s)?|diplomado|matricula|graduacion|investigacion academica)\b"),
+    ("Eventos y participación institucional",
+     r"\b(foro|congreso|cumbre|feria|seminario|conversatorio|taller|encuentro|"
+     r"evento|jornada|panel|conferencia|rueda de prensa)\b"),
+    ("Comunicación y posicionamiento de marca",
+     r"\b(campana|publicidad|comunicado|vocero|marca|patrocinio|"
+     r"posicionamiento|estrategia de comunicacion|imagen corporativa)\b"),
+    # ── Categorías transversales: cubren clientes de banca, energía, minería,
+    # transporte, cultura, migración, deporte y sector público. Se añaden al final
+    # para que los patrones más específicos de arriba tengan prioridad.
+    ("Política monetaria y tasas",
+     r"\b(tasa(s)? de interes|tasa de usura|banco de la republica|banco central|"
+     r"politica monetaria|devaluacion|revaluacion|tipo de cambio|inflacion|"
+     r"emisor|encaje|liquidez)\b"),
+    ("Servicios públicos y tarifas",
+     r"\b(racionamiento|apagon|tarifa(s)? de|servicio publico|acueducto|"
+     r"alcantarillado|energia electrica|gas natural|embalse(s)?|"
+     r"factura(cion)? de servicios|suministro|desabastecimiento)\b"),
+    ("Producción y explotación de recursos",
+     r"\b(mina|minera|mineria|carbon|niquel|oro|petroleo|crudo|gas|refineria|"
+     r"pozo(s)?|barriles|yacimiento|regalias|extraccion|explotacion minera|"
+     r"produccion agricola|cosecha|cultivo(s)?|ganaderia|pesca)\b"),
+    ("Movilidad y transporte",
+     r"\b(vuelo(s)?|aerolinea|pasajero(s)?|peaje(s)?|trafico|metro|"
+     r"transmilenio|bus(es)?|taxi(s)?|tren|ferrocarril|navegacion|"
+     r"movilidad|congestion|ruta(s)? aerea)\b"),
+    ("Conectividad y telecomunicaciones",
+     r"\b(espectro|5g|4g|internet|banda ancha|fibra optica|telefonia|"
+     r"cobertura movil|operador movil|antena(s)?|telecomunicaciones)\b"),
+    ("Cultura, patrimonio y deporte",
+     r"\b(teatro|museo|patrimonio|monumento|festival|carnaval|concierto|"
+     r"biblioteca|artista(s)?|obra cultural|deporte|equipo|torneo|"
+     r"seleccion|estadio|liga|jugador(es)?|tecnico|campeonato)\b"),
+    ("Migración, derechos y grupos poblacionales",
+     r"\b(migrante(s)?|migracion|refugiado(s)?|venezolano(s)?|desplazado(s)?|"
+     r"victima(s)?|indigena(s)?|afro|mujer(es)?|genero|discapacidad|"
+     r"derechos humanos|regularizacion)\b"),
+    ("Seguridad y orden público",
+     r"\b(homicidio(s)?|hurto(s)?|robo(s)?|extorsion|secuestro|atentado|"
+     r"disidencia(s)?|guerrilla|banda(s)? criminal|narcotrafico|incautacion|"
+     r"captura(s)?|policia|ejercito|fuerza publica|orden publico|violencia)\b"),
+    ("Gestión pública y presupuesto",
+     r"\b(presupuesto|regalias|contratacion publica|licitacion publica|"
+     r"plan de desarrollo|ejecucion presupuestal|deficit|superavit|"
+     r"gasto publico|recaudo|dian|hacienda|concejo|asamblea)\b"),
+    ("Vivienda y desarrollo urbano",
+     r"\b(vivienda(s)?|urbanismo|pot|plan de ordenamiento|predio(s)?|"
+     r"barrio(s)?|urbanizacion|espacio publico|parque(s)?|renovacion urbana)\b"),
+]
+
+
+def _tema_por_taxonomia(subtema: str, texto_apoyo: str = "") -> str:
+    """Deriva un Tema editorial a partir del léxico REAL del subtema/texto.
+    Es el respaldo cuando el LLM no entrega un tema válido: evita 'Sin tema' y
+    evita que el Tema sea una copia del Subtema.
+
+    La CABEZA del subtema manda: 'Convenio con universidad para investigación'
+    es 'Alianzas y convenios', no 'Litigios' — aunque contenga 'investigación'.
+    """
+    sub = unidecode(str(subtema or "").lower()).strip()
+    # 1) Prioridad absoluta: las 2 primeras palabras de contenido del subtema.
+    cabeza_toks = [t for t in re.findall(r"[a-z]+", sub)
+                   if t not in _CONECTORES_ETIQUETA and len(t) >= 4][:2]
+    if cabeza_toks:
+        cabeza = " ".join(cabeza_toks)
+        for tema, patron in _TAXONOMIA_TEMAS:
+            if re.search(patron, cabeza, re.IGNORECASE):
+                return tema
+    # 2) Resto del subtema.
+    if sub:
+        for tema, patron in _TAXONOMIA_TEMAS:
+            if re.search(patron, sub, re.IGNORECASE):
+                return tema
+    # 3) Texto de apoyo (título/contexto/resumen).
+    base = unidecode(str(texto_apoyo or "").lower())
+    if base:
+        for tema, patron in _TAXONOMIA_TEMAS:
+            if re.search(patron, base, re.IGNORECASE):
+                return tema
+    return ""
+
+
+def _asegurar_tema_valido(temas, subtemas, textos=None):
+    """Garantía dura de la jerarquía Tema→Subtema, fila por fila:
+      1. Un Tema vacío/'Sin tema'/genérico se reemplaza por taxonomía léxica.
+      2. Un Tema igual (o casi) al Subtema se sustituye por su categoría madre,
+         porque un Tema que repite el Subtema no aporta jerarquía.
+      3. Si nada aplica, se agrupa por el hecho del subtema con un tema derivado.
+    Nunca deja una fila con Subtema y sin Tema (defecto reportado)."""
+    out = []
+    n = len(subtemas)
+    textos = list(textos) if textos is not None else [""] * n
+    if len(textos) < n:
+        textos = list(textos) + [""] * (n - len(textos))
+    for i in range(n):
+        sub = str(subtemas[i] or "").strip()
+        tema = str(temas[i] or "").strip() if i < len(temas) else ""
+        apoyo = str(textos[i] or "")
+        invalido = (
+            not tema
+            or tema.lower() in ("sin tema", "varios", "n/a", "nan", "-", "none")
+            or _es_etiqueta_generica(tema)
+        )
+        if not invalido and _tema_es_igual_a_subtema(tema, [sub]):
+            invalido = True          # Tema == Subtema: no aporta jerarquía
+        if invalido:
+            nuevo = _tema_por_taxonomia(sub, apoyo)
+            if not nuevo:
+                # Sin señal léxica en la taxonomía: se abstrae por el TIPO DE HECHO
+                # que encabeza el subtema ('Restauración del teatro' -> 'Proyectos
+                # y obras'). Es una categoría real, no un recorte del subtema.
+                nuevo = _tema_por_cabeza_de_hecho(sub)
+            if not nuevo:
+                # Última red: núcleo del subtema como categoría madre (texto real).
+                nucleo = _recortar_frase_completa(sub, max_palabras=3)
+                nuevo = capitalizar_etiqueta(nucleo) if nucleo and not _es_etiqueta_generica(nucleo) else ""
+            if nuevo:
+                tema = nuevo
+            else:
+                tema = capitalizar_etiqueta(_recortar_frase_completa(sub, max_palabras=3))
+        out.append(capitalizar_etiqueta(tema) if tema else "Sin tema")
+    return out
+
+
+# Abstracción por TIPO DE HECHO: mapea la cabeza del subtema a una categoría
+# editorial. Independiente del sector del cliente — un 'convenio' es una alianza
+# lo firme un banco, una alcaldía o una minera.
+_TEMA_POR_CABEZA = [
+    ({"convenio", "alianza", "acuerdo", "pacto", "cooperacion", "colaboracion",
+      "memorando", "consorcio", "union"}, "Alianzas y convenios"),
+    ({"inversion", "expansion", "ampliacion", "adquisicion", "compra", "fusion",
+      "capitalizacion", "financiamiento", "financiacion", "credito"}, "Inversión y expansión"),
+    ({"lanzamiento", "estreno", "presentacion", "apertura", "inauguracion",
+      "reapertura", "activacion"}, "Lanzamientos y aperturas"),
+    ({"investigacion", "denuncia", "demanda", "sancion", "multa", "condena",
+      "querella", "imputacion", "fallo", "sentencia", "auditoria",
+      "litigio", "proceso"}, "Litigios, investigaciones y sanciones"),
+    ({"premio", "reconocimiento", "galardon", "distincion", "condecoracion",
+      "certificacion", "acreditacion", "ranking", "homenaje"}, "Reconocimientos y premios"),
+    ({"nombramiento", "designacion", "posesion", "renuncia", "dimision",
+      "relevo", "sucesion", "eleccion"}, "Nombramientos y gobierno corporativo"),
+    ({"reforma", "regulacion", "ley", "decreto", "norma", "normativa",
+      "resolucion", "proyecto de ley", "aprobacion"}, "Regulación y política pública"),
+    ({"obra", "construccion", "restauracion", "rehabilitacion", "remodelacion",
+      "modernizacion", "renovacion", "mantenimiento", "infraestructura",
+      "instalacion"}, "Proyectos y obras"),
+    ({"crisis", "emergencia", "desastre", "sismo", "terremoto", "inundacion",
+      "incendio", "derrame", "accidente", "colapso", "falla", "fallas",
+      "racionamiento", "apagon", "paro", "bloqueo", "protesta"}, "Crisis y emergencias"),
+    ({"alza", "aumento", "incremento", "reduccion", "caida", "descenso",
+      "precio", "precios", "tarifa", "tarifas", "costo", "costos",
+      "consumo", "demanda", "oferta", "ventas", "exportaciones",
+      "importaciones", "produccion", "mercado"}, "Precios y comportamiento del mercado"),
+    ({"balance", "resultados", "utilidad", "utilidades", "ingresos",
+      "perdidas", "ganancias", "rentabilidad", "presupuesto", "recaudo"},
+     "Resultados y desempeño financiero"),
+    ({"campana", "publicidad", "patrocinio", "comunicado", "posicionamiento"},
+     "Comunicación y posicionamiento de marca"),
+    ({"donacion", "solidaridad", "ayuda", "apoyo", "voluntariado",
+      "acompanamiento", "asistencia"}, "Responsabilidad social y comunidad"),
+    ({"empleo", "contratacion", "capacitacion", "formacion", "salario",
+      "nomina", "huelga", "sindicato", "despidos"}, "Talento humano y gestión interna"),
+    ({"estudio", "informe", "encuesta", "analisis", "diagnostico",
+      "evaluacion", "medicion"}, "Estudios e informes"),
+    ({"foro", "congreso", "cumbre", "feria", "seminario", "taller",
+      "encuentro", "conversatorio", "jornada", "evento", "festival"},
+     "Eventos y participación institucional"),
+    ({"proyecto", "programa", "plan", "iniciativa", "estrategia", "convocatoria",
+      "licitacion", "adjudicacion", "contrato"}, "Proyectos y programas"),
+    ({"brote", "contagio", "epidemia", "vacunacion", "virus", "salud",
+      "bioseguridad", "atencion"}, "Salud pública y bioseguridad"),
+    ({"cierre", "suspension", "clausura", "cancelacion", "retiro"},
+     "Cierres y suspensiones"),
+    ({"beca", "becas", "matricula", "graduacion", "educacion", "curriculo"},
+     "Educación y formación"),
+]
+
+
+def _tema_por_cabeza_de_hecho(subtema: str) -> str:
+    """Categoría editorial derivada del TIPO DE HECHO que encabeza el subtema.
+    Agnóstico al sector: sirve igual para un banco, un hospital o una alcaldía."""
+    toks = [_normaliza_token(t) for t in re.findall(r"[A-Za-zÁÉÍÓÚÑÜáéíóúñü]+", str(subtema or ""))]
+    toks = [t for t in toks if t and t not in _CONECTORES_ETIQUETA]
+    if not toks:
+        return ""
+    for tok in toks:                      # la cabeza manda, luego el resto
+        for claves, tema in _TEMA_POR_CABEZA:
+            if tok in claves:
+                return tema
+        st = _stem_es(tok)
+        for claves, tema in _TEMA_POR_CABEZA:
+            if any(st == _stem_es(k) for k in claves):
+                return tema
+    return ""
 
 def _tema_es_igual_a_subtema(tema: str, subtemas_grupo: list) -> bool:
     if not tema or not subtemas_grupo: return False
@@ -3273,7 +4221,10 @@ def _generar_nombre_tema_llm(subtemas_grupo, textos_muestra, titulos_muestra, ma
         "  4. 2-5 palabras, sustantivo + complemento/adjetivo.\n"
         "  5. Tildes y ñ correctas.\n\n"
         "CORRECTO: 'Regulación financiera', 'Movilidad urbana', 'Infraestructura vial', 'Salud pública territorial'\n"
-        "INCORRECTO: 'Economía', 'Política', 'Actualidad', 'Cinco congresistas con líos', 'Nuevo acuerdo'\n\n"
+        "INCORRECTO: 'Economía', 'Política', 'Actualidad', 'Destacados del sector', 'Panorama del sector', "
+        "'Presencia en medios', 'Cinco congresistas con líos', 'Nuevo acuerdo'\n"
+        "El tema nombra el ÁMBITO DEL HECHO (qué materia trata), NUNCA el soporte "
+        "donde se publicó ni una frase de relleno sobre 'el sector'.\n\n"
         'JSON: {"tema":"..."}'
     )
     try:
@@ -3493,7 +4444,7 @@ def consolidar_temas(subtemas, textos, pbar, marca=""):
     tf_validado = _post_validar_tema_vs_subtema(tf_validado, subtemas)
     pbar.progress(0.95, "Completitud...")
     tf_validado = [capitalizar_etiqueta(_recortar_frase_completa(t) if not _frase_esta_completa(t) else t) for t in tf_validado]
-    tf_validado = _unificar_tema_por_subtema(tf_validado, subtemas)
+    tf_validado = _unificar_tema_por_subtema(tf_validado, subtemas, textos)
     st.info(f"Temas: **{len(set(tf_validado))}** (de {len(set(subtemas))} subtemas) · Máx: {num_temas_max}")
     pbar.progress(1.0, "Temas listos")
     return tf_validado
@@ -3547,9 +4498,12 @@ def _post_validar_tema_vs_subtema(temas, subtemas):
                     reemplazos[tema] = capitalizar_etiqueta(nuevo)
     return [reemplazos.get(t, t) for t in temas] if reemplazos else temas
 
-def _unificar_tema_por_subtema(temas, subtemas):
-    """Un mismo Subtema (sin importar mayúsculas) debe tener un único Tema."""
-    vacios = {"", "nan", "n/a", "-", "sin tema", "varios"}
+def _unificar_tema_por_subtema(temas, subtemas, textos=None):
+    """Un mismo Subtema (sin importar mayúsculas) debe tener un único Tema.
+    Además GARANTIZA que ninguna fila con Subtema quede sin Tema válido:
+    el voto por subtema ignora temas vacíos/genéricos y, si el subtema no tiene
+    ningún tema utilizable, se deriva por taxonomía léxica del propio texto."""
+    vacios = {"", "nan", "n/a", "-", "sin tema", "varios", "none"}
     sub_to_temas = defaultdict(list)
     for t, s in zip(temas, subtemas):
         k = string_norm_label(s)
@@ -3558,14 +4512,19 @@ def _unificar_tema_por_subtema(temas, subtemas):
         sub_to_temas[k].append(t)
     sub_to_best = {}
     for k, tema_list in sub_to_temas.items():
-        validos = [t for t in tema_list if str(t).strip().lower() not in vacios]
+        # Solo votan los temas realmente informativos.
+        validos = [
+            t for t in tema_list
+            if str(t).strip().lower() not in vacios and not _es_etiqueta_generica(t)
+        ]
         if validos:
             sub_to_best[k] = Counter(validos).most_common(1)[0][0]
     out = []
     for t, s in zip(temas, subtemas):
         k = string_norm_label(s)
         out.append(sub_to_best[k] if k in sub_to_best else t)
-    return out
+    # Red final: ninguna fila con Subtema puede quedarse sin Tema (o con Tema==Subtema).
+    return _asegurar_tema_valido(out, list(subtemas), textos)
 
 # ======================================
 # Duplicados y Excel (Reglas Nuevas)
@@ -4022,7 +4981,7 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
                 if tp: df[km["tema"]] = tp
             else:
                 df[km["tema"]] = temas
-            df[km["tema"]] = _unificar_tema_por_subtema(df[km["tema"]].tolist(), df[km["subtema"]].tolist())
+            df[km["tema"]] = _unificar_tema_por_subtema(df[km["tema"]].tolist(), df[km["subtema"]].tolist(), df["_txt"].tolist())
             df = aplicar_consistencia_grupos(df, km["titulo"], km["resumen"],
                                              km["tonoiai"], km["tema"], km["subtema"])
             s.update(label="✓ Paso 4 · Clasificación", state="complete")
@@ -4072,7 +5031,7 @@ async def run_quick_async(df, tc, sc, bn, al):
         subtemas = ClasificadorSubtema(bn, al).procesar_lote(df["_txt"], pb, df[sc].fillna(''), df[tc].fillna(''))
         df['Subtema'] = subtemas
         temas = consolidar_temas(subtemas, df["_txt"].tolist(), pb, bn)
-        df['Tema'] = _unificar_tema_por_subtema(temas, subtemas)
+        df['Tema'] = _unificar_tema_por_subtema(temas, subtemas, df["_txt"].tolist())
         df = aplicar_consistencia_grupos(df, tc, sc)
         s.update(label="✓ Clasificación", state="complete")
     df.drop(columns=['_txt'], inplace=True)
@@ -4243,7 +5202,7 @@ async def run_custom_excel_async(file_bytes, tc, sc, bn, al, mode="API de OpenAI
             temas = consolidar_temas(subtemas, df["_txt"].tolist(), pb, bn)
 
         df['Subtema'] = subtemas
-        df['Tema']    = _unificar_tema_por_subtema(temas, subtemas)
+        df['Tema']    = _unificar_tema_por_subtema(temas, subtemas, df["_txt"].tolist())
         df = aplicar_consistencia_grupos(df, tc, sc)
         s.update(label="✓ Clasificación completada", state="complete")
 
