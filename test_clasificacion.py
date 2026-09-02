@@ -3,6 +3,7 @@
 Streamlit is mocked so the module can be imported without a running server.
 """
 import io
+import re
 import sys
 import unittest
 from unittest.mock import MagicMock, patch
@@ -206,32 +207,86 @@ class TestAgrupacion(unittest.TestCase):
 
 
 class TestPklYHeuristica(unittest.TestCase):
-    def test_pkl_generico_se_reemplaza(self):
+    def _pipeline_temas(self, textos, clases):
         from sklearn.pipeline import make_pipeline
         from sklearn.feature_extraction.text import TfidfVectorizer
         from sklearn.naive_bayes import MultinomialNB
         import joblib
 
         pipe = make_pipeline(TfidfVectorizer(), MultinomialNB())
-        pipe.fit(
-            [
-                "lanzamiento carrera deportiva utb",
-                "convenio formacion profesional sena",
-            ],
-            ["Cobertura de información relevante", "Educación, formación"],
-        )
+        pipe.fit(textos, clases)
         buf = io.BytesIO()
         joblib.dump(pipe, buf)
         buf.seek(0)
+        return buf, list(dict.fromkeys(clases))
+
+    def test_pkl_generico_se_reemplaza_dentro_del_vocabulario(self):
+        buf, clases = self._pipeline_temas(
+            [
+                "lanzamiento carrera deportiva utb medicina",
+                "cobertura general de noticias del dia",
+                "convenio formacion profesional sena educacion",
+            ],
+            [
+                "Educación superior",
+                "Cobertura de información relevante",
+                "Educación superior",
+            ],
+        )
         titulos = ["UTB lanza carrera de medicina deportiva"]
         resumenes = ["La Universidad Tecnológica de Bolívar abre medicina deportiva."]
         textos = [app._texto_clasificacion(titulos[0], resumenes[0], MARCA, ALIAS)[0]]
-        preds = app.analizar_temas_con_pkl(textos, buf)
-        self.assertIsNotNone(preds)
-        temas = app._etiquetas_desde_pkl_o_heuristica(preds, titulos, resumenes, MARCA, ALIAS)
+        pack = app.analizar_temas_con_pkl(textos, buf)
+        self.assertIsNotNone(pack)
+        temas, clases_out = pack
         self.assertEqual(len(temas), 1)
+        self.assertIn(temas[0], clases_out)
+        self.assertIn(temas[0], clases)
         self.assertFalse(app._es_etiqueta_generica(temas[0]), temas[0])
-        self.assertNotIn(",", temas[0])
+
+    def test_pkl_nunca_sale_del_vocabulario_ni_con_pred_generica(self):
+        clases = [
+            "Reconocimientos institucionales",
+            "Gestión hospitalaria",
+            "Cobertura de información relevante",
+        ]
+        buf, _ = self._pipeline_temas(
+            [
+                "reconocimiento premio distincion acr radiology",
+                "hospital clinica pacientes internacion",
+                "cobertura de informacion relevante noticias",
+            ],
+            clases,
+        )
+        texto = (
+            "La Fundación Santa Fe de Bogotá fue reconocida por el American College "
+            "of Radiology y se convirtió en la primera institución de Latinoamérica."
+        )
+        pack = app.analizar_temas_con_pkl([texto], buf)
+        self.assertIsNotNone(pack)
+        temas, clases_out = pack
+        self.assertIn(temas[0], clases_out)
+        forzado = app._resolver_etiqueta_pkl(
+            "Cobertura de información relevante", texto, clases
+        )
+        self.assertIn(forzado, clases)
+        self.assertFalse(app._es_etiqueta_generica(forzado), forzado)
+        pd = __import__("pandas")
+        df = pd.DataFrame({
+            "Título": ["Distinción ACR"],
+            "Resumen - Aclaracion": [texto],
+            "Contexto analizado": [texto],
+            "Tono IA": ["Positivo"],
+            "Tema": ["Tema inventado que no está en el pkl"],
+            "Subtema": ["Reconocimiento de ACR en Latinoamérica"],
+        })
+        with patch.object(app, "get_embeddings_batch", return_value=[None]):
+            out = app.aplicar_consistencia_grupos(
+                df, "Título", "Resumen - Aclaracion",
+                marca="Fundación Santa Fe de Bogotá", aliases=None,
+                vocabulario_tema=clases,
+            )
+        self.assertIn(out.loc[0, "Tema"], clases)
 
     def test_sin_pkl_etiquetas_especificas(self):
         titulos = ["Investigación por fallas operativas en el campus de la UTB"]
@@ -353,6 +408,50 @@ class TestFenaviNoHeredaFla(unittest.TestCase):
         self.assertNotEqual(
             app.string_norm_label(subtemas[0]),
             app.string_norm_label(subtemas[1]),
+        )
+
+
+CTX_SANTA_FE_ACR = (
+    "La Fundación Santa Fe de Bogotá fue reconocida por el American College of Radiology "
+    "y se convirtió en la primera institución de Latinoamérica en lograr esta distinción. "
+    "La Fundación Santa Fe de Bogotá fue reconocida por el American College of Radiology (ACR) "
+    "como ACR® International Center for Quality and Safety , convirtiéndose en la primera "
+    "institución de Latinoamérica en recibir esta distinción."
+)
+MARCA_SANTA_FE = "Fundación Santa Fe de Bogotá"
+
+
+class TestSantaFeAcrSubtema(unittest.TestCase):
+    def test_no_trocea_santa_fe_ni_omite_el_hecho(self):
+        sub = app._extraer_subtema_especifico(CTX_SANTA_FE_ACR, MARCA_SANTA_FE, None)
+        n = app.unidecode(sub.lower())
+        self.assertNotEqual(n, "reconocimiento de fe de bogota")
+        self.assertFalse(re.search(r"(^| )fe de bogot", n), sub)
+        self.assertNotIn("reconocida", n)
+        self.assertFalse(app._es_etiqueta_generica(sub), sub)
+        self.assertNotIn(",", sub)
+        self.assertTrue(
+            any(tok in n for tok in (
+                "acr", "american college", "latinoameric", "quality", "distincion", "calidad",
+            )),
+            sub,
+        )
+        if "bogot" in n:
+            self.assertIn("santa fe de bogot", n, sub)
+
+    def test_etiquetar_sin_llm_mismo_hecho(self):
+        temas, subtemas = app.etiquetar_sin_llm(
+            ["Fundación Santa Fe recibe distinción ACR"],
+            [CTX_SANTA_FE_ACR],
+            MARCA_SANTA_FE,
+            None,
+        )
+        n = app.unidecode(subtemas[0].lower())
+        self.assertNotEqual(n, "reconocimiento de fe de bogota")
+        self.assertFalse(re.search(r"(^| )fe de bogot", n), subtemas[0])
+        self.assertTrue(
+            any(tok in n for tok in ("acr", "american college", "latinoameric", "quality")),
+            subtemas[0],
         )
 
 
