@@ -1100,7 +1100,8 @@ def _es_verboso_con_marca(etiqueta, marca, aliases=None):
     Eso no describe un hecho; se debe regenerar con un asunto real."""
     s = (etiqueta or "").strip()
     m = re.match(
-        r"^(investigaci[oó]n|estudio|an[aá]lisis|informe|trabajo)\s+"
+        r"^(investigaci[oó]n|estudio|an[aá]lisis|informe|trabajo|"
+        r"reconocimiento|premio|distinci[oó]n)\s+"
         r"(sobre|acerca de|de|del|sobre la|sobre el|de la|de el)\s+(.+)$",
         s, re.IGNORECASE,
     )
@@ -1142,7 +1143,8 @@ _ACCIONES_SUBTEMA = [
     (r"\b(anuncia|anuncio)\b", "Anuncio"),
     (r"\b(inaugura|inauguro|apertura|abre|abrio)\b", "Apertura"),
     (r"\b(firma|firmo|suscribe|suscribio|convenio|alianza|acuerdo)\b", "Convenio"),
-    (r"\b(recibe|recibio|premio|reconocimiento|galardon|distincion|honoris)\b", "Reconocimiento"),
+    (r"\b(recibe|recibio|premio|reconocimiento|reconocida|reconocido|reconocio|"
+     r"galardon|distincion|distinguida|distinguido|honoris)\b", "Reconocimiento"),
     (r"\b(investiga|investigacion|sancion|denuncia|demanda|multa)\b", "Investigación"),
     (r"\b(renuncia|renuncio|dimite|dimitio)\b", "Renuncia"),
     (r"\b(designa|designo|nombra|nombro|asume|asumio|posesion|nombramiento)\b", "Designación"),
@@ -1202,6 +1204,13 @@ def _excluir_para_etiqueta(marca="", aliases=None) -> set:
     }
 
 
+def _es_participio_cabeza(w) -> bool:
+    n = _normaliza_token(w)
+    if not n or n in _CABEZAS_SUBTEMA_VALIDAS:
+        return False
+    return bool(re.search(r"(ada|ado|idas|idos|iendo|ando)$", n)) and len(n) >= 6
+
+
 def _es_verbo_cabeza(w) -> bool:
     n = _normaliza_token(w)
     if not n:
@@ -1234,6 +1243,8 @@ def _span_nominal_fuente(texto, excluir) -> str:
                 continue
             if norms[0] in _VERBOS_LEAD_SUBTEMA or _es_verbo_cabeza(span[0]):
                 continue
+            if _es_participio_cabeza(span[0]):
+                continue
             if norms[0] in _CARGOS_SUBTEMA:
                 continue
             prep = sum(1 for w in norms if w in _PREP_ETIQUETA)
@@ -1247,16 +1258,106 @@ def _span_nominal_fuente(texto, excluir) -> str:
     return best
 
 
+def _quitar_frases_marca(texto, marca="", aliases=None) -> str:
+    """Quita el nombre completo de la marca/alias para no dejar restos ('Fe de Bogotá')."""
+    out = str(texto or "")
+    if not out or not (marca or aliases):
+        return out
+    frases = []
+    for n in _variantes_marca(marca, aliases):
+        n = str(n or "").strip()
+        if len(n) >= 4:
+            frases.append(n)
+            ud = unidecode(n)
+            if ud.lower() != n.lower():
+                frases.append(ud)
+    vistos = set()
+    for f in sorted(frases, key=len, reverse=True):
+        k = unidecode(f).lower()
+        if k in vistos:
+            continue
+        vistos.add(k)
+        out = re.sub(r"(?i)\b" + re.escape(f) + r"\b", " ", out)
+    return re.sub(r"\s+", " ", out).strip()
+
+
+def _objeto_evento_en_texto(texto: str) -> str:
+    """Objeto del hecho (quién otorga, qué distinción), no un fragmento del hospital."""
+    s = str(texto or "").strip()
+    if not s:
+        return ""
+    m_acr = re.search(r"\bACR\b", s)
+    m_am = re.search(r"(?i)american college of radiology", s)
+    m_lat = re.search(r"(?i)latinoam[eé]rica", s)
+    m_qs = re.search(r"(?i)quality and safety", s)
+    m_pri = re.search(r"(?i)primera instituci[oó]n de latinoam[eé]rica", s)
+    if m_acr and m_lat:
+        return "ACR en Latinoamérica"
+    if m_am:
+        return "American College of Radiology"
+    if m_acr and m_qs:
+        return "ACR Quality and Safety"
+    if m_pri:
+        return "Primera institución de Latinoamérica"
+    if m_acr:
+        return "ACR"
+    m = re.search(
+        r"(?i)(?:fue\s+)?reconocid[oa]s?\s+por\s+(?:el|la|los|las)?\s*(.+?)"
+        r"(?=\s+\(|\s+y\s+se\b|\s+como\b|,|\.|$)",
+        s,
+    )
+    if m:
+        obj = re.sub(r"\s+", " ", m.group(1)).strip(" .;:")
+        toks = obj.split()
+        if len(toks) >= 2 and not _es_verbo_cabeza(toks[0]) and not _es_participio_cabeza(toks[0]):
+            return obj
+    return ""
+
+
+def _etiqueta_parte_nombre_entidad(frase, texto) -> bool:
+    """True si la etiqueta trocea un nombre propio que en el texto está completo."""
+    t = unidecode(str(texto or "").lower())
+    f = unidecode(str(frase or "").lower())
+    if not f or not t:
+        return False
+    if re.search(r"santa\s+fe\s+de\s+bogot", t):
+        if re.search(r"\bfe\s+de\s+bogot", f) and "santa fe" not in f:
+            return True
+        if re.search(r"\bsanta\s+fe\b", f) and "santa fe de bogot" not in f:
+            if "acr" not in f and "latinoameric" not in f:
+                return True
+    return False
+
+
 def _extraer_subtema_especifico(texto, marca="", aliases=None) -> str:
     """Subtema específico anclado en el texto de análisis. Nunca un cubo genérico."""
     blob = str(texto or "").strip()
+    trabajo = _quitar_frases_marca(blob, marca, aliases) or blob
     excluir = _excluir_para_etiqueta(marca, aliases)
-    tex_norm = unidecode(blob.lower())
+    tex_norm = unidecode(trabajo.lower())
     accion = next((nombre for patron, nombre in _ACCIONES_SUBTEMA if re.search(patron, tex_norm)), None)
-    span = _span_nominal_fuente(blob, excluir)
+    if not accion:
+        accion = next((nombre for patron, nombre in _ACCIONES_SUBTEMA if re.search(patron, unidecode(blob.lower()))), None)
+    objeto = _objeto_evento_en_texto(trabajo) or _objeto_evento_en_texto(blob)
+    span = _span_nominal_fuente(trabajo, excluir)
+    if span and (_es_participio_cabeza(span.split()[0]) or _es_nombre_o_fragmento_marca(span, marca, aliases)):
+        span = _span_nominal_fuente(trabajo, excluir | {_normaliza_token(span.split()[0])}) if span.split() else ""
 
     frase = ""
-    if accion and span:
+    if objeto:
+        if accion and unidecode(accion.lower()) not in unidecode(objeto.lower()):
+            candidato = f"{accion} de {objeto}"
+            if len(candidato.split()) <= MAX_PALABRAS_SUBTEMA:
+                frase = candidato
+            elif len(objeto.split()) <= MAX_PALABRAS_SUBTEMA:
+                frase = objeto
+            elif re.search(r"\bACR\b", blob):
+                frase = f"{accion} del ACR" if accion else "Reconocimiento del ACR"
+            else:
+                frase = " ".join(candidato.split()[:MAX_PALABRAS_SUBTEMA])
+        else:
+            frase = objeto
+    elif accion and span:
         span_norm = unidecode(span.lower())
         if unidecode(accion.lower()) in span_norm:
             frase = span
@@ -1267,14 +1368,17 @@ def _extraer_subtema_especifico(texto, marca="", aliases=None) -> str:
                 if resto.lower().startswith(pref):
                     resto = resto[len(pref):]
                     break
-            frase = f"{accion} de {resto}"
+            if resto.split() and (_es_participio_cabeza(resto.split()[0]) or _es_verbo_cabeza(resto.split()[0])):
+                resto = " ".join(resto.split()[1:])
+            frase = f"{accion} de {resto}" if resto else accion
     elif span:
         frase = span
     elif accion:
         contenido = [
-            w.lower() for w in re.findall(r"[A-Za-zÁÉÍÓÚÑÜáéíóúñü]+", blob)
+            w.lower() for w in re.findall(r"[A-Za-zÁÉÍÓÚÑÜáéíóúñü]+", trabajo)
             if len(_normaliza_token(w)) >= 4 and _normaliza_token(w) not in excluir
             and not _RE_VERBO_SUBTEMA.search(_normaliza_token(w))
+            and not _es_participio_cabeza(w)
         ]
         vistos, top = set(), []
         for w in contenido:
@@ -1288,9 +1392,11 @@ def _extraer_subtema_especifico(texto, marca="", aliases=None) -> str:
     else:
         contenido = []
         vistos = set()
-        for w in re.findall(r"[A-Za-zÁÉÍÓÚÑÜáéíóúñü]+", blob):
+        for w in re.findall(r"[A-Za-zÁÉÍÓÚÑÜáéíóúñü]+", trabajo):
             nw = _normaliza_token(w)
             if len(nw) < 4 or nw in excluir or nw in _TRAILING_INCOMPLETE:
+                continue
+            if _es_participio_cabeza(w):
                 continue
             if nw not in vistos:
                 vistos.add(nw)
@@ -1304,7 +1410,7 @@ def _extraer_subtema_especifico(texto, marca="", aliases=None) -> str:
 
     frase = _recortar_frase_completa(_sin_comas_etiqueta(frase), MAX_PALABRAS_SUBTEMA)
     palabras = frase.split()
-    if palabras and _es_verbo_cabeza(palabras[0]):
+    if palabras and (_es_verbo_cabeza(palabras[0]) or _es_participio_cabeza(palabras[0])):
         resto = " ".join(palabras[1:]).strip()
         for p in list(_PREP_ETIQUETA) + ["la", "el", "los", "las", "un", "una"]:
             if resto.lower().startswith(p + " "):
@@ -1318,26 +1424,42 @@ def _extraer_subtema_especifico(texto, marca="", aliases=None) -> str:
             frase = accion
         frase = _recortar_frase_completa(_sin_comas_etiqueta(frase), MAX_PALABRAS_SUBTEMA)
     toks_marca = _tokens_marca_set(marca, aliases) if marca else set()
-    if _es_etiqueta_generica(frase) or (marca and _es_nombre_o_fragmento_marca(frase, marca, aliases)):
-        resto = blob
-        if toks_marca:
-            resto = re.sub(
-                r"\b(" + "|".join(re.escape(t) for t in sorted(toks_marca, key=len, reverse=True)) + r")\b",
-                " ",
-                unidecode(blob.lower()),
+    if (
+        _es_etiqueta_generica(frase)
+        or (marca and _es_nombre_o_fragmento_marca(frase, marca, aliases))
+        or (marca and _es_verboso_con_marca(frase, marca, aliases))
+        or _etiqueta_parte_nombre_entidad(frase, blob)
+    ):
+        if objeto and not _etiqueta_parte_nombre_entidad(objeto, blob):
+            frase = objeto if not accion else (
+                f"{accion} de {objeto}" if len(f"{accion} de {objeto}".split()) <= MAX_PALABRAS_SUBTEMA else objeto
             )
-        palabras = [
-            w for w in re.findall(r"[A-Za-zÁÉÍÓÚÑÜáéíóúñü]{4,}", resto)
-            if _normaliza_token(w) not in STOPWORDS_ES
-        ]
-        if len(palabras) >= 2:
-            frase = _recortar_frase_completa(f"{palabras[0]} de {palabras[1]}" + (f" {palabras[2]}" if len(palabras) > 2 else ""), MAX_PALABRAS_SUBTEMA)
-        elif palabras:
-            frase = palabras[0]
+        else:
+            resto = trabajo
+            if toks_marca:
+                resto = re.sub(
+                    r"\b(" + "|".join(re.escape(t) for t in sorted(toks_marca, key=len, reverse=True)) + r")\b",
+                    " ",
+                    unidecode(trabajo.lower()),
+                )
+            palabras = [
+                w for w in re.findall(r"[A-Za-zÁÉÍÓÚÑÜáéíóúñü]{4,}", resto)
+                if _normaliza_token(w) not in STOPWORDS_ES and not _es_participio_cabeza(w)
+            ]
+            if len(palabras) >= 2:
+                frase = _recortar_frase_completa(
+                    f"{palabras[0]} de {palabras[1]}" + (f" {palabras[2]}" if len(palabras) > 2 else ""),
+                    MAX_PALABRAS_SUBTEMA,
+                )
+            elif palabras:
+                frase = palabras[0]
     frase = _sin_comas_etiqueta(frase)
-    if not frase or _es_etiqueta_generica(frase):
-        crudas = [w.lower() for w in re.findall(r"[A-Za-zÁÉÍÓÚÑÜáéíóúñü]{3,}", blob)[:5]]
-        frase = " ".join(crudas[:5]) if crudas else blob[:80]
+    if not frase or _es_etiqueta_generica(frase) or _etiqueta_parte_nombre_entidad(frase, blob):
+        if objeto:
+            frase = objeto
+        else:
+            crudas = [w.lower() for w in re.findall(r"[A-Za-zÁÉÍÓÚÑÜáéíóúñü]{3,}", trabajo)[:5]]
+            frase = " ".join(crudas[:5]) if crudas else blob[:80]
     return capitalizar_etiqueta(_sin_comas_etiqueta(frase or "Hecho de la noticia"))
 
 
@@ -2171,7 +2293,8 @@ def construir_grafo_equivalencia(titulos, resumenes, contextos=None, marca="", a
 
 def aplicar_consistencia_grupos(df, titulo_col, resumen_col,
                                 tono_col="Tono IA", tema_col="Tema", subtema_col="Subtema",
-                                marca="", aliases=None):
+                                marca="", aliases=None,
+                                vocabulario_tema=None, vocabulario_subtema=None):
     # Asigna 'Grupo noticia' y unifica Tono IA / Tema / Subtema SOLO de noticias
     # equivalentes (mismo hecho o misma corriente informativa). No fusiona por rótulos vagos.
     if df.empty:
@@ -2186,7 +2309,7 @@ def aplicar_consistencia_grupos(df, titulo_col, resumen_col,
         for i in idxs:
             df.at[df.index[i], "Grupo noticia"] = gid
 
-    if subtema_col in df.columns:
+    if subtema_col in df.columns and not vocabulario_subtema:
         df[subtema_col] = df[subtema_col].apply(
             lambda x: capitalizar_etiqueta(_recortar_frase_completa(_sin_comas_etiqueta(str(x)), MAX_PALABRAS_SUBTEMA))
             if str(x).strip().lower() not in {"", "nan", "n/a", "-"} else x
@@ -2241,10 +2364,15 @@ def aplicar_consistencia_grupos(df, titulo_col, resumen_col,
             continue
         for col in (subtema_col, tema_col):
             if col in df.columns:
+                vocab = vocabulario_subtema if col == subtema_col else vocabulario_tema
                 canon = _canon_mas_frecuente(idxs, col)
                 if canon:
                     for i in idxs:
-                        if _etiqueta_pertenece_al_texto(canon, _analisis_fila(i)):
+                        if vocab:
+                            en_vocab = _canon_en_vocabulario_pkl(canon, vocab)
+                            if en_vocab:
+                                df.at[df.index[i], col] = en_vocab
+                        elif _etiqueta_pertenece_al_texto(canon, _analisis_fila(i)):
                             df.at[df.index[i], col] = capitalizar_etiqueta(canon)
         # Tono: Positivo/Negativo 'gana' sobre Neutro; conflicto Pos+Neg no se toca.
         if tono_col in df.columns:
@@ -2260,13 +2388,23 @@ def aplicar_consistencia_grupos(df, titulo_col, resumen_col,
 
     textos_anclaje = [_analisis_fila(i) for i in range(n)]
     if subtema_col in df.columns:
-        df[subtema_col] = _sanear_etiquetas_por_item(
-            [str(x) for x in df[subtema_col].tolist()], textos_anclaje, marca, aliases, es_subtema=True
-        )
+        if vocabulario_subtema:
+            df[subtema_col] = _forzar_vocabulario_pkl(
+                [str(x) for x in df[subtema_col].tolist()], vocabulario_subtema, textos_anclaje
+            )
+        else:
+            df[subtema_col] = _sanear_etiquetas_por_item(
+                [str(x) for x in df[subtema_col].tolist()], textos_anclaje, marca, aliases, es_subtema=True
+            )
     if tema_col in df.columns:
-        df[tema_col] = _sanear_etiquetas_por_item(
-            [str(x) for x in df[tema_col].tolist()], textos_anclaje, marca, aliases, es_subtema=False
-        )
+        if vocabulario_tema:
+            df[tema_col] = _forzar_vocabulario_pkl(
+                [str(x) for x in df[tema_col].tolist()], vocabulario_tema, textos_anclaje
+            )
+        else:
+            df[tema_col] = _sanear_etiquetas_por_item(
+                [str(x) for x in df[tema_col].tolist()], textos_anclaje, marca, aliases, es_subtema=False
+            )
     return df
 
 
@@ -2582,13 +2720,138 @@ def analizar_tono_con_pkl(textos, pkl_file, titulos=None, resumenes=None, marca=
         return None
 
 def analizar_temas_con_pkl(textos, pkl_file):
+    """Predice temas y los deja SIEMPRE dentro del vocabulario del pkl.
+
+    Devuelve (etiquetas, clases) o None si falla la carga.
+    """
     try:
+        if hasattr(pkl_file, "seek"):
+            pkl_file.seek(0)
         pipeline = joblib.load(pkl_file)
-        predicciones = pipeline.predict(textos)
-        return [str(p).strip() for p in predicciones]
+        clases = _clases_de_pipeline(pipeline)
+        etiquetas = _asignar_etiquetas_pkl(pipeline, textos, clases)
+        return etiquetas, clases
     except Exception as e:
         st.error(f"Error pkl temas: {e}")
         return None
+
+
+def _clases_de_pipeline(pipeline) -> list:
+    if pipeline is None:
+        return []
+    objs = [pipeline]
+    if hasattr(pipeline, "steps") and pipeline.steps:
+        objs.append(pipeline.steps[-1][1])
+    named = getattr(pipeline, "named_steps", None)
+    if named:
+        objs.extend(named.values())
+    for obj in objs:
+        if obj is not None and hasattr(obj, "classes_"):
+            return [str(c).strip() for c in obj.classes_ if str(c).strip()]
+    return []
+
+
+def _canon_en_vocabulario_pkl(etiqueta, clases):
+    if not clases:
+        return None
+    mapa = {}
+    for c in clases:
+        mapa[string_norm_label(c)] = c
+        mapa[unidecode(str(c).lower()).strip()] = c
+        mapa[str(c).strip()] = c
+    et = str(etiqueta or "").strip()
+    if et in mapa:
+        return mapa[et]
+    key = string_norm_label(et)
+    if key in mapa:
+        return mapa[key]
+    key2 = unidecode(et.lower()).strip()
+    return mapa.get(key2)
+
+
+def _score_clase_pkl(texto, clase) -> float:
+    nt = string_norm_label(texto)
+    nc = string_norm_label(clase)
+    if not nc:
+        return 0.0
+    tt, tc = set(nt.split()), set(nc.split())
+    overlap = len(tt & tc)
+    score = overlap / max(1, len(tc))
+    if overlap >= 2:
+        score += 0.2
+    st_t = {_stem_es(w) for w in tt if len(w) >= 4}
+    st_c = {_stem_es(w) for w in tc if len(w) >= 4}
+    if st_t and st_c:
+        if st_t & st_c:
+            score += 0.35
+        elif any(
+            a[:5] == b[:5]
+            for a in st_t for b in st_c
+            if min(len(a), len(b)) >= 5
+        ):
+            score += 0.25
+    score += 0.15 * SequenceMatcher(None, nc, nt[: max(120, len(nc) * 3)]).ratio()
+    return score
+
+
+def _mejor_clase_pkl(texto, clases, proba_row=None) -> str:
+    if not clases:
+        return ""
+    scores = []
+    for i, c in enumerate(clases):
+        lex = _score_clase_pkl(texto, c)
+        pr = float(proba_row[i]) if proba_row is not None and i < len(proba_row) else 0.0
+        gen = 0.0 if _es_etiqueta_generica(c) else 0.15
+        scores.append((0.55 * pr + 0.45 * lex + gen, not _es_etiqueta_generica(c), c))
+    scores.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    no_gen = [c for _, ng, c in scores if ng]
+    if no_gen:
+        return no_gen[0]
+    return scores[0][2]
+
+
+def _resolver_etiqueta_pkl(pred, texto, clases, proba_row=None) -> str:
+    """Una etiqueta del vocabulario del pkl. Nunca texto libre."""
+    if not clases:
+        return str(pred or "").strip()
+    canon = _canon_en_vocabulario_pkl(pred, clases)
+    if canon and not _es_etiqueta_generica(canon):
+        return canon
+    mejor = _mejor_clase_pkl(texto, clases, proba_row)
+    return _canon_en_vocabulario_pkl(mejor, clases) or clases[0]
+
+
+def _asignar_etiquetas_pkl(pipeline, textos, clases=None) -> list:
+    clases = list(clases or _clases_de_pipeline(pipeline))
+    values = [str(t or "") for t in textos]
+    if not values:
+        return []
+    preds = [str(p).strip() for p in pipeline.predict(values)]
+    probas = None
+    try:
+        if hasattr(pipeline, "predict_proba"):
+            probas = pipeline.predict_proba(values)
+    except Exception:
+        probas = None
+    out = []
+    for i, p in enumerate(preds):
+        row = probas[i] if probas is not None else None
+        out.append(_resolver_etiqueta_pkl(p, values[i], clases, row))
+    return out
+
+
+def _forzar_vocabulario_pkl(etiquetas, clases, textos=None) -> list:
+    if not clases:
+        return list(etiquetas)
+    out = []
+    for i, et in enumerate(etiquetas):
+        canon = _canon_en_vocabulario_pkl(et, clases)
+        if canon:
+            out.append(canon)
+        else:
+            tx = textos[i] if textos is not None and i < len(textos) else str(et or "")
+            out.append(_mejor_clase_pkl(tx, clases))
+    return out
 
 
 def etiquetar_sin_llm(titulos, resumenes, marca, aliases=None, cuerpos=None):
@@ -2626,7 +2889,27 @@ def etiquetar_sin_llm(titulos, resumenes, marca, aliases=None, cuerpos=None):
     return temas, subtemas
 
 
-def _etiquetas_desde_pkl_o_heuristica(predicciones, titulos, resumenes, marca, aliases=None, cuerpos=None):
+def _etiquetas_desde_pkl_o_heuristica(
+    predicciones, titulos, resumenes, marca, aliases=None, cuerpos=None,
+    clases_pkl=None, textos=None,
+):
+    """Si hay vocabulario de pkl, NUNCA sale de él. Sin pkl, heurística libre."""
+    n = len(predicciones or [])
+    if clases_pkl:
+        if textos is None:
+            textos = []
+            for i in range(n):
+                cuerpo = cuerpos[i] if cuerpos is not None else None
+                txt, _ = _texto_clasificacion(
+                    titulos[i] if i < len(titulos) else "",
+                    resumenes[i] if i < len(resumenes) else "",
+                    marca, aliases, cuerpo,
+                )
+                textos.append(txt)
+        return [
+            _resolver_etiqueta_pkl(p, textos[i] if i < len(textos) else "", clases_pkl)
+            for i, p in enumerate(predicciones)
+        ]
     temas_h, _subs_h = etiquetar_sin_llm(titulos, resumenes, marca, aliases, cuerpos)
     if not predicciones:
         return temas_h
@@ -4058,7 +4341,7 @@ def generate_output_excel(rows, km):
 # ======================================
 # Proceso principal
 # ======================================
-async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=None, cliente="", voceros="", enable_scraping=False):
+async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=None, cliente="", voceros="", enable_scraping=False, spkl=None):
     st.session_state.update({'tokens_input': 0, 'tokens_output': 0, 'tokens_embedding': 0})
     get_embedding_cache().reset_stats()  # mantiene los embeddings cacheados entre corridas (no los limpia)
     t0 = time.time()
@@ -4188,17 +4471,28 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
                 )
                 temas = consolidar_temas(subtemas, df["_txt"].tolist(), pb, bn)
             df[km["subtema"]] = subtemas
+            vocab_tema, vocab_sub = None, None
             if epkl:
-                tp = analizar_temas_con_pkl(df["_txt"].tolist(), epkl)
-                if tp:
-                    df[km["tema"]] = _etiquetas_desde_pkl_o_heuristica(
-                        tp, df[km["titulo"]].tolist(), df[km["resumen"]].tolist(), bn, ba, cuerpos
-                    )
+                pack = analizar_temas_con_pkl(df["_txt"].tolist(), epkl)
+                if pack:
+                    df[km["tema"]], vocab_tema = pack
                 else:
                     df[km["tema"]] = temas
             else:
                 df[km["tema"]] = temas
+            if spkl:
+                pack_s = analizar_temas_con_pkl(df["_txt"].tolist(), spkl)
+                if pack_s:
+                    df[km["subtema"]], vocab_sub = pack_s
             df[km["tema"]] = _unificar_tema_por_subtema(df[km["tema"]].tolist(), df[km["subtema"]].tolist())
+            if vocab_tema:
+                df[km["tema"]] = _forzar_vocabulario_pkl(
+                    df[km["tema"]].tolist(), vocab_tema, df["_txt"].tolist()
+                )
+            if vocab_sub:
+                df[km["subtema"]] = _forzar_vocabulario_pkl(
+                    df[km["subtema"]].tolist(), vocab_sub, df["_txt"].tolist()
+                )
             df["Contexto analizado"] = [
                 _contexto_para_excel(extraer_contexto_marca(
                     r[km["titulo"]], r[km["resumen"]], bn, ba,
@@ -4210,6 +4504,7 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
                 df, km["titulo"], km["resumen"],
                 km["tonoiai"], km["tema"], km["subtema"],
                 marca=bn, aliases=ba,
+                vocabulario_tema=vocab_tema, vocabulario_subtema=vocab_sub,
             )
             s.update(label="✓ Paso 4 · Clasificación", state="complete")
             
@@ -4353,7 +4648,7 @@ def render_quick_tab():
 # ======================================
 # EXCEL PERSONALIZADO (Mantiene formato original + 3 columnas al final)
 # ======================================
-async def run_custom_excel_async(file_bytes, tc, sc, bn, al, mode="API de OpenAI", tpkl=None, epkl=None):
+async def run_custom_excel_async(file_bytes, tc, sc, bn, al, mode="API de OpenAI", tpkl=None, epkl=None, spkl=None):
     st.session_state.update({'tokens_input': 0, 'tokens_output': 0, 'tokens_embedding': 0})
     get_embedding_cache().reset_stats()  # mantiene los embeddings cacheados entre corridas (no los limpia)
     t0 = time.time()
@@ -4409,6 +4704,7 @@ async def run_custom_excel_async(file_bytes, tc, sc, bn, al, mode="API de OpenAI
         
         # Subtemas y temas: específicos con o sin PKL (nunca N/A genérico).
         cuerpos = df['Cuerpo Completo'] if 'Cuerpo Completo' in df.columns else None
+        vocab_tema, vocab_sub = None, None
         if "Solo Modelos PKL" in mode:
             temas, subtemas = etiquetar_sin_llm(
                 df[tc].fillna('').tolist(), df[sc].fillna('').tolist(), bn, al, cuerpos
@@ -4420,15 +4716,24 @@ async def run_custom_excel_async(file_bytes, tc, sc, bn, al, mode="API de OpenAI
             temas = consolidar_temas(subtemas, df["_txt"].tolist(), pb, bn)
 
         if epkl:
-            tp = analizar_temas_con_pkl(df["_txt"].tolist(), epkl)
-            if tp:
-                temas = _etiquetas_desde_pkl_o_heuristica(
-                    tp, df[tc].fillna('').tolist(), df[sc].fillna('').tolist(), bn, al, cuerpos
-                )
+            pack = analizar_temas_con_pkl(df["_txt"].tolist(), epkl)
+            if pack:
+                temas, vocab_tema = pack
+        if spkl:
+            pack_s = analizar_temas_con_pkl(df["_txt"].tolist(), spkl)
+            if pack_s:
+                subtemas, vocab_sub = pack_s
 
         df['Subtema'] = subtemas
         df['Tema']    = _unificar_tema_por_subtema(temas, subtemas)
-        df = aplicar_consistencia_grupos(df, tc, sc, marca=bn, aliases=al)
+        if vocab_tema:
+            df['Tema'] = _forzar_vocabulario_pkl(df['Tema'].tolist(), vocab_tema, df["_txt"].tolist())
+        if vocab_sub:
+            df['Subtema'] = _forzar_vocabulario_pkl(df['Subtema'].tolist(), vocab_sub, df["_txt"].tolist())
+        df = aplicar_consistencia_grupos(
+            df, tc, sc, marca=bn, aliases=al,
+            vocabulario_tema=vocab_tema, vocabulario_subtema=vocab_sub,
+        )
         s.update(label="✓ Clasificación completada", state="complete")
 
     # Escribir las 3 columnas adicionales al final en la hoja openpyxl respetando el formato original
@@ -4542,16 +4847,17 @@ def render_custom_excel_tab():
                     index=0, key="custom_mode"
                 )
 
-            tpkl, epkl = None, None
+            tpkl, epkl, spkl = None, None, None
             st.markdown('<div class="sec-label">Modelos PKL (Opcionales)</div>', unsafe_allow_html=True)
-            p1, p2 = st.columns(2)
+            p1, p2, p3 = st.columns(3)
             tpkl = p1.file_uploader("Modelo Sentimiento / Tono (.pkl)", type=["pkl"], key="custom_tpkl")
             epkl = p2.file_uploader("Modelo Temas (.pkl)", type=["pkl"], key="custom_epkl")
+            spkl = p3.file_uploader("Modelo Subtemas (.pkl)", type=["pkl"], key="custom_spkl")
 
             if st.form_submit_button("▶ Iniciar análisis personalizado", use_container_width=True, type="primary"):
                 if not bn.strip():
                     st.error("Ingresa el nombre de la marca principal.")
-                elif "Solo Modelos PKL" in mode and not (tpkl or epkl):
+                elif "Solo Modelos PKL" in mode and not (tpkl or epkl or spkl):
                     st.error("Seleccionaste 'Solo Modelos PKL', por favor adjunta al menos un archivo .pkl para continuar.")
                 else:
                     if "API" in mode or "Híbrido" in mode:
@@ -4569,7 +4875,7 @@ def render_custom_excel_tab():
                             run_custom_excel_async(
                                 st.session_state.custom_bytes,
                                 tc, sc, bn, al,
-                                mode=mode, tpkl=tpkl, epkl=epkl
+                                mode=mode, tpkl=tpkl, epkl=epkl, spkl=spkl
                             )
                         )
 
@@ -4677,17 +4983,21 @@ def main():
                     index=0, key="mode"
                 )
 
-            tpkl, epkl = None, None
+            tpkl, epkl, spkl = None, None, None
             if "PKL" in mode:
                 st.markdown('<div class="sec-label">Modelos PKL</div>', unsafe_allow_html=True)
-                p1, p2 = st.columns(2)
+                p1, p2, p3 = st.columns(3)
                 tpkl = p1.file_uploader(
                     "Modelo de Sentimiento (.pkl)", type=["pkl"], key="tpkl",
                     help="Pipeline sklearn para clasificar tono: -1/0/1 o Negativo/Neutro/Positivo"
                 )
                 epkl = p2.file_uploader(
                     "Modelo de Temas (.pkl)", type=["pkl"], key="epkl",
-                    help="Pipeline sklearn para clasificar temas"
+                    help="Pipeline sklearn para clasificar temas. El Tema asignado será siempre una clase de este pkl."
+                )
+                spkl = p3.file_uploader(
+                    "Modelo de Subtemas (.pkl)", type=["pkl"], key="spkl",
+                    help="Opcional. Si se carga, el Subtema asignado será siempre una clase de este pkl."
                 )
 
             with st.form("main_form"):
@@ -4724,9 +5034,10 @@ def main():
                         cur_mode = st.session_state.get("mode", "API de OpenAI")
                         cur_tpkl = st.session_state.get("tpkl")
                         cur_epkl = st.session_state.get("epkl")
+                        cur_spkl = st.session_state.get("spkl")
                         asyncio.run(run_full_process_async(f1, bn, al, cur_tpkl, cur_epkl, cur_mode,
                                                          xlsx_bytes=None, cliente="", voceros="",
-                                                         enable_scraping=False))
+                                                         enable_scraping=False, spkl=cur_spkl))
                         st.rerun()
         else:
             total = st.session_state.total_rows
