@@ -63,6 +63,8 @@ CONCURRENT_REQUESTS          = 50
 SIMILARITY_THRESHOLD_TONO    = 0.94
 SIMILARITY_THRESHOLD_TITULOS = 0.92
 MAX_PALABRAS_SUBTEMA         = 5
+# Frases de evento (subtema) pueden ser más largas que un n-grama de 5 tokens.
+MAX_PALABRAS_FRASE_EVENTO    = 8
 
 # ── Umbrales base (corpus grande ≥ 20 noticias) ──────────────────────────────
 UMBRAL_SUBTEMA = 0.78
@@ -121,6 +123,7 @@ _TRAILING_INCOMPLETE = {
     "mi","mis","tu","tus","nuestro","nuestra","nuestros","nuestras",
     "a","ha","he","ser","estar","haber","hacer","tener","poder","deber",
     "ir","dar","ver","saber","querer","llegar","pasar","decir","poner",
+    "junto","acerca","segun","según","via","vía",
 }
 
 _VERBOS_LEAD_SUBTEMA = {
@@ -140,6 +143,8 @@ _VERBOS_LEAD_SUBTEMA = {
     "asume", "asumen", "asumio", "asumieron", "posesiona", "posesionan", "posesiono",
     "nombra", "nombran", "nombro", "nombramiento", "designa", "designan", "designo",
     "designacion", "representante", "representa", "representan", "dimite", "dimitio",
+    "reunio", "reune", "reunieron", "congrego", "congrega", "congregaron",
+    "convoco", "convoca", "convocaron", "conto", "participo", "asistio", "asistieron",
 }
 
 _RE_VERBO_SUBTEMA = re.compile(
@@ -158,7 +163,9 @@ _RE_VERBO_SUBTEMA = re.compile(
     r'aumenta|aumentan|conquista|conquistan|derrumba|derrumban|recupera|recuperan|'
     r'plantea|plantean|planteo|renuncia|renuncian|renuncio|asume|asumen|asumio|'
     r'posesiona|posesionan|posesiono|nombra|nombran|nombro|designa|designan|designo|'
-    r'representa|representan|dimite|dimitio)\b',
+    r'representa|representan|dimite|dimitio|'
+    r'reunio|reune|reunieron|congrego|congrega|congregaron|'
+    r'convoco|convoca|convocaron|conto|participo|asistio|asistieron)\b',
     re.IGNORECASE)
 
 # ======================================
@@ -1014,7 +1021,9 @@ def _sanear_etiquetas_por_item(etiquetas, textos, marca="", aliases=None, es_sub
     """Regenera cualquier etiqueta que no esté anclada en el texto de análisis de esa fila."""
     out = []
     for et, tx in zip(etiquetas, textos):
-        if _etiqueta_pertenece_al_texto(et, tx):
+        if _etiqueta_pertenece_al_texto(et, tx) and not (
+            es_subtema and _subtema_de_baja_calidad(et, tx)
+        ):
             out.append(capitalizar_etiqueta(_sin_comas_etiqueta(str(et))))
         else:
             out.append(_asegurar_etiqueta_especifica("", tx, marca, aliases, es_subtema=es_subtema))
@@ -1064,7 +1073,7 @@ def _validar_estructura_subtema(etiqueta: str) -> bool:
     if not etiqueta or len(etiqueta.split()) < 2: return False
     if "," in etiqueta or "，" in etiqueta: return False
     if _es_etiqueta_generica(etiqueta): return False
-    if len(etiqueta.split()) > MAX_PALABRAS_SUBTEMA: return False
+    if len(etiqueta.split()) > MAX_PALABRAS_FRASE_EVENTO: return False
     if _PATRON_TITULAR.match(etiqueta): return False
     if _PATRON_ESTADO.search(etiqueta): return False
     palabras = etiqueta.split()
@@ -1204,20 +1213,32 @@ def _excluir_para_etiqueta(marca="", aliases=None) -> set:
     }
 
 
+def _es_cabeza_nominal_valida(n) -> bool:
+    if not n:
+        return False
+    if n in _CABEZAS_SUBTEMA_VALIDAS:
+        return True
+    if n.endswith("es") and n[:-2] in _CABEZAS_SUBTEMA_VALIDAS:
+        return True
+    if n.endswith("s") and n[:-1] in _CABEZAS_SUBTEMA_VALIDAS:
+        return True
+    return False
+
+
 def _es_participio_cabeza(w) -> bool:
     n = _normaliza_token(w)
-    if not n or n in _CABEZAS_SUBTEMA_VALIDAS:
+    if not n or _es_cabeza_nominal_valida(n):
         return False
     return bool(re.search(r"(ada|ado|idas|idos|iendo|ando)$", n)) and len(n) >= 6
 
 
 def _es_verbo_cabeza(w) -> bool:
     n = _normaliza_token(w)
-    if not n:
+    if not n or _es_cabeza_nominal_valida(n):
         return False
     if n in _VERBOS_LEAD_SUBTEMA or _RE_VERBO_SUBTEMA.search(n):
         return True
-    if n not in _CABEZAS_SUBTEMA_VALIDAS and n.startswith(
+    if n.startswith(
         ("enfrent", "present", "anunci", "firm", "lanz", "inaugur", "investiga")
     ):
         return True
@@ -1230,7 +1251,7 @@ def _span_nominal_fuente(texto, excluir) -> str:
         return ""
     best, best_score = "", -1
     n = len(tokens)
-    max_len = MAX_PALABRAS_SUBTEMA
+    max_len = MAX_PALABRAS_FRASE_EVENTO
     for i in range(n):
         for L in range(2, min(max_len, n - i) + 1):
             span = tokens[i:i + L]
@@ -1246,6 +1267,10 @@ def _span_nominal_fuente(texto, excluir) -> str:
             if _es_participio_cabeza(span[0]):
                 continue
             if norms[0] in _CARGOS_SUBTEMA:
+                continue
+            if _es_nombre_de_pila_en_fuente(span[0], texto) or _es_nombre_de_pila_en_fuente(span[-1], texto):
+                continue
+            if any(_es_verbo_cabeza(w) or _normaliza_token(w) in _VERBOS_NARRATIVOS_EVENTO for w in span):
                 continue
             prep = sum(1 for w in norms if w in _PREP_ETIQUETA)
             content = [x for x in norms if x not in STOPWORDS_ES and x not in _PREP_ETIQUETA and x not in excluir]
@@ -1359,8 +1384,238 @@ def _quitar_frases_marca(texto, marca="", aliases=None) -> str:
     return re.sub(r"\s+", " ", out).strip()
 
 
+_ACCION_CANON = {
+    "lanzamiento": "Lanzamiento", "lanza": "Lanzamiento", "lanzo": "Lanzamiento",
+    "estrena": "Lanzamiento", "estreno": "Lanzamiento", "presenta": "Lanzamiento",
+    "presento": "Lanzamiento", "presentacion": "Lanzamiento",
+    "anuncia": "Anuncio", "anuncio": "Anuncio",
+    "inaugura": "Apertura", "inauguro": "Apertura", "apertura": "Apertura",
+    "abre": "Apertura", "abrio": "Apertura", "inauguracion": "Apertura",
+    "firma": "Convenio", "firmo": "Convenio", "suscribe": "Convenio",
+    "suscribio": "Convenio", "convenio": "Convenio", "alianza": "Convenio",
+    "acuerdo": "Convenio",
+    "recibe": "Reconocimiento", "recibio": "Reconocimiento", "premio": "Reconocimiento",
+    "reconocimiento": "Reconocimiento", "reconocida": "Reconocimiento",
+    "reconocido": "Reconocimiento", "reconocio": "Reconocimiento",
+    "galardon": "Reconocimiento", "distincion": "Reconocimiento",
+    "distinguida": "Reconocimiento", "distinguido": "Reconocimiento",
+    "honoris": "Reconocimiento",
+    "investiga": "Investigación", "investigacion": "Investigación",
+    "sancion": "Investigación", "denuncia": "Investigación", "demanda": "Investigación",
+    "multa": "Investigación",
+    "renuncia": "Renuncia", "renuncio": "Renuncia", "dimite": "Renuncia", "dimitio": "Renuncia",
+    "designa": "Designación", "designo": "Designación", "nombra": "Designación",
+    "nombro": "Designación", "asume": "Designación", "asumio": "Designación",
+    "posesion": "Designación", "nombramiento": "Designación", "designacion": "Designación",
+    "inversion": "Inversión", "invierte": "Inversión", "invirtio": "Inversión",
+    "campana": "Campaña", "campaña": "Campaña",
+    "encuentro": "Encuentro",
+    "foro": "Foro", "congreso": "Foro", "cumbre": "Foro", "seminario": "Foro", "taller": "Foro",
+    "proyecto": "Proyecto", "programa": "Proyecto", "plan": "Proyecto",
+    "construccion": "Construcción", "infraestructura": "Construcción", "obra": "Construcción",
+    "exportacion": "Comercialización", "importacion": "Comercialización",
+    "comercializacion": "Comercialización", "venta": "Comercialización",
+}
+
+_VERBOS_NARRATIVOS_EVENTO = {
+    "reunio", "reune", "reunieron", "congrego", "congrega", "congregaron",
+    "convoco", "convoca", "convocaron", "conto", "participo", "asistio", "asistieron",
+}
+
+
+def _tokens_palabras_fuente(texto) -> list:
+    return re.findall(r"[A-Za-zÁÉÍÓÚÑÜáéíóúñü]+", str(texto or ""))
+
+
+def _limpiar_objeto_evento(obj: str) -> str:
+    obj = _sin_comas_etiqueta(re.sub(r"\s+", " ", str(obj or "")).strip(" .;:"))
+    obj = re.split(r"(?i)\s+al\s+dr\.?", obj)[0].strip()
+    toks = obj.split()
+    vacias = {"el", "la", "los", "las", "un", "una", "unos", "unas"}
+    while toks and unidecode(toks[0].lower()) in vacias:
+        toks = toks[1:]
+    while toks and unidecode(toks[-1].lower().rstrip(".,;:")) in _TRAILING_INCOMPLETE:
+        toks.pop()
+    return " ".join(toks)
+
+
+def _ocurrencia_es_nombre_propio_compuesto(texto, palabra) -> bool:
+    """True si la palabra va en un nombre propio de varias mayúsculas (org, persona)."""
+    if not palabra or not texto:
+        return False
+    for m in re.finditer(rf"(?i)\b{re.escape(palabra)}\b", str(texto)):
+        orig = m.group(0)
+        if not orig[:1].isupper():
+            continue
+        after = str(texto)[m.end():]
+        before = str(texto)[:m.start()]
+        next_cap = re.match(r"\s+[A-ZÁÉÍÓÚÑÜ][\wÁÉÍÓÚáéíóúñü\.]{1,}", after)
+        prev_cap = re.search(r"[A-ZÁÉÍÓÚÑÜ][\wÁÉÍÓÚáéíóúñü\.]{1,}\s+$", before)
+        if next_cap or prev_cap:
+            return True
+    return False
+
+
+def _es_nombre_de_pila_en_fuente(palabra, texto) -> bool:
+    """True si `palabra` es un nombre de pila de persona en el texto (no un org)."""
+    w = str(palabra or "").strip(".,;:!?")
+    if len(w) < 3 or not texto:
+        return False
+    n = unidecode(w.lower())
+    if n in _CABEZAS_SUBTEMA_VALIDAS or n in _CARGOS_SUBTEMA or n in STOPWORDS_ES:
+        return False
+    if re.search(rf"(?i)(?:dr|dra|sr|sra|don|doña|lic|ing|prof)\.?\s+{re.escape(w)}\b", str(texto)):
+        return True
+    if re.search(
+        rf"(?i)(?:\bal|\ba)\s+(?:la\s+|el\s+)?{re.escape(w)}\s+[A-ZÁÉÍÓÚÑÜ]",
+        str(texto),
+    ):
+        return True
+    if re.search(
+        rf"(?:,|;)\s+{re.escape(w)}\s+[A-ZÁÉÍÓÚÑÜ][A-Za-záéíóúñü]+(?:\s+[A-ZÁÉÍÓÚÑÜ][A-Za-záéíóúñü]+)?\s*,",
+        str(texto),
+    ):
+        return True
+    return False
+
+
+def _termina_en_nombre_de_pila(etiqueta, texto) -> bool:
+    toks = str(etiqueta or "").strip().split()
+    if not toks:
+        return True
+    return _es_nombre_de_pila_en_fuente(toks[-1], texto)
+
+
+def _token_truncado_respecto_fuente(token, texto) -> bool:
+    """True si el token es un recorte (reuni/reunio incompleto) de una palabra del texto."""
+    k = unidecode(str(token or "").lower().rstrip(".,;:!?"))
+    if len(k) < 3 or k in _CONECTORES_ETIQUETA or k in STOPWORDS_ES:
+        return False
+    if k in _CABEZAS_SUBTEMA_VALIDAS or k in {unidecode(v.lower()) for v in _ACCION_CANON.values()}:
+        return False
+    formas = [unidecode(t.lower()) for t in _tokens_palabras_fuente(texto)]
+    if k in formas:
+        return False
+    return any(f.startswith(k) and len(f) > len(k) for f in formas)
+
+
+def _accion_principal_en_texto(texto) -> str:
+    """Tipo de hecho: prioriza el núcleo ('el encuentro reunió'), no un token de un nombre propio."""
+    s = str(texto or "")
+    if not s:
+        return ""
+    m = re.search(
+        r"(?i)\b(?:el|un|una|este|esta|al|del|su|sus)\s+"
+        r"(lanzamiento|anuncio|inauguraci[oó]n|apertura|presentaci[oó]n|"
+        r"encuentro|foro|congreso|cumbre|seminario|taller|"
+        r"convenio|acuerdo|alianza|proyecto|programa|plan|campa[nñ]a|"
+        r"reconocimiento|premio|distinci[oó]n|inversi[oó]n|"
+        r"investigaci[oó]n|renuncia|designaci[oó]n|nombramiento)\b",
+        s,
+    )
+    if m:
+        raw = unidecode(m.group(1).lower())
+        rest = s[m.end():]
+        if raw in {"alianza", "acuerdo", "convenio"} and re.match(r"\s+[A-ZÁÉÍÓÚÑÜ]", rest):
+            pass
+        else:
+            can = _ACCION_CANON.get(raw)
+            if can:
+                return can
+    for patron, nombre in _ACCIONES_SUBTEMA:
+        for m in re.finditer(patron, unidecode(s.lower())):
+            word = m.group(1) if m.lastindex else m.group(0)
+            if _ocurrencia_es_nombre_propio_compuesto(s, word):
+                continue
+            return nombre
+    return ""
+
+
+def _dominio_tras_cargo(texto) -> str:
+    """Asunto profesional tras director/líder/jefe/…: el hecho, no el nombre de pila."""
+    s = str(texto or "")
+    patron = re.compile(
+        r"(?i)(?:director(?:a)?(?:\s+cient[ií]fic[oa])?|l[ií]der|jefe|jefa|"
+        r"coordinador(?:a)?|decano|decana|rector(?:a)?)\s+"
+        r"(?:de(?:l| las| los)?|en)\s+"
+        r"(.+?)"
+        r"(?=\s*;|\s*\.(?:\s|$)|"
+        r"\s+al\s+(?:Dr\.?|Dra\.?)|"
+        r"\s+y\s+(?:jefe|jefa|director|directora|l[ií]der)|"
+        r"\s+y\s+a\s+[A-ZÁÉÍÓÚÑ]|"
+        r"\s+a\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñü]+\s+[A-ZÁÉÍÓÚÑ]|"
+        r"$)",
+        re.S,
+    )
+    for m in patron.finditer(s):
+        obj = _limpiar_objeto_evento(m.group(1))
+        content = [
+            t for t in obj.split()
+            if unidecode(t.lower()) not in STOPWORDS_ES
+            and not _es_verbo_cabeza(t)
+            and not _es_nombre_de_pila_en_fuente(t, s)
+        ]
+        if len(content) >= 2 and len(obj.split()) >= 2:
+            return obj
+    m = re.search(
+        r"(?i)\bdoctorado\s+en\s+(.+?)(?=\s+de\s+la\s+|\s*;|\.|$)",
+        s,
+    )
+    if m:
+        obj = _limpiar_objeto_evento("doctorado en " + m.group(1))
+        if len(obj.split()) >= 3:
+            return obj
+    return ""
+
+
+def _objeto_tras_evento_nominal(texto) -> str:
+    """Objeto de 'encuentro/foro anual para analizar X'."""
+    s = str(texto or "")
+    m = re.search(
+        r"(?i)\b(?:encuentro|foro|congreso|cumbre|seminario|taller)\s+"
+        r"(?:anual|nacional|internacional|regional|acad[eé]mic[oa])?\s*"
+        r"(?:para|sobre|de|del)\s+(?:analizar|tratar|debatir|discutir|revisar)?\s*"
+        r"(?:las|los|la|el|una|un)?\s*(.+?)"
+        r"(?=\s*,|\s+y\s+las\s+|\s+y\s+los\s+|\.|$)",
+        s,
+    )
+    if not m:
+        return ""
+    obj = _limpiar_objeto_evento(m.group(1))
+    content = [t for t in obj.split() if unidecode(t.lower()) not in STOPWORDS_ES]
+    if len(content) >= 2 and not _es_verbo_cabeza(obj.split()[0] if obj.split() else ""):
+        return obj
+    return ""
+
+
+def _subtema_de_baja_calidad(etiqueta, texto) -> bool:
+    """Rechaza recortes, nombres de pila sueltos y volcados de keywords."""
+    et = str(etiqueta or "").strip()
+    if not et or _es_etiqueta_generica(et) or "," in et:
+        return True
+    toks = et.split()
+    if len(toks) < 2 or not _frase_esta_completa(et):
+        return True
+    for t in toks:
+        n = _normaliza_token(t)
+        if n in _VERBOS_LEAD_SUBTEMA or n in _VERBOS_NARRATIVOS_EVENTO or _RE_VERBO_SUBTEMA.search(n):
+            return True
+        if _token_truncado_respecto_fuente(t, texto):
+            return True
+    if _termina_en_nombre_de_pila(et, texto):
+        return True
+    m = re.search(r"(?i)\b(?:de|del|en|sobre|para)\s+(\S+)", et)
+    if m and (
+        _es_verbo_cabeza(m.group(1))
+        or _es_nombre_de_pila_en_fuente(m.group(1), texto)
+        or _normaliza_token(m.group(1)) in _VERBOS_NARRATIVOS_EVENTO
+    ):
+        return True
+    return False
+
+
 def _objeto_evento_en_texto(texto: str) -> str:
-    """Objeto del hecho (quién otorga, qué distinción, primer logro), sin nombres de cliente."""
+    """Objeto del hecho (quién otorga, dominio del cargo, tema del encuentro)."""
     s = str(texto or "").strip()
     if not s:
         return ""
@@ -1391,10 +1646,16 @@ def _objeto_evento_en_texto(texto: str) -> str:
         toks = obj.split()
         if 2 <= len(toks) <= 8 and not _es_verbo_cabeza(toks[0]) and not _es_participio_cabeza(toks[0]):
             return obj
+    dominio = _dominio_tras_cargo(s)
+    if dominio:
+        return dominio
+    tematico = _objeto_tras_evento_nominal(s)
+    if tematico:
+        return tematico
     return ""
 
 
-def _frase_evento_completa(accion, objeto, texto, max_palabras=MAX_PALABRAS_SUBTEMA) -> str:
+def _frase_evento_completa(accion, objeto, texto, max_palabras=MAX_PALABRAS_FRASE_EVENTO) -> str:
     if not objeto:
         return accion or ""
     if accion and unidecode(accion.lower()) in unidecode(objeto.lower()):
@@ -1418,7 +1679,7 @@ def _frase_evento_completa(accion, objeto, texto, max_palabras=MAX_PALABRAS_SUBT
     return _sin_comas_etiqueta(objeto)
 
 
-def _recortar_etiqueta_sin_trocear(frase, texto, marca="", aliases=None, max_palabras=MAX_PALABRAS_SUBTEMA) -> str:
+def _recortar_etiqueta_sin_trocear(frase, texto, marca="", aliases=None, max_palabras=MAX_PALABRAS_FRASE_EVENTO) -> str:
     frase = _sin_comas_etiqueta(str(frase or ""))
     rec = _recortar_frase_completa(frase, max_palabras)
     if _etiqueta_trocea_nombre(rec, texto, marca, aliases) and not _etiqueta_trocea_nombre(
@@ -1428,35 +1689,71 @@ def _recortar_etiqueta_sin_trocear(frase, texto, marca="", aliases=None, max_pal
     return rec
 
 
+def _palabras_contenido_evento(texto, excluir) -> list:
+    """Tokens de contenido del texto original: palabras completas, no verbos ni nombres de pila."""
+    out, vistos = [], set()
+    for w in _tokens_palabras_fuente(texto):
+        nw = _normaliza_token(w)
+        if len(nw) < 4 or nw in excluir or nw in _TRAILING_INCOMPLETE:
+            continue
+        if _es_participio_cabeza(w) or _es_verbo_cabeza(w) or nw in _VERBOS_NARRATIVOS_EVENTO:
+            continue
+        if _es_nombre_de_pila_en_fuente(w, texto):
+            continue
+        if nw not in vistos:
+            vistos.add(nw)
+            out.append(w)
+        if len(out) == 6:
+            break
+    return out
+
+
+def _candidato_subtema_ok(frase, texto, marca="", aliases=None) -> bool:
+    if not frase or _es_etiqueta_generica(frase) or "," in str(frase):
+        return False
+    if _etiqueta_trocea_nombre(frase, texto, marca, aliases):
+        return False
+    if marca and _es_nombre_o_fragmento_marca(frase, marca, aliases):
+        return False
+    if marca and _es_verboso_con_marca(frase, marca, aliases):
+        return False
+    if _subtema_de_baja_calidad(frase, texto):
+        return False
+    return True
+
+
 def _extraer_subtema_especifico(texto, marca="", aliases=None) -> str:
-    """Subtema específico anclado en el texto de análisis. Nunca un cubo genérico."""
+    """Subtema: frase nominal del EVENTO o HECHO del texto, no un n-grama de keywords."""
     blob = str(texto or "").strip()
     trabajo = _quitar_frases_marca(blob, marca, aliases) or blob
     excluir = _excluir_para_etiqueta(marca, aliases)
-    tex_norm = unidecode(trabajo.lower())
-    accion = next((nombre for patron, nombre in _ACCIONES_SUBTEMA if re.search(patron, tex_norm)), None)
-    if not accion:
-        accion = next(
-            (nombre for patron, nombre in _ACCIONES_SUBTEMA if re.search(patron, unidecode(blob.lower()))),
-            None,
-        )
-    objeto = _objeto_evento_en_texto(trabajo) or _objeto_evento_en_texto(blob)
+    accion = _accion_principal_en_texto(blob) or _accion_principal_en_texto(trabajo)
+    objeto = (
+        _objeto_evento_en_texto(blob)
+        or _objeto_evento_en_texto(trabajo)
+        or _dominio_tras_cargo(blob)
+        or _objeto_tras_evento_nominal(blob)
+    )
     span = _span_nominal_fuente(trabajo, excluir)
     if span and (
         _es_participio_cabeza(span.split()[0])
         or _es_nombre_o_fragmento_marca(span, marca, aliases)
         or _etiqueta_trocea_nombre(span, blob, marca, aliases)
+        or _subtema_de_baja_calidad(span, blob)
     ):
         extra = {_normaliza_token(span.split()[0])} if span.split() else set()
         span = _span_nominal_fuente(trabajo, excluir | extra)
 
-    frase = ""
+    candidatos = []
     if objeto:
-        frase = _frase_evento_completa(accion, objeto, blob)
-    elif accion and span:
+        candidatos.append(_frase_evento_completa(accion, objeto, blob))
+        if accion and unidecode(accion.lower()) not in unidecode(objeto.lower()):
+            candidatos.append(_sin_comas_etiqueta(f"{accion} de {objeto}"))
+        candidatos.append(_sin_comas_etiqueta(objeto))
+    if accion and span:
         span_norm = unidecode(span.lower())
         if unidecode(accion.lower()) in span_norm:
-            frase = span
+            candidatos.append(span)
         else:
             resto = span
             for p in list(_PREP_ETIQUETA) + ["la", "el", "los", "las", "un", "una"]:
@@ -1466,95 +1763,50 @@ def _extraer_subtema_especifico(texto, marca="", aliases=None) -> str:
                     break
             if resto.split() and (_es_participio_cabeza(resto.split()[0]) or _es_verbo_cabeza(resto.split()[0])):
                 resto = " ".join(resto.split()[1:])
-            frase = f"{accion} de {resto}" if resto else accion
+            if resto:
+                candidatos.append(f"{accion} de {resto}")
     elif span:
-        frase = span
-    elif accion:
-        contenido = [
-            w.lower() for w in re.findall(r"[A-Za-zÁÉÍÓÚÑÜáéíóúñü]+", trabajo)
-            if len(_normaliza_token(w)) >= 4 and _normaliza_token(w) not in excluir
-            and not _RE_VERBO_SUBTEMA.search(_normaliza_token(w))
-            and not _es_participio_cabeza(w)
-        ]
-        vistos, top = set(), []
-        for w in contenido:
-            nw = _normaliza_token(w)
-            if nw not in vistos:
-                vistos.add(nw)
-                top.append(w)
-            if len(top) == 2:
-                break
-        frase = f"{accion} de {' '.join(top)}" if top else accion
-    else:
-        contenido = []
-        vistos = set()
-        for w in re.findall(r"[A-Za-zÁÉÍÓÚÑÜáéíóúñü]+", trabajo):
-            nw = _normaliza_token(w)
-            if len(nw) < 4 or nw in excluir or nw in _TRAILING_INCOMPLETE:
-                continue
-            if _es_participio_cabeza(w):
-                continue
-            if nw not in vistos:
-                vistos.add(nw)
-                contenido.append(w.lower())
-            if len(contenido) == 4:
-                break
-        if len(contenido) >= 2:
-            frase = f"{contenido[0]} de {' '.join(contenido[1:3])}"
-        elif contenido:
-            frase = contenido[0]
+        candidatos.append(span)
+    top = _palabras_contenido_evento(trabajo, excluir)
+    if accion and len(top) >= 2:
+        candidatos.append(f"{accion} de {' '.join(top[:3])}")
+    elif len(top) >= 3:
+        candidatos.append(f"{top[0]} de {' '.join(top[1:3])}")
+    elif accion and top:
+        candidatos.append(f"{accion} de {top[0]}")
 
-    frase = _recortar_etiqueta_sin_trocear(frase, blob, marca, aliases)
-    palabras = frase.split()
-    if palabras and (_es_verbo_cabeza(palabras[0]) or _es_participio_cabeza(palabras[0])):
-        resto = " ".join(palabras[1:]).strip()
-        for p in list(_PREP_ETIQUETA) + ["la", "el", "los", "las", "un", "una"]:
-            if resto.lower().startswith(p + " "):
-                resto = resto[len(p) + 1:]
-                break
-        if accion and resto:
-            frase = f"{accion} de {resto}"
-        elif resto:
-            frase = resto
-        elif accion:
-            frase = accion
-        frase = _recortar_etiqueta_sin_trocear(frase, blob, marca, aliases)
-    toks_marca = _tokens_marca_set(marca, aliases) if marca else set()
-    if (
-        _es_etiqueta_generica(frase)
-        or (marca and _es_nombre_o_fragmento_marca(frase, marca, aliases))
-        or (marca and _es_verboso_con_marca(frase, marca, aliases))
-        or _etiqueta_trocea_nombre(frase, blob, marca, aliases)
-    ):
-        if objeto and not _etiqueta_trocea_nombre(objeto, blob, marca, aliases):
-            frase = _frase_evento_completa(accion, objeto, blob)
-        else:
-            resto = trabajo
-            if toks_marca:
-                resto = re.sub(
-                    r"\b(" + "|".join(re.escape(t) for t in sorted(toks_marca, key=len, reverse=True)) + r")\b",
-                    " ",
-                    unidecode(trabajo.lower()),
-                )
-            palabras = [
-                w for w in re.findall(r"[A-Za-zÁÉÍÓÚÑÜáéíóúñü]{4,}", resto)
-                if _normaliza_token(w) not in STOPWORDS_ES and not _es_participio_cabeza(w)
-            ]
-            if len(palabras) >= 2:
-                frase = _recortar_etiqueta_sin_trocear(
-                    f"{palabras[0]} de {palabras[1]}" + (f" {palabras[2]}" if len(palabras) > 2 else ""),
-                    blob, marca, aliases,
-                )
-            elif palabras:
-                frase = palabras[0]
-    frase = _sin_comas_etiqueta(frase)
-    if not frase or _es_etiqueta_generica(frase) or _etiqueta_trocea_nombre(frase, blob, marca, aliases):
-        if objeto:
-            frase = _frase_evento_completa(accion, objeto, blob)
-        else:
-            crudas = [w.lower() for w in re.findall(r"[A-Za-zÁÉÍÓÚÑÜáéíóúñü]{3,}", trabajo)[:5]]
-            frase = " ".join(crudas[:5]) if crudas else blob[:80]
-    return capitalizar_etiqueta(_sin_comas_etiqueta(frase or "Hecho de la noticia"))
+    for cand in candidatos:
+        frase = _recortar_etiqueta_sin_trocear(cand, blob, marca, aliases, MAX_PALABRAS_FRASE_EVENTO)
+        palabras = frase.split()
+        if palabras and (_es_verbo_cabeza(palabras[0]) or _es_participio_cabeza(palabras[0])):
+            resto = " ".join(palabras[1:]).strip()
+            for p in list(_PREP_ETIQUETA) + ["la", "el", "los", "las", "un", "una"]:
+                if resto.lower().startswith(p + " "):
+                    resto = resto[len(p) + 1:]
+                    break
+            if accion and resto:
+                frase = f"{accion} de {resto}"
+            elif resto:
+                frase = resto
+            frase = _recortar_etiqueta_sin_trocear(frase, blob, marca, aliases, MAX_PALABRAS_FRASE_EVENTO)
+        frase = _sin_comas_etiqueta(frase)
+        if _candidato_subtema_ok(frase, blob, marca, aliases):
+            return capitalizar_etiqueta(frase)
+
+    if objeto:
+        frase = _frase_evento_completa(accion, objeto, blob)
+        if _candidato_subtema_ok(frase, blob, marca, aliases):
+            return capitalizar_etiqueta(frase)
+        if accion:
+            corto = _recortar_etiqueta_sin_trocear(
+                f"{accion} de {objeto}", blob, marca, aliases, MAX_PALABRAS_FRASE_EVENTO
+            )
+            if _candidato_subtema_ok(corto, blob, marca, aliases):
+                return capitalizar_etiqueta(corto)
+    return capitalizar_etiqueta(_sin_comas_etiqueta(
+        (accion + " de " + " ".join(top[:3])).strip() if accion and top
+        else (" ".join(top[:4]) if top else (accion or "Hecho de la noticia"))
+    ))
 
 
 def _extraer_tema_especifico(subtema, texto, marca="", aliases=None) -> str:
@@ -1586,6 +1838,8 @@ def _asegurar_etiqueta_especifica(etiqueta, texto, marca="", aliases=None, es_su
     et = _sin_comas_etiqueta(str(etiqueta or "")).strip()
     if et and not _es_etiqueta_generica(et) and "," not in et:
         if es_subtema and marca and _es_nombre_o_fragmento_marca(et, marca, aliases):
+            et = ""
+        elif es_subtema and _subtema_de_baja_calidad(et, texto):
             et = ""
         else:
             return capitalizar_etiqueta(et)
@@ -3273,26 +3527,30 @@ class ClasificadorSubtema:
 
         prompt = (
             f"Eres analista de reputación que monitorea noticias sobre '{self.marca}'.\n"
-            "Lee el TEXTO DE ANÁLISIS y resume EL HECHO periodístico central en UNA sola "
-            "frase nominal descriptiva de 3 a 5 palabras, gramaticalmente correcta y con sentido lógico completo.\n"
+            "Lee el TEXTO DE ANÁLISIS y resume EL HECHO o EVENTO central en UNA sola "
+            "frase nominal descriptiva, gramaticalmente correcta y con sentido lógico completo "
+            "(típicamente 4 a 8 palabras). Nombra el evento o el hecho, no una bolsa de tokens.\n"
             "El subtema DEBE corresponder a ese texto. No inventes un tema que no esté anclado ahí. "
             "Un subtema por noticia: específico, sin comas, nunca genérico.\n\n"
             "CÓMO CONSTRUIRLA:\n"
-            "  1. Identifica primero el TIPO de hecho: lanzamiento, convenio, alianza, inversión, "
-            "proyecto, campaña, foro, premiación, reconocimiento, nombramiento, designación, posesión, "
-            "renuncia, investigación, sanción, publicación de un libro, apertura, intercambio, etc.\n"
+            "  1. Identifica primero el TIPO de hecho: lanzamiento, convenio, encuentro, foro, "
+            "inversión, proyecto, campaña, premiación, reconocimiento, nombramiento, designación, "
+            "posesión, renuncia, investigación, sanción, apertura, intercambio, etc.\n"
             "  2. Escribe: [tipo de hecho] + [preposición: de/del/para/sobre/en] + [objeto o asunto concreto]. "
             "La frase debe leerse como un encabezado de nota, con orden natural.\n"
-            "  3. Usa SOLO palabras que aparezcan en el texto analizado (o sus derivadas directas, "
-            "ej. 'renunció' → 'renuncia'). NO inventes nombres, lugares, cargos ni términos.\n"
-            "  4. Sintetiza el hecho; NO copies el titular completo ni frases sueltas del texto.\n"
+            "  3. Usa SOLO palabras completas que aparezcan en el texto analizado (o derivadas directas, "
+            "ej. 'renunció' → 'renuncia'). Conserva tildes. NO recortes tokens ('reunió' no es 'reunio').\n"
+            "  4. Sintetiza el EVENTO; NO copies n-gramas sueltos ni el primer nombre de un invitado.\n"
             "  5. Si el hecho NO está vinculado con la marca, describe el tema real de la noticia sin forzar la relación.\n\n"
             "PROHIBIDO (se rechaza automáticamente):\n"
             "  - Comas (un solo subtema, nunca una lista).\n"
             "  - Rótulos genéricos ('Cobertura de información relevante', 'Gestión corporativa', 'Sin tema', 'Varios').\n"
             "  - Empezar por nombre de persona o cargo ('Jesús Martínez', 'Ever Pallares', 'Alcalde', 'Gobernador', 'Superintendente').\n"
+            "  - Terminar en un nombre de pila suelto o en una preposición incompleta.\n"
+            "  - Palabras recortadas o tokens que no existan completos en el texto ('reunio', 'congrego').\n"
+            "  - Volcado de keywords ('encuentro de reunio juan', 'foro de marta').\n"
             "  - Empezar por un lugar o país ('La Guajira', 'Colombia', 'Barranquilla').\n"
-            "  - Verbo conjugado ('presenta', 'lanza', 'plantea', 'renunció', 'asume', 'fue').\n"
+            "  - Verbo conjugado ('presenta', 'lanza', 'plantea', 'renunció', 'asume', 'fue', 'reunió').\n"
             "  - Dos sustantivos pegados sin preposición ('Guajira escenario', 'Colombia escudo').\n"
             "  - Adjetivo después de 'de' cuando debe ir pegado ('Explotación de sexual' es incorrecto; correcto: 'Explotación sexual').\n"
             "  - Etiquetas genéricas ('Gestión corporativa', 'Actividad institucional').\n"
@@ -3300,10 +3558,11 @@ class ClasificadorSubtema:
             + bloq_resumenes
             + "\nTÍTULOS (último recurso si el texto de análisis no alcanza):\n" + "\n".join(f"  · {t}" for t in tm)
             + lista_existentes
-            + "\n\nEJEMPLOS CORRECTOS: 'Convenio de cooperación científica', 'Reconocimiento al liderazgo regional', "
-            "'Intercambio intercultural en La Guajira', 'Explotación sexual de menores', 'Posesión del superintendente de Notariado'\n"
+            +             "\n\nEJEMPLOS CORRECTOS: 'Convenio de cooperación científica', 'Reconocimiento al liderazgo regional', "
+            "'Intercambio intercultural en La Guajira', 'Encuentro de investigación y educación', "
+            "'Posesión del superintendente de Notariado'\n"
             "EJEMPLOS INCORRECTOS: 'Cobertura de información relevante', 'Sin tema', 'Jesus de martinez', "
-            "'Foro de plantea', 'Memoria de caribe'\n\n"
+            "'Foro de plantea', 'Encuentro de reunio juan', 'Memoria de caribe'\n\n"
             'JSON: {"subtema":"..."}'
         )
 
@@ -3402,6 +3661,8 @@ class ClasificadorSubtema:
 
             # Refuerzo final anti-frases-sin-sentido
             if _tiene_verbo_conjugado(et) or _primera_palabra_verbo(et) or _es_robotico(et) or _empieza_por_nombre_propio(et, titulos_grp):
+                et = self._fallback(titulos_grp)
+            if _subtema_de_baja_calidad(et, getattr(self, "_last_blob", "") or " ".join(str(t) for t in titulos_grp[:4])):
                 et = self._fallback(titulos_grp)
 
             et = _validar_etiqueta_completa(
@@ -3654,6 +3915,7 @@ class ClasificadorSubtema:
             if (
                 _es_etiqueta_generica(s) or "," in str(s) or not str(s).strip()
                 or not _etiqueta_pertenece_al_texto(s, textos[i])
+                or _subtema_de_baja_calidad(s, textos[i])
             ):
                 subtemas[i] = _asegurar_etiqueta_especifica("", textos[i], self.marca, self.aliases)
         for _, idxs in sg:
