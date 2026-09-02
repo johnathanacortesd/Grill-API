@@ -224,7 +224,35 @@ _CABEZAS_SUBTEMA_VALIDAS = {
     "ruta", "hoja", "financiamiento", "fortalecimiento", "cobertura", "puerto",
     "estacion", "memoria", "patrimonio", "identidad", "grieta", "duelo", "salud",
     "cobertura", "plataforma", "bootcamp", "open", "house", "sede", "revision",
+    "desarrollo", "experiencia",
 }
+
+# Adjetivos/demostrativos que no pueden ser el objeto tras "de" ni encabezar el subtema.
+_ADJ_MULETILLA_ETIQUETA = {
+    "unico", "unica", "unicos", "unicas",
+    "nuevo", "nueva", "nuevos", "nuevas",
+    "gran", "grande", "grandes", "especial", "especiales",
+    "exclusivo", "exclusiva", "exclusivos", "exclusivas",
+    "mejor", "mejores", "mayor", "mayores",
+    "este", "esta", "estos", "estas", "ese", "esa", "esos", "esas",
+    "aquel", "aquella", "aquellos", "aquellas",
+    "primer", "primera", "primero", "primeros", "primeras",
+}
+
+# Cabezas de marketing que no son el hecho: "experiencia residencial de lujo" → usar el resto.
+_CABEZAS_CONTENEDORAS_DEBILES = {
+    "experiencia", "entorno", "espacio", "ambiente", "propuesta", "iniciativa",
+    "oferta", "apuesta", "concepto", "opcion", "alternativa", "manera", "forma",
+}
+
+_RE_ESLOGAN_SUBTEMA = re.compile(
+    r"(?i)\b("
+    r"unic[oa]s?\s+en\s+su\s+(tipo|clase|genero|estilo)|"
+    r"nueva\s+forma\s+de\s+(habitar|vivir|invertir|ser|estar)|"
+    r"invita(?:n)?\s+a\s+descubrir|"
+    r"forma\s+de\s+habitar"
+    r")\b"
+)
 
 _CONECTORES_ETIQUETA = {
     "de", "del", "la", "el", "los", "las", "un", "una", "unos", "unas", "al", "lo",
@@ -325,13 +353,16 @@ def _subtema_grounded(etiqueta, fuentes, estricto=False):
     if not contenido:
         return True  # sólo conectores / palabras cortas: nada que "inventar"
     no_coinciden = 0
-    for w in contenido:
+    for i, w in enumerate(contenido):
         ws = _stem_es(w)
         if w in fuente_tokens or ws in fuente_tokens or ws in fuente_stems:
             continue
         # coincidencia por raíz/prefijo (mínimo 4 letras en común)
         if any((fs.startswith(w) or w.startswith(fs)) and min(len(fs), len(w)) >= 4
                for fs in fuente_stems):
+            continue
+        # Cabeza de evento sintetizada (Proyecto, Lanzamiento…) puede no estar lematizada en el texto.
+        if i == 0 and _es_cabeza_nominal_valida(w):
             continue
         no_coinciden += 1
     # Rechaza si alguna palabra de contenido no está anclada. `estricto=False`
@@ -1069,6 +1100,63 @@ def _grupos_contenido_compatibles(
     )[0][0]
     return sim >= min_sim
 
+def _contiene_eslogan_subtema(etiqueta: str) -> bool:
+    """True si la etiqueta arrastra muletillas de marketing en vez del hecho."""
+    et = str(etiqueta or "").strip()
+    if not et:
+        return True
+    if _RE_ESLOGAN_SUBTEMA.search(et):
+        return True
+    n = unidecode(et.lower())
+    if re.search(
+        r"(?:^|\b(?:de|del)\s+)(este|esta|ese|esa|estos|estas)\s+"
+        r"(desarrollo|proyecto|propuesta|iniciativa|experiencia|entorno)\s*$",
+        n,
+    ):
+        return True
+    return False
+
+
+def _de_adjetivo_huerfano(etiqueta: str) -> bool:
+    """'de único…' / 'de este desarrollo': adjetivo o demostrativo huérfano tras de/del."""
+    m = re.search(
+        r"(?i)\b(?:de|del)\s+("
+        + "|".join(sorted(_ADJ_MULETILLA_ETIQUETA, key=len, reverse=True))
+        + r")\b(?:\s+(\S+))?",
+        str(etiqueta or ""),
+    )
+    if not m:
+        return False
+    siguiente = m.group(2)
+    if not siguiente:
+        return True
+    ns = _normaliza_token(siguiente)
+    if not ns or ns in STOPWORDS_ES or ns in _PREP_ETIQUETA or ns in _ADJ_MULETILLA_ETIQUETA:
+        return True
+    if ns in _TRAILING_INCOMPLETE:
+        return True
+    return False
+
+
+def _empieza_por_adj_muletilla(etiqueta: str) -> bool:
+    toks = str(etiqueta or "").split()
+    if not toks:
+        return True
+    return _normaliza_token(toks[0]) in _ADJ_MULETILLA_ETIQUETA
+
+
+def _parece_adjetivo_et(w) -> bool:
+    n = _normaliza_token(w)
+    if not n or n in STOPWORDS_ES or _es_cabeza_nominal_valida(n):
+        return False
+    if n in _ADJ_MULETILLA_ETIQUETA:
+        return True
+    return bool(re.search(
+        r"(al|ales|ico|ica|icos|icas|ivo|iva|ivos|ivas|oso|osa|osos|osas|ante|entes|ente)$",
+        n,
+    )) and len(n) >= 5
+
+
 def _validar_estructura_subtema(etiqueta: str) -> bool:
     if not etiqueta or len(etiqueta.split()) < 2: return False
     if "," in etiqueta or "，" in etiqueta: return False
@@ -1076,8 +1164,14 @@ def _validar_estructura_subtema(etiqueta: str) -> bool:
     if len(etiqueta.split()) > MAX_PALABRAS_FRASE_EVENTO: return False
     if _PATRON_TITULAR.match(etiqueta): return False
     if _PATRON_ESTADO.search(etiqueta): return False
+    if _contiene_eslogan_subtema(etiqueta) or _de_adjetivo_huerfano(etiqueta):
+        return False
+    if _empieza_por_adj_muletilla(etiqueta):
+        return False
     palabras = etiqueta.split()
-    if len(palabras) <= 4:
+    # Dos palabras sueltas sin nexo ("Guajira escenario") no son un encabezado.
+    # Tres o más pueden ser [hecho] + adjetivo + objeto sin relleno.
+    if len(palabras) <= 2:
         nexos = {
             "de","del","para","sobre","en","con","por","ante","hacia",
             "entre","sin","al","las","los","una","uno","que","como",
@@ -1162,6 +1256,7 @@ _ACCIONES_SUBTEMA = [
     (r"\b(encuentro)\b", "Encuentro"),
     (r"\b(foro|congreso|cumbre|seminario|taller)\b", "Foro"),
     (r"\b(proyecto|programa|plan)\b", "Proyecto"),
+    (r"\b(desarrollo|desarrolla)\b", "Desarrollo"),
     (r"\b(construccion|infraestructura|obra)\b", "Construcción"),
     (r"\b(exportacion|importacion|comercializacion|venta)\b", "Comercialización"),
 ]
@@ -1245,42 +1340,117 @@ def _es_verbo_cabeza(w) -> bool:
     return bool(re.search(r"(aron|ieron|aban|ian|ando|iendo)$", n)) and len(n) >= 6
 
 
-def _span_nominal_fuente(texto, excluir) -> str:
-    tokens = re.findall(r"[A-Za-zÁÉÍÓÚÑÜáéíóúñü]+", str(texto or ""))
-    if not tokens:
-        return ""
-    best, best_score = "", -1
-    n = len(tokens)
+def _partir_oraciones(texto) -> list:
+    s = re.sub(r"\s+", " ", str(texto or "")).strip()
+    if not s:
+        return []
+    return [p.strip() for p in re.split(r"(?<=[.!?])\s+", s) if p.strip()]
+
+
+def _clausula_antes_de_relativo(oracion: str) -> str:
+    return re.split(
+        r"(?i)\s+\b(?:que|donde|quien|quienes|cuando|cual|cuales|cuyo|cuya)\b\s+",
+        str(oracion or ""),
+        maxsplit=1,
+    )[0].strip()
+
+
+def _componer_frase_hecho(accion, objeto) -> str:
+    """[hecho] + de + [objeto] gramatical, o [hecho] + adjetivo si el objeto es un contenedor débil."""
+    objeto = _limpiar_objeto_evento(objeto)
+    accion = str(accion or "").strip()
+    if not objeto:
+        return accion
+    if not accion:
+        return objeto
+    if unidecode(accion.lower()) in unidecode(objeto.lower()):
+        return objeto
+    toks = objeto.split()
+    cabeza_obj = _normaliza_token(toks[0]) if toks else ""
+    if cabeza_obj in _CABEZAS_CONTENEDORAS_DEBILES and len(toks) >= 2:
+        resto = toks[1:]
+        while resto and unidecode(resto[0].lower()) in ({"de", "del", "la", "el", "los", "las", "un", "una"} | _PREP_ETIQUETA):
+            resto = resto[1:]
+        if resto and not _empieza_por_adj_muletilla(" ".join(resto)):
+            if _parece_adjetivo_et(resto[0]):
+                return f"{accion} {' '.join(resto)}"
+            return f"{accion} de {' '.join(resto)}"
+    return f"{accion} de {objeto}"
+
+
+def _score_sintagma_nominal(span, oracion, excluir) -> int:
+    """Puntúa un SN ya existente en la oración. Coherencia > número de preposiciones."""
+    frase = " ".join(span)
+    if _contiene_eslogan_subtema(frase) or _de_adjetivo_huerfano(frase) or _empieza_por_adj_muletilla(frase):
+        return -10**6
+    norms = [_normaliza_token(w) for w in span]
+    if not norms[0] or not norms[-1]:
+        return -10**6
+    if norms[0] in excluir or norms[-1] in excluir:
+        return -10**6
+    if norms[0] in _TRAILING_INCOMPLETE or norms[-1] in _TRAILING_INCOMPLETE:
+        return -10**6
+    if norms[0] in _VERBOS_LEAD_SUBTEMA or _es_verbo_cabeza(span[0]) or _es_participio_cabeza(span[0]):
+        return -10**6
+    if norms[0] in _CARGOS_SUBTEMA or norms[0] in _ADJ_MULETILLA_ETIQUETA:
+        return -10**6
+    if _es_nombre_de_pila_en_fuente(span[0], oracion) or _es_nombre_de_pila_en_fuente(span[-1], oracion):
+        return -10**6
+    if any(_es_verbo_cabeza(w) or _normaliza_token(w) in _VERBOS_NARRATIVOS_EVENTO for w in span):
+        return -10**6
+    content = [x for x in norms if x not in STOPWORDS_ES and x not in _PREP_ETIQUETA and x not in excluir]
+    if len(content) < 2:
+        return -10**6
+    score = 0
+    if _es_cabeza_nominal_valida(norms[0]) or norms[0] in _CABEZAS_CONTENEDORAS_DEBILES:
+        score += 6
+    if any(w in _PREP_ETIQUETA for w in norms[1:-1] if w):
+        score += 2
+    score += min(len(content), 4)
+    L = len(span)
+    if 3 <= L <= 6:
+        score += 2
+    propios = 0
+    for w in span:
+        nw = _normaliza_token(w)
+        if nw in STOPWORDS_ES or nw in _PREP_ETIQUETA:
+            continue
+        if re.search(rf"\b{re.escape(w)}\b", oracion) and w[:1].isupper() and not _es_cabeza_nominal_valida(nw):
+            propios += 1
+    if propios >= 2 and propios >= len(content) - 0 and not _es_cabeza_nominal_valida(norms[0]):
+        score -= 5
+    return score
+
+
+def _sintagmas_nominales_fuente(texto, excluir=None) -> list:
+    """Sintagmas nominales que YA aparecen en el texto, por oración. Nunca cruza un punto."""
+    excluir = excluir or set()
     max_len = MAX_PALABRAS_FRASE_EVENTO
-    for i in range(n):
-        for L in range(2, min(max_len, n - i) + 1):
-            span = tokens[i:i + L]
-            norms = [_normaliza_token(w) for w in span]
-            if not norms[0] or not norms[-1]:
-                continue
-            if norms[0] in excluir or norms[-1] in excluir:
-                continue
-            if norms[0] in _TRAILING_INCOMPLETE or norms[-1] in _TRAILING_INCOMPLETE:
-                continue
-            if norms[0] in _VERBOS_LEAD_SUBTEMA or _es_verbo_cabeza(span[0]):
-                continue
-            if _es_participio_cabeza(span[0]):
-                continue
-            if norms[0] in _CARGOS_SUBTEMA:
-                continue
-            if _es_nombre_de_pila_en_fuente(span[0], texto) or _es_nombre_de_pila_en_fuente(span[-1], texto):
-                continue
-            if any(_es_verbo_cabeza(w) or _normaliza_token(w) in _VERBOS_NARRATIVOS_EVENTO for w in span):
-                continue
-            prep = sum(1 for w in norms if w in _PREP_ETIQUETA)
-            content = [x for x in norms if x not in STOPWORDS_ES and x not in _PREP_ETIQUETA and x not in excluir]
-            if len(content) < 2:
-                continue
-            score = prep * 4 + len(content) + (1 if 3 <= L <= 5 else 0)
-            if score > best_score:
-                best_score = score
-                best = " ".join(span)
-    return best
+    ranked = []
+    vistos = set()
+    for oracion in _partir_oraciones(texto):
+        corte = _clausula_antes_de_relativo(oracion)
+        tokens = re.findall(r"[A-Za-zÁÉÍÓÚÑÜáéíóúñü]+", corte)
+        n = len(tokens)
+        for i in range(n):
+            for L in range(2, min(max_len, n - i) + 1):
+                span = tokens[i:i + L]
+                score = _score_sintagma_nominal(span, oracion, excluir)
+                if score < 0:
+                    continue
+                frase = " ".join(span)
+                key = unidecode(frase.lower())
+                if key in vistos:
+                    continue
+                vistos.add(key)
+                ranked.append((score, frase))
+    ranked.sort(key=lambda x: (-x[0], len(x[1].split())))
+    return [f for _, f in ranked]
+
+
+def _span_nominal_fuente(texto, excluir) -> str:
+    nps = _sintagmas_nominales_fuente(texto, excluir)
+    return nps[0] if nps else ""
 
 
 def _nexos_nombre() -> set:
@@ -1412,6 +1582,7 @@ _ACCION_CANON = {
     "encuentro": "Encuentro",
     "foro": "Foro", "congreso": "Foro", "cumbre": "Foro", "seminario": "Foro", "taller": "Foro",
     "proyecto": "Proyecto", "programa": "Proyecto", "plan": "Proyecto",
+    "desarrollo": "Desarrollo", "desarrolla": "Desarrollo",
     "construccion": "Construcción", "infraestructura": "Construcción", "obra": "Construcción",
     "exportacion": "Comercialización", "importacion": "Comercialización",
     "comercializacion": "Comercialización", "venta": "Comercialización",
@@ -1509,7 +1680,7 @@ def _accion_principal_en_texto(texto) -> str:
         r"(lanzamiento|anuncio|inauguraci[oó]n|apertura|presentaci[oó]n|"
         r"encuentro|foro|congreso|cumbre|seminario|taller|"
         r"convenio|acuerdo|alianza|proyecto|programa|plan|campa[nñ]a|"
-        r"reconocimiento|premio|distinci[oó]n|inversi[oó]n|"
+        r"desarrollo|reconocimiento|premio|distinci[oó]n|inversi[oó]n|"
         r"investigaci[oó]n|renuncia|designaci[oó]n|nombramiento)\b",
         s,
     )
@@ -1589,12 +1760,16 @@ def _objeto_tras_evento_nominal(texto) -> str:
 
 
 def _subtema_de_baja_calidad(etiqueta, texto) -> bool:
-    """Rechaza recortes, nombres de pila sueltos y volcados de keywords."""
+    """Rechaza recortes, eslóganes, nombres de pila y collages agramaticales."""
     et = str(etiqueta or "").strip()
     if not et or _es_etiqueta_generica(et) or "," in et:
         return True
     toks = et.split()
     if len(toks) < 2 or not _frase_esta_completa(et):
+        return True
+    if _contiene_eslogan_subtema(et) or _de_adjetivo_huerfano(et) or _empieza_por_adj_muletilla(et):
+        return True
+    if _normaliza_token(toks[0]) in _CARGOS_SUBTEMA:
         return True
     for t in toks:
         n = _normaliza_token(t)
@@ -1609,8 +1784,18 @@ def _subtema_de_baja_calidad(etiqueta, texto) -> bool:
         _es_verbo_cabeza(m.group(1))
         or _es_nombre_de_pila_en_fuente(m.group(1), texto)
         or _normaliza_token(m.group(1)) in _VERBOS_NARRATIVOS_EVENTO
+        or _normaliza_token(m.group(1)) in _ADJ_MULETILLA_ETIQUETA
     ):
         return True
+    # Dos infinitivos coordinados ("Habitar e invertir…") no son un encabezado.
+    if len(toks) >= 3 and unidecode(toks[1].lower()) in {"e", "y"}:
+        a, b = _normaliza_token(toks[0]), _normaliza_token(toks[2])
+        if (
+            len(a) >= 5 and len(b) >= 5
+            and a.endswith(("ar", "er", "ir")) and b.endswith(("ar", "er", "ir"))
+            and not _es_cabeza_nominal_valida(a)
+        ):
+            return True
     return False
 
 
@@ -1652,22 +1837,41 @@ def _objeto_evento_en_texto(texto: str) -> str:
     tematico = _objeto_tras_evento_nominal(s)
     if tematico:
         return tematico
+    m = re.search(
+        r"(?i)\b(?:propone|proponen|presenta|presentan|lanza|lanzan|"
+        r"ofrece|ofrecen|desarrolla|desarrollan|impulsa|impulsan|"
+        r"anuncia|anuncian|inaugura|inauguran)\s+"
+        r"(?:un|una|el|la|este|esta)\s+(.+?)"
+        r"(?=\s+que\b|\s+donde\b|\s+cuando\b|\s+quien\b|\s*,|\s*\.|$)",
+        s,
+    )
+    if m:
+        obj = _limpiar_objeto_evento(m.group(1))
+        content = [
+            t for t in obj.split()
+            if unidecode(t.lower()) not in STOPWORDS_ES
+            and not _es_verbo_cabeza(t)
+        ]
+        if (
+            len(content) >= 2
+            and obj.split()
+            and not _es_verbo_cabeza(obj.split()[0])
+            and not _contiene_eslogan_subtema(obj)
+            and not _de_adjetivo_huerfano(obj)
+        ):
+            return obj
     return ""
 
 
 def _frase_evento_completa(accion, objeto, texto, max_palabras=MAX_PALABRAS_FRASE_EVENTO) -> str:
     if not objeto:
         return accion or ""
-    if accion and unidecode(accion.lower()) in unidecode(objeto.lower()):
-        cand = objeto
-    else:
-        cand = f"{accion} de {objeto}" if accion else objeto
-    cand = _sin_comas_etiqueta(cand)
+    cand = _sin_comas_etiqueta(_componer_frase_hecho(accion, objeto))
     if len(cand.split()) <= max_palabras and not _etiqueta_trocea_nombre(cand, texto):
         return cand
     sigla = _sigla_junto_a_nombre(objeto, texto)
     if sigla and accion:
-        corto = _sin_comas_etiqueta(f"{accion} de {sigla}")
+        corto = _sin_comas_etiqueta(_componer_frase_hecho(accion, sigla))
         if len(corto.split()) <= max_palabras:
             return corto
     if len(objeto.split()) <= max_palabras:
@@ -1689,25 +1893,6 @@ def _recortar_etiqueta_sin_trocear(frase, texto, marca="", aliases=None, max_pal
     return rec
 
 
-def _palabras_contenido_evento(texto, excluir) -> list:
-    """Tokens de contenido del texto original: palabras completas, no verbos ni nombres de pila."""
-    out, vistos = [], set()
-    for w in _tokens_palabras_fuente(texto):
-        nw = _normaliza_token(w)
-        if len(nw) < 4 or nw in excluir or nw in _TRAILING_INCOMPLETE:
-            continue
-        if _es_participio_cabeza(w) or _es_verbo_cabeza(w) or nw in _VERBOS_NARRATIVOS_EVENTO:
-            continue
-        if _es_nombre_de_pila_en_fuente(w, texto):
-            continue
-        if nw not in vistos:
-            vistos.add(nw)
-            out.append(w)
-        if len(out) == 6:
-            break
-    return out
-
-
 def _candidato_subtema_ok(frase, texto, marca="", aliases=None) -> bool:
     if not frase or _es_etiqueta_generica(frase) or "," in str(frase):
         return False
@@ -1719,11 +1904,13 @@ def _candidato_subtema_ok(frase, texto, marca="", aliases=None) -> bool:
         return False
     if _subtema_de_baja_calidad(frase, texto):
         return False
+    if not _validar_estructura_subtema(frase):
+        return False
     return True
 
 
 def _extraer_subtema_especifico(texto, marca="", aliases=None) -> str:
-    """Subtema: frase nominal del EVENTO o HECHO del texto, no un n-grama de keywords."""
+    """Subtema: un sintagma nominal del HECHO, no un collage de keywords ni un eslogan."""
     blob = str(texto or "").strip()
     trabajo = _quitar_frases_marca(blob, marca, aliases) or blob
     excluir = _excluir_para_etiqueta(marca, aliases)
@@ -1734,48 +1921,43 @@ def _extraer_subtema_especifico(texto, marca="", aliases=None) -> str:
         or _dominio_tras_cargo(blob)
         or _objeto_tras_evento_nominal(blob)
     )
-    span = _span_nominal_fuente(trabajo, excluir)
-    if span and (
-        _es_participio_cabeza(span.split()[0])
-        or _es_nombre_o_fragmento_marca(span, marca, aliases)
-        or _etiqueta_trocea_nombre(span, blob, marca, aliases)
-        or _subtema_de_baja_calidad(span, blob)
+    if objeto and (
+        _subtema_de_baja_calidad(objeto, blob)
+        or _contiene_eslogan_subtema(objeto)
+        or (marca and _es_nombre_o_fragmento_marca(objeto, marca, aliases))
     ):
-        extra = {_normaliza_token(span.split()[0])} if span.split() else set()
-        span = _span_nominal_fuente(trabajo, excluir | extra)
+        objeto = ""
+
+    # Preferir SN del texto original: quitar la marca no debe pegar "Canal de" con la oración siguiente.
+    nps = _sintagmas_nominales_fuente(blob, excluir)
+    if not nps:
+        nps = _sintagmas_nominales_fuente(trabajo, excluir)
+    nps = [
+        np for np in nps
+        if np
+        and not _subtema_de_baja_calidad(np, blob)
+        and not (marca and _es_nombre_o_fragmento_marca(np, marca, aliases))
+        and not _etiqueta_trocea_nombre(np, blob, marca, aliases)
+    ]
+    span = nps[0] if nps else ""
 
     candidatos = []
     if objeto:
         candidatos.append(_frase_evento_completa(accion, objeto, blob))
-        if accion and unidecode(accion.lower()) not in unidecode(objeto.lower()):
-            candidatos.append(_sin_comas_etiqueta(f"{accion} de {objeto}"))
-        candidatos.append(_sin_comas_etiqueta(objeto))
-    if accion and span:
-        span_norm = unidecode(span.lower())
-        if unidecode(accion.lower()) in span_norm:
-            candidatos.append(span)
-        else:
-            resto = span
-            for p in list(_PREP_ETIQUETA) + ["la", "el", "los", "las", "un", "una"]:
-                pref = p + " "
-                if resto.lower().startswith(pref):
-                    resto = resto[len(pref):]
-                    break
-            if resto.split() and (_es_participio_cabeza(resto.split()[0]) or _es_verbo_cabeza(resto.split()[0])):
-                resto = " ".join(resto.split()[1:])
-            if resto:
-                candidatos.append(f"{accion} de {resto}")
-    elif span:
+        if accion:
+            candidatos.append(_componer_frase_hecho(accion, objeto))
+        candidatos.append(objeto)
+    if accion:
+        for np in nps[:6]:
+            if unidecode(accion.lower()) in unidecode(np.lower()):
+                candidatos.append(np)
+            else:
+                candidatos.append(_componer_frase_hecho(accion, np))
+    candidatos.extend(nps)
+    if span:
         candidatos.append(span)
-    top = _palabras_contenido_evento(trabajo, excluir)
-    if accion and len(top) >= 2:
-        candidatos.append(f"{accion} de {' '.join(top[:3])}")
-    elif len(top) >= 3:
-        candidatos.append(f"{top[0]} de {' '.join(top[1:3])}")
-    elif accion and top:
-        candidatos.append(f"{accion} de {top[0]}")
 
-    for cand in candidatos:
+    def _limpiar_candidato(cand):
         frase = _recortar_etiqueta_sin_trocear(cand, blob, marca, aliases, MAX_PALABRAS_FRASE_EVENTO)
         palabras = frase.split()
         if palabras and (_es_verbo_cabeza(palabras[0]) or _es_participio_cabeza(palabras[0])):
@@ -1785,28 +1967,46 @@ def _extraer_subtema_especifico(texto, marca="", aliases=None) -> str:
                     resto = resto[len(p) + 1:]
                     break
             if accion and resto:
-                frase = f"{accion} de {resto}"
+                frase = _componer_frase_hecho(accion, resto)
             elif resto:
                 frase = resto
             frase = _recortar_etiqueta_sin_trocear(frase, blob, marca, aliases, MAX_PALABRAS_FRASE_EVENTO)
-        frase = _sin_comas_etiqueta(frase)
+        return _sin_comas_etiqueta(frase)
+
+    vistos = set()
+    for cand in candidatos:
+        if not cand:
+            continue
+        frase = _limpiar_candidato(cand)
+        key = unidecode(frase.lower())
+        if not key or key in vistos:
+            continue
+        vistos.add(key)
         if _candidato_subtema_ok(frase, blob, marca, aliases):
             return capitalizar_etiqueta(frase)
 
-    if objeto:
-        frase = _frase_evento_completa(accion, objeto, blob)
+    for np in nps:
+        frase = _limpiar_candidato(np)
         if _candidato_subtema_ok(frase, blob, marca, aliases):
             return capitalizar_etiqueta(frase)
-        if accion:
-            corto = _recortar_etiqueta_sin_trocear(
-                f"{accion} de {objeto}", blob, marca, aliases, MAX_PALABRAS_FRASE_EVENTO
-            )
-            if _candidato_subtema_ok(corto, blob, marca, aliases):
-                return capitalizar_etiqueta(corto)
-    return capitalizar_etiqueta(_sin_comas_etiqueta(
-        (accion + " de " + " ".join(top[:3])).strip() if accion and top
-        else (" ".join(top[:4]) if top else (accion or "Hecho de la noticia"))
-    ))
+    if accion and objeto:
+        frase = _limpiar_candidato(_componer_frase_hecho(accion, objeto))
+        if _candidato_subtema_ok(frase, blob, marca, aliases):
+            return capitalizar_etiqueta(frase)
+    for np in nps:
+        frase = _sin_comas_etiqueta(np)
+        if (
+            frase
+            and not _es_etiqueta_generica(frase)
+            and "," not in frase
+            and not _contiene_eslogan_subtema(frase)
+            and not _de_adjetivo_huerfano(frase)
+            and not (marca and _es_nombre_o_fragmento_marca(frase, marca, aliases))
+        ):
+            return capitalizar_etiqueta(frase)
+    if accion and not _es_etiqueta_generica(accion):
+        return capitalizar_etiqueta(accion)
+    return capitalizar_etiqueta("Hecho de la noticia")
 
 
 def _extraer_tema_especifico(subtema, texto, marca="", aliases=None) -> str:
@@ -3527,42 +3727,51 @@ class ClasificadorSubtema:
 
         prompt = (
             f"Eres analista de reputación que monitorea noticias sobre '{self.marca}'.\n"
-            "Lee el TEXTO DE ANÁLISIS y resume EL HECHO o EVENTO central en UNA sola "
-            "frase nominal descriptiva, gramaticalmente correcta y con sentido lógico completo "
-            "(típicamente 4 a 8 palabras). Nombra el evento o el hecho, no una bolsa de tokens.\n"
-            "El subtema DEBE corresponder a ese texto. No inventes un tema que no esté anclado ahí. "
+            "Lee el TEXTO DE ANÁLISIS y SINTETIZA el HECHO o EVENTO central en UN solo "
+            "sintagma nominal en español de Colombia, gramatical, que un analista usaría "
+            "como encabezado de ficha. Debe tener sentido leído en voz alta. "
+            "La coherencia importa más que el número de palabras: tres palabras sólidas "
+            "valen más que seis pegadas. No copies eslóganes ni n-gramas sueltos.\n"
+            "El subtema DEBE corresponder a ese texto. No inventes un hecho que no esté ahí. "
             "Un subtema por noticia: específico, sin comas, nunca genérico.\n\n"
             "CÓMO CONSTRUIRLA:\n"
-            "  1. Identifica primero el TIPO de hecho: lanzamiento, convenio, encuentro, foro, "
-            "inversión, proyecto, campaña, premiación, reconocimiento, nombramiento, designación, "
-            "posesión, renuncia, investigación, sanción, apertura, intercambio, etc.\n"
-            "  2. Escribe: [tipo de hecho] + [preposición: de/del/para/sobre/en] + [objeto o asunto concreto]. "
-            "La frase debe leerse como un encabezado de nota, con orden natural.\n"
-            "  3. Usa SOLO palabras completas que aparezcan en el texto analizado (o derivadas directas, "
-            "ej. 'renunció' → 'renuncia'). Conserva tildes. NO recortes tokens ('reunió' no es 'reunio').\n"
-            "  4. Sintetiza el EVENTO; NO copies n-gramas sueltos ni el primer nombre de un invitado.\n"
-            "  5. Si el hecho NO está vinculado con la marca, describe el tema real de la noticia sin forzar la relación.\n\n"
+            "  1. Identifica el TIPO de hecho: lanzamiento, convenio, encuentro, foro, "
+            "inversión, proyecto, desarrollo, campaña, premiación, reconocimiento, "
+            "nombramiento, investigación, sanción, apertura, etc.\n"
+            "  2. Escribe un encabezado natural: [hecho] + de/del/para/sobre/en + [objeto], "
+            "o [hecho] + adjetivo + de + [objeto] si así se lee mejor "
+            "('Desarrollo residencial de lujo', 'Encuentro anual del sector avícola').\n"
+            "  3. SINTETIZA el hecho en español natural. Puedes usar un hiperónimo claro "
+            "(proyecto, desarrollo, lanzamiento) aunque esa palabra no aparezca literal. "
+            "Conserva tildes. NO recortes tokens ('reunió' no es 'reunio').\n"
+            "  4. NO pegues palabras sueltas con 'de'. NO reutilices muletillas de marketing "
+            "('único en su tipo', 'nueva forma de habitar', 'este desarrollo' como objeto).\n"
+            "  5. Si el hecho NO está vinculado con la marca, describe el tema real de la noticia "
+            "sin forzar la relación.\n\n"
             "PROHIBIDO (se rechaza automáticamente):\n"
             "  - Comas (un solo subtema, nunca una lista).\n"
             "  - Rótulos genéricos ('Cobertura de información relevante', 'Gestión corporativa', 'Sin tema', 'Varios').\n"
             "  - Empezar por nombre de persona o cargo ('Jesús Martínez', 'Ever Pallares', 'Alcalde', 'Gobernador', 'Superintendente').\n"
             "  - Terminar en un nombre de pila suelto o en una preposición incompleta.\n"
             "  - Palabras recortadas o tokens que no existan completos en el texto ('reunio', 'congrego').\n"
-            "  - Volcado de keywords ('encuentro de reunio juan', 'foro de marta').\n"
+            "  - Volcado de keywords ('encuentro de reunio juan', 'foro de marta', "
+            "'Canal de único en su tipo este desarrollo').\n"
             "  - Empezar por un lugar o país ('La Guajira', 'Colombia', 'Barranquilla').\n"
             "  - Verbo conjugado ('presenta', 'lanza', 'plantea', 'renunció', 'asume', 'fue', 'reunió').\n"
             "  - Dos sustantivos pegados sin preposición ('Guajira escenario', 'Colombia escudo').\n"
-            "  - Adjetivo después de 'de' cuando debe ir pegado ('Explotación de sexual' es incorrecto; correcto: 'Explotación sexual').\n"
+            "  - Adjetivo huérfano después de 'de' ('Canal de único', 'Explotación de sexual').\n"
+            "  - Copiar el subtema de otra noticia del lote.\n"
             "  - Etiquetas genéricas ('Gestión corporativa', 'Actividad institucional').\n"
             + bloq_contexto
             + bloq_resumenes
             + "\nTÍTULOS (último recurso si el texto de análisis no alcanza):\n" + "\n".join(f"  · {t}" for t in tm)
             + lista_existentes
-            +             "\n\nEJEMPLOS CORRECTOS: 'Convenio de cooperación científica', 'Reconocimiento al liderazgo regional', "
-            "'Intercambio intercultural en La Guajira', 'Encuentro de investigación y educación', "
-            "'Posesión del superintendente de Notariado'\n"
-            "EJEMPLOS INCORRECTOS: 'Cobertura de información relevante', 'Sin tema', 'Jesus de martinez', "
-            "'Foro de plantea', 'Encuentro de reunio juan', 'Memoria de caribe'\n\n"
+            +             "\n\nEJEMPLOS CORRECTOS: 'Proyecto residencial de lujo', "
+            "'Convenio de formación profesional', 'Encuentro anual del sector avícola', "
+            "'Reconocimiento al liderazgo regional', 'Posesión del superintendente de Notariado'\n"
+            "EJEMPLOS INCORRECTOS: 'Canal de único en su tipo este desarrollo', "
+            "'Encuentro de reunio giancarlo', 'Cobertura de información relevante', "
+            "'Sin tema', 'Foro de plantea', 'Memoria de caribe'\n\n"
             'JSON: {"subtema":"..."}'
         )
 
@@ -3619,7 +3828,7 @@ class ClasificadorSubtema:
 
             def _es_robotico(s):
                 palabras = s.split()
-                if len(palabras) <= 3:
+                if len(palabras) <= 2:
                     nexos = {"de", "del", "para", "sobre", "en", "con", "por",
                              "ante", "hacia", "entre", "sin", "al", "las", "los",
                              "una", "uno", "que", "como", "y", "o", "a", "e", "u"}
@@ -3706,10 +3915,13 @@ class ClasificadorSubtema:
             "en UNA frase nominal descriptiva de 3-5 palabras, correcta y completa, con orden lógico.\n\n"
             f"Títulos:\n" + "\n".join(f"  · {t[:150]}" for t in titulos[:5]) + ctx + "\n\n"
             f"Restricciones:\n{bloque_rest}\n\n"
-            "Formato correcto: [tipo de hecho] + [preposición] + [objeto/asunto]. "
-            "Ej.: 'Convenio de cooperación científica', 'Investigación por fallas operativas', "
-            "'Explotación sexual de menores'.\n"
-            "Usa SOLO palabras del texto. Tildes y ñ correctas. No copies el titular literal.\n"
+            "Sintetiza el hecho en español natural (no copies tokens sueltos ni eslóganes). "
+            "Formato correcto: [tipo de hecho] + [preposición] + [objeto/asunto], "
+            "o [hecho] + adjetivo + de + [objeto] si suena mejor. "
+            "Ej.: 'Proyecto residencial de lujo', 'Convenio de formación profesional', "
+            "'Encuentro anual del sector avícola', 'Investigación por fallas operativas'.\n"
+            "Tildes y ñ correctas. No copies el titular literal ni muletillas "
+            "('único en su tipo', 'nueva forma de habitar').\n"
             'JSON: {"subtema":"..."}'
         )
         try:
