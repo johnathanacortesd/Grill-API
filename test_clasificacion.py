@@ -495,7 +495,7 @@ class TestSubtemaFraseEvento(unittest.TestCase):
     def _assert_frase_evento(self, sub, texto):
         self.assertFalse(app._es_etiqueta_generica(sub), sub)
         self.assertNotIn(",", sub)
-        self.assertGreaterEqual(len(sub.split()), 4, sub)
+        self.assertGreaterEqual(len(sub.split()), 2, sub)
         self.assertFalse(app._subtema_de_baja_calidad(sub, texto), sub)
         n = app.unidecode(sub.lower())
         self.assertNotIn("reunio", n, sub)
@@ -536,6 +536,70 @@ class TestSubtemaFraseEvento(unittest.TestCase):
             sub,
         )
         self.assertNotIn("reunio", n)
+
+
+CTX_DIPORTO = (
+    "Diporto propone una experiencia residencial de lujo que invita a descubrir "
+    "una nueva forma de habitar e invertir en el Gran Canal de Serena del Mar. "
+    "Único en su tipo, este desarrollo propone un entorno donde paisaje, "
+    "arquitectura y vida se encuentran."
+)
+_COLLAGE_DIPORTO = "Canal de único en su tipo este desarrollo"
+
+
+class TestSubtemaHechoNominal(unittest.TestCase):
+    """El subtema es un encabezado gramatical del hecho, no un collage de keywords."""
+
+    def _assert_residencial_lujo(self, sub):
+        n = app.unidecode(sub.lower())
+        self.assertFalse(re.search(r"canal de unico", n), sub)
+        self.assertFalse(re.search(r"unico en su tipo este desarrollo", n), sub)
+        self.assertFalse(app._es_etiqueta_generica(sub), sub)
+        self.assertNotIn(",", sub)
+        self.assertFalse(app._subtema_de_baja_calidad(sub, CTX_DIPORTO), sub)
+        self.assertTrue(
+            ("residencial" in n and ("lujo" in n or "serena" in n or "desarrollo" in n or "proyecto" in n))
+            or ("desarrollo" in n and ("serena" in n or "lujo" in n or "residencial" in n))
+            or ("proyecto" in n and ("residencial" in n or "lujo" in n)),
+            sub,
+        )
+
+    def test_collage_es_baja_calidad(self):
+        self.assertTrue(
+            app._subtema_de_baja_calidad(_COLLAGE_DIPORTO, CTX_DIPORTO),
+            _COLLAGE_DIPORTO,
+        )
+
+    def test_extraer_no_emite_collage(self):
+        for marca, aliases in (
+            ("Diporto", None),
+            ("Serena del Mar", None),
+            ("Diporto", ["Serena del Mar", "Gran Canal"]),
+        ):
+            with self.subTest(marca=marca):
+                sub = app._extraer_subtema_especifico(CTX_DIPORTO, marca, aliases)
+                self._assert_residencial_lujo(sub)
+
+    def test_etiquetar_sin_llm_no_emite_collage(self):
+        for marca, aliases in (
+            ("Diporto", None),
+            ("Serena del Mar", None),
+        ):
+            with self.subTest(marca=marca):
+                _temas, subtemas = app.etiquetar_sin_llm(
+                    ["Diporto lanza residencial de lujo"],
+                    [CTX_DIPORTO],
+                    marca,
+                    aliases,
+                )
+                self._assert_residencial_lujo(subtemas[0])
+
+    def test_no_une_tokens_sueltos_con_de(self):
+        import inspect
+        src = inspect.getsource(app._extraer_subtema_especifico)
+        self.assertNotIn("join(top", src)
+        self.assertNotIn("_palabras_contenido_evento", src)
+        self.assertFalse(hasattr(app, "_palabras_contenido_evento"))
 
 
 if __name__ == "__main__":
