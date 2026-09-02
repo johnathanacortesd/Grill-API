@@ -475,5 +475,68 @@ class TestSubtemaCompleto(unittest.TestCase):
         self.assertTrue(any(tok in n for tok in ("who", "world health", "atencion", "materna", "referencia")), subtemas[0])
 
 
+CTX_ENCUENTRO_PANEL = (
+    "El encuentro reunió al Dr. Giancarlo Buitrago, director de Investigaciones y Educación de LaCardio; "
+    "al Dr. Gerardo Andrés Puentes Leal, líder de las Unidades de Endoscopia y del Servicio de Gastroenterología "
+    "y jefe de Estudios y Epidemiología Clínicos del Hospital Serena del Mar; a Eddy Carolina Betancourt, "
+    "directora científica de Alianza Team; y a Erick Eduardo Orozco Acosta, director del Doctorado en "
+    "Inteligencia Artificial de la Universidad Simón Bolívar."
+)
+
+CTX_FORO_NUBARIA = (
+    "El foro reunió a Marta Quilez, directora de Innovación Azul de Nubaria Tech; "
+    "y a Pablo Reines, líder del Laboratorio de Robótica de la Universidad de Zelta."
+)
+
+
+class TestSubtemaFraseEvento(unittest.TestCase):
+    """Subtema = frase de evento completa, no un n-grama ni un nombre de pila recortado."""
+
+    def _assert_frase_evento(self, sub, texto):
+        self.assertFalse(app._es_etiqueta_generica(sub), sub)
+        self.assertNotIn(",", sub)
+        self.assertGreaterEqual(len(sub.split()), 4, sub)
+        self.assertFalse(app._subtema_de_baja_calidad(sub, texto), sub)
+        n = app.unidecode(sub.lower())
+        self.assertNotIn("reunio", n, sub)
+        self.assertFalse(n.rstrip(".").endswith("giancarlo"), sub)
+        self.assertFalse(n.rstrip(".").endswith("marta"), sub)
+        self.assertFalse(n.rstrip(".").endswith("pablo"), sub)
+
+    def test_encuentro_no_es_n_grama_ni_pila(self):
+        sub = app._extraer_subtema_especifico(CTX_ENCUENTRO_PANEL, "LaCardio", ["lacardio"])
+        self._assert_frase_evento(sub, CTX_ENCUENTRO_PANEL)
+        n = app.unidecode(sub.lower())
+        self.assertIn("encuentro", n)
+        self.assertTrue(
+            any(tok in n for tok in ("investig", "educacion", "especialist")),
+            sub,
+        )
+
+    def test_encuentro_sin_marca_tambien_es_evento(self):
+        sub = app._extraer_subtema_especifico(CTX_ENCUENTRO_PANEL, "", None)
+        self._assert_frase_evento(sub, CTX_ENCUENTRO_PANEL)
+        self.assertIn("encuentro", app.unidecode(sub.lower()))
+
+    def test_rechaza_scrap_reunio_giancarlo(self):
+        scrap = "Encuentro de reunio giancarlo"
+        self.assertTrue(app._subtema_de_baja_calidad(scrap, CTX_ENCUENTRO_PANEL), scrap)
+        regenerada = app._asegurar_etiqueta_especifica(
+            scrap, CTX_ENCUENTRO_PANEL, "LaCardio", ["lacardio"]
+        )
+        self._assert_frase_evento(regenerada, CTX_ENCUENTRO_PANEL)
+        self.assertNotEqual(app.string_norm_label(regenerada), app.string_norm_label(scrap))
+
+    def test_foro_marca_ficticia_no_es_caso_especial(self):
+        sub = app._extraer_subtema_especifico(CTX_FORO_NUBARIA, "Nubaria Tech", ["nubaria"])
+        self._assert_frase_evento(sub, CTX_FORO_NUBARIA)
+        n = app.unidecode(sub.lower())
+        self.assertTrue(
+            any(tok in n for tok in ("foro", "innovacion", "robotic", "laboratorio")),
+            sub,
+        )
+        self.assertNotIn("reunio", n)
+
+
 if __name__ == "__main__":
     unittest.main()
