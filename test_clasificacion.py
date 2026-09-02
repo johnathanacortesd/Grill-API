@@ -411,48 +411,68 @@ class TestFenaviNoHeredaFla(unittest.TestCase):
         )
 
 
-CTX_SANTA_FE_ACR = (
-    "La Fundación Santa Fe de Bogotá fue reconocida por el American College of Radiology "
-    "y se convirtió en la primera institución de Latinoamérica en lograr esta distinción. "
-    "La Fundación Santa Fe de Bogotá fue reconocida por el American College of Radiology (ACR) "
-    "como ACR® International Center for Quality and Safety , convirtiéndose en la primera "
-    "institución de Latinoamérica en recibir esta distinción."
-)
-MARCA_SANTA_FE = "Fundación Santa Fe de Bogotá"
+class TestSubtemaCompleto(unittest.TestCase):
+    """Subtemas completos para cualquier marca: no trocear nombres ni omitir el hecho."""
 
-
-class TestSantaFeAcrSubtema(unittest.TestCase):
-    def test_no_trocea_santa_fe_ni_omite_el_hecho(self):
-        sub = app._extraer_subtema_especifico(CTX_SANTA_FE_ACR, MARCA_SANTA_FE, None)
+    def _assert_subtema_completo(self, sub, texto, marca):
         n = app.unidecode(sub.lower())
-        self.assertNotEqual(n, "reconocimiento de fe de bogota")
-        self.assertFalse(re.search(r"(^| )fe de bogot", n), sub)
-        self.assertNotIn("reconocida", n)
         self.assertFalse(app._es_etiqueta_generica(sub), sub)
         self.assertNotIn(",", sub)
-        self.assertTrue(
-            any(tok in n for tok in (
-                "acr", "american college", "latinoameric", "quality", "distincion", "calidad",
-            )),
-            sub,
-        )
-        if "bogot" in n:
-            self.assertIn("santa fe de bogot", n, sub)
+        self.assertGreaterEqual(len(sub.split()), 2, sub)
+        self.assertFalse(app._etiqueta_trocea_nombre(sub, texto, marca, None), sub)
+        self.assertFalse(app._es_nombre_o_fragmento_marca(sub, marca, None), sub)
 
-    def test_etiquetar_sin_llm_mismo_hecho(self):
-        temas, subtemas = app.etiquetar_sin_llm(
-            ["Fundación Santa Fe recibe distinción ACR"],
-            [CTX_SANTA_FE_ACR],
-            MARCA_SANTA_FE,
+    def test_no_trocea_nombres_propios_de_marcas_distintas(self):
+        casos = [
+            (
+                "Fundación Santa Fe de Bogotá",
+                "La Fundación Santa Fe de Bogotá fue reconocida por el American College of Radiology "
+                "y se convirtió en la primera institución de Latinoamérica en lograr esta distinción. "
+                "La Fundación Santa Fe de Bogotá fue reconocida por el American College of Radiology (ACR) "
+                "como ACR® International Center for Quality and Safety.",
+                ("acr", "american college", "latinoameric", "quality", "distincion"),
+            ),
+            (
+                "Hospital San Juan de Dios",
+                "El Hospital San Juan de Dios fue reconocido por la World Health Organization (WHO) "
+                "como centro de referencia en atención materna y se convirtió en el primer hospital "
+                "de la región en lograr esta distinción.",
+                ("who", "world health", "atencion", "materna", "distincion", "referencia"),
+            ),
+            (
+                "Caja de Compensación Familiar de Fenalco",
+                "La Caja de Compensación Familiar de Fenalco inauguró un centro de bienestar laboral "
+                "en Cartagena para afiliados del sector comercio.",
+                ("inaugur", "bienestar", "cartagena", "centro", "afiliad"),
+            ),
+        ]
+        for marca, ctx, tokens_hecho in casos:
+            with self.subTest(marca=marca):
+                sub = app._extraer_subtema_especifico(ctx, marca, None)
+                self._assert_subtema_completo(sub, ctx, marca)
+                n = app.unidecode(sub.lower())
+                self.assertTrue(any(tok in n for tok in tokens_hecho), sub)
+                marca_n = app.unidecode(marca.lower())
+                if "bogot" in n and "santa" in marca_n:
+                    self.assertIn("santa fe de bogot", n, sub)
+                if "dios" in n and "juan" in marca_n:
+                    self.assertIn("san juan de dios", n, sub)
+
+    def test_etiquetar_respeta_contexto_de_marca(self):
+        marca = "Hospital San Juan de Dios"
+        ctx = (
+            "El Hospital San Juan de Dios fue reconocido por la World Health Organization (WHO) "
+            "como centro de referencia en atención materna."
+        )
+        _temas, subtemas = app.etiquetar_sin_llm(
+            ["Hospital recibe distinción internacional"],
+            [ctx],
+            marca,
             None,
         )
+        self._assert_subtema_completo(subtemas[0], ctx, marca)
         n = app.unidecode(subtemas[0].lower())
-        self.assertNotEqual(n, "reconocimiento de fe de bogota")
-        self.assertFalse(re.search(r"(^| )fe de bogot", n), subtemas[0])
-        self.assertTrue(
-            any(tok in n for tok in ("acr", "american college", "latinoameric", "quality")),
-            subtemas[0],
-        )
+        self.assertTrue(any(tok in n for tok in ("who", "world health", "atencion", "materna", "referencia")), subtemas[0])
 
 
 if __name__ == "__main__":
