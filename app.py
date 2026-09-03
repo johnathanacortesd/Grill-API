@@ -951,9 +951,48 @@ def parse_numeric(val):
     except ValueError:
         return None
 
+_CREDITO_ROLES = re.compile(
+    r'\b(editor|periodista|comunicador|redactor|fotograf|creador audiovisual|productor|'
+    r'locutor|corresponsal|realizado por|produccion de|conduccion de)\b', re.I)
+
+def _es_oracion_credito(oracion):
+    """True si la oracion es el CREDITO/byline del autor ('Editor web y periodista
+    egresado de la Universidad...', 'Estudiante en formacion Universidad...')."""
+    s = unidecode((oracion or '').strip().lower())
+    if not s:
+        return False
+    if re.search(r'\b(egresad[oa]s?|estudiante en formacion)\b', s):
+        if _CREDITO_ROLES.search(s):
+            return True
+        if s.startswith('estudiante en formacion') and len(s) <= 95:
+            return True
+    return False
+
+def _limpiar_creditos(texto):
+    """Quita las oraciones de credito/byline del autor del texto de analisis:
+    la marca solo aparece como alma mater del autor, sin rol en la noticia."""
+    if not texto:
+        return texto
+    partes = re.split(r'(?<=[.!?])\s+|\n+', str(texto))
+    limpio = [pt for pt in partes if not _es_oracion_credito(pt)]
+    return ' '.join(limpio).strip()
+
+def _mencion_solo_credito(titulo, window, marca, aliases=None):
+    """True si la marca aparece en el contexto SOLO como credito del autor
+    (periodista/editor/estudiante egresado de la marca) y el titulo NO la menciona."""
+    if not window:
+        return False
+    if _menciona_marca_o_alias(titulo, marca, aliases):
+        return False
+    for orac in re.split(r'(?<=[.!?])\s+', str(window)):
+        if _menciona_marca_o_alias(orac, marca, aliases) and _es_oracion_credito(orac):
+            return True
+    return False
+
+
 def texto_para_embedding(titulo, resumen, max_len=1800):
     t = str(titulo or "").strip()
-    r = str(resumen or "").strip()
+    r = _limpiar_creditos(str(resumen or "").strip())
     return f"{t}. {t}. {t}. {r}"[:max_len]
 
 def _normalizar_mencion(texto: str) -> str:
@@ -1338,9 +1377,9 @@ def get_embeddings_batch(textos, batch_size=100):
     resultados, missing = cache.get_many(textos)
     if not missing: return resultados
     mt = [textos[i][:2000] if textos[i] else "" for i in missing]
-    for i in range(0, len(mt), batch_size):
-        batch = mt[i:i + batch_size]
-        bidx = missing[i:i + batch_size]
+    chunks = [(mt[i:i + batch_size], missing[i:i + batch_size]) for i in range(0, len(mt), batch_size)]
+
+    def _fetch(batch, bidx):
         try:
             resp = call_with_retries(openai.Embedding.create, input=batch, model=OPENAI_MODEL_EMBEDDING)
             u = resp.get('usage', {}) if isinstance(resp, dict) else getattr(resp, 'usage', {})
@@ -1348,22 +1387,22 @@ def get_embeddings_batch(textos, batch_size=100):
                 _add_tokens(embedding_n=(u.get('total_tokens') if isinstance(u, dict) else getattr(u, 'total_tokens', 0)) or 0)
             for j, d in enumerate(resp["data"]):
                 oi = bidx[j]
-                emb = d["embedding"]
-                resultados[oi] = emb
-                cache.put(textos[oi], emb)
+                resultados[oi] = d["embedding"]
+                cache.put(textos[oi], resultados[oi])
         except Exception:
-            # Split failed batches once; avoid a serial request for every item.
             if len(batch) > 1:
                 mid = len(batch) // 2
-                for sub, subidx in ((batch[:mid], bidx[:mid]), (batch[mid:], bidx[mid:])):
-                    try:
-                        resp2 = call_with_retries(openai.Embedding.create, input=sub, model=OPENAI_MODEL_EMBEDDING)
-                        for j, d in enumerate(resp2["data"]):
-                            oi = subidx[j]
-                            resultados[oi] = d["embedding"]
-                            cache.put(textos[oi], resultados[oi])
-                    except Exception:
-                        pass
+                _fetch(batch[:mid], bidx[:mid])
+                _fetch(batch[mid:], bidx[mid:])
+
+    if len(chunks) > 1:
+        with ThreadPoolExecutor(max_workers=min(5, len(chunks))) as ex:
+            for _ in ex.map(lambda c: _fetch(c[0], c[1]), chunks):
+                pass
+    else:
+        for c in chunks:
+            _fetch(c[0], c[1])
+
     return resultados
 
 class DSU:
@@ -1563,11 +1602,17 @@ class ClasificadorTono:
     def _menciona_marca(self, texto):
         return _menciona_marca_o_alias(texto, self.marca, self.aliases)
 
-    async def _clasificar_llm(self, texto, sem, contexto_marca=""):
+    async def _clasificar_llm(self, texto, sem, contexto_marca="", titulo=""):
         async with sem:
             eval_txt = (contexto_marca or texto or "").strip()
             if not eval_txt or not self._menciona_marca(eval_txt):
                 return {"tono": "Neutro"}
+            # Mencion SOLO en el credito/byline del autor (periodista/editor/estudiante
+            # egresado de la marca): la marca no tiene rol -> Neutro sin gastar LLM.
+            if _mencion_solo_credito(titulo, eval_txt, self.marca, self.aliases):
+                return {"tono": "Neutro", "confianza": "Alta",
+                        "justificacion": "La marca aparece solo como credito del autor (egresado/estudiante), sin rol en la noticia.",
+                        "evidencia": eval_txt[:1800]}
 
             aliases_str = f" (también conocida como: {', '.join(self.aliases)})" if self.aliases else ""
             prompt = (
@@ -1671,7 +1716,7 @@ class ClasificadorTono:
             _idx, ctx = reps[cid]
             if not ctx:
                 return cid, {"tono": "Neutro"}
-            return cid, await self._clasificar_llm(txts[_idx], sem, contexto_marca=ctx)
+            return cid, await self._clasificar_llm(txts[_idx], sem, contexto_marca=ctx, titulo=str(titulos.iloc[_idx]))
 
         tasks = [_clasificar_con_cid(c) for c in cids]
         rpg = {}
@@ -2029,7 +2074,7 @@ class ClasificadorSubtema:
         if ck in self._cache: return self._cache[ck]
 
         tm = list(dict.fromkeys(str(t)[:130] for t in titulos_grp if pd.notna(t) and str(t).strip() and str(t).strip().lower() != 'nan'))[:6]
-        rm = [str(r)[:200] for r in resumenes_grp[:3] if r and len(str(r)) > 20]
+        rm = [_limpiar_creditos(str(r))[:200] for r in resumenes_grp[:3] if r and len(str(r)) > 20]
 
         # Contexto ampliado (texto rico _txt, dominado por el titular 3x): de ahi
         # sale la mencion de la marca. Se eliminan las listas de keywords del
@@ -2166,7 +2211,7 @@ class ClasificadorSubtema:
     def _refinar(self, titulos, kw=None, resumenes=None, forzar_preposicion=False, prohibir_verbos=False):
         # kw se conserva por compatibilidad de llamadas pero ya NO se inyecta en el
         # prompt: las listas de keywords producian etiquetas pegadas 'X de Y'.
-        ctx = ("\nContexto: " + " | ".join(str(r)[:140] for r in (resumenes or [])[:3])) if resumenes else ""
+        ctx = ("\nContexto: " + " | ".join(_limpiar_creditos(str(r))[:140] for r in (resumenes or [])[:3])) if resumenes else ""
         restricciones = []
         if forzar_preposicion:
             restricciones.append("Incluye una preposición (de/del/para/sobre/en) entre los conceptos.")
@@ -2407,6 +2452,9 @@ class ClasificadorSubtema:
 
         pbar.progress(0.97, "Fase 8 · Sin dedup ni sinónimos cruzados...")
         subtemas = [capitalizar_etiqueta(s) for s in subtemas]
+        subtemas = _unificar_subtemas_titulos_similares(titulos, subtemas)
+        subtemas = _canonizar_subtemas_series(subtemas)
+        nf = len(set(subtemas))
         nf = len(set(subtemas))
         pbar.progress(1.0, f"{nf} subtemas")
         st.info(f"Subtemas: **{nf}** · Grupos originales: **{ng}**")
@@ -2812,6 +2860,90 @@ def _unificar_tema_por_subtema(temas, subtemas):
 # ======================================
 # Duplicados y Excel (Reglas Nuevas)
 # ======================================
+_SERIES_SINONIMOS_CABEZA = {
+    # cabezas que significan lo mismo para una serie (mismo objeto tras la cabeza)
+    'precio': {'precio', 'valor', 'cotizacion'},
+    'valor': {'precio', 'valor', 'cotizacion'},
+    'cotizacion': {'precio', 'valor', 'cotizacion'},
+}
+
+def _canonizar_subtemas_series(subtemas):
+    """Unifica el TEXTO de subtemas que describen la MISMA serie diaria y solo
+    difieren en un sinonimo de la cabeza ('Precio del dolar en colombia' vs
+    'Valor del dolar en colombia' vs 'Cotizacion del dolar en colombia').
+    NO une eventos distintos: exige objeto identico (>=2 tokens de contenido
+    tras la cabeza) y cabeza sinonima."""
+    freq = Counter(subtemas)
+    by_norm = defaultdict(list)
+    for s in subtemas:
+        by_norm[string_norm_label(s)].append(s)
+    # tokens de contenido por etiqueta unica (norm)
+    def _tokens(s):
+        return [t for t in string_norm_label(s).split() if len(t) >= 3]
+    unicos = list(by_norm.keys())
+    canon = {}
+    for i, a in enumerate(unicos):
+        if a in canon:
+            continue
+        ta = _tokens(a)
+        grupo = [a]
+        for b in unicos[i + 1:]:
+            if b in canon:
+                continue
+            tb = _tokens(b)
+            if len(ta) >= 3 and len(tb) == len(ta) and ta[1:] == tb[1:]:
+                ca, cb = ta[0], tb[0]
+                if ca == cb or (ca in _SERIES_SINONIMOS_CABEZA and cb in _SERIES_SINONIMOS_CABEZA.get(ca, set())):
+                    grupo.append(b)
+        if len(grupo) > 1:
+            mejor = max(grupo, key=lambda g: (freq.get(by_norm[g][0], 0), len(by_norm[g][0])))
+            for g in grupo:
+                canon[g] = by_norm[mejor][0]
+    if not canon:
+        return list(subtemas)
+    out = []
+    for s in subtemas:
+        k = string_norm_label(s)
+        out.append(canon.get(k, s))
+    return out
+
+
+def _unificar_subtemas_titulos_similares(titulos, subtemas, umbral=0.88):
+    """Unifica el SUBTEMA de noticias cuyo titulo es casi identico aunque el LLM
+    haya caido en grupos distintos (p. ej. 'Precio del dolar' vs 'Valor del dolar')."""
+    n = len(titulos)
+    if n < 2:
+        return list(subtemas)
+    norm = [normalize_title_for_comparison(t) for t in titulos]
+    pares = set()
+    indice = defaultdict(set)
+    for i, ti in enumerate(norm):
+        if not ti:
+            continue
+        for tok in _tokens_distintivos(ti):
+            indice[tok].add(i)
+    for idxs in indice.values():
+        if len(idxs) > 500:
+            continue
+        orden = sorted(idxs)
+        pares.update((orden[a], orden[b]) for a in range(len(orden)) for b in range(a + 1, len(orden)))
+    dsu = DSU(n)
+    for i, j in sorted(pares):
+        if not norm[i] or not norm[j]:
+            continue
+        if (SequenceMatcher(None, norm[i], norm[j]).ratio() >= umbral
+                and not _hay_conflicto_accion(norm[i], norm[j])):
+            dsu.union(i, j)
+    res = list(subtemas)
+    for grp in dsu.grupos(n).values():
+        if len(grp) < 2:
+            continue
+        canon = Counter(res[i] for i in grp).most_common(1)[0][0]
+        for i in grp:
+            res[i] = canon
+    return res
+
+
 def _normalizar_url(url: str) -> str:
     """Canonicalize URLs and HTML hyperlinks for duplicate detection."""
     if not url:
