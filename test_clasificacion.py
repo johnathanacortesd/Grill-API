@@ -602,5 +602,151 @@ class TestSubtemaHechoNominal(unittest.TestCase):
         self.assertFalse(hasattr(app, "_palabras_contenido_evento"))
 
 
+class TestCotaLLMYVelocidad(unittest.TestCase):
+    """El etiquetado no puede cascada de refine ni colgarse en 1/N."""
+
+    def test_generar_etiqueta_no_espiral_de_refine(self):
+        import json as _json
+        clf = app.ClasificadorSubtema(MARCA, ALIAS)
+        calls = {"n": 0}
+
+        def fake_create(*_a, **_k):
+            calls["n"] += 1
+            resp = MagicMock()
+            choice = MagicMock()
+            choice.message.content = _json.dumps({"subtema": "Varios"})
+            resp.choices = [choice]
+            resp.get = lambda k, d=None: {} if k == "usage" else d
+            return resp
+
+        blob = "Un texto demasiado vago para que la heurística cierre sola. Hechos varios del día."
+        with patch.object(app.openai.ChatCompletion, "create", side_effect=fake_create):
+            et = clf._generar_etiqueta(
+                [blob],
+                ["Noticia institucional del sector"],
+                [blob],
+            )
+        self.assertLessEqual(calls["n"], app.MAX_LLM_CALLS_POR_ETIQUETA, calls["n"])
+        self.assertLessEqual(getattr(clf, "_llm_calls_last", calls["n"]), app.MAX_LLM_CALLS_POR_ETIQUETA)
+        self.assertTrue(str(et).strip())
+
+    def test_heuristica_salta_llm_si_ya_es_alta_calidad(self):
+        clf = app.ClasificadorSubtema(MARCA, ALIAS)
+        calls = {"n": 0}
+
+        def boom(*_a, **_k):
+            calls["n"] += 1
+            raise AssertionError("LLM no debía llamarse")
+
+        blob = (
+            "La Universidad Tecnológica de Bolívar lanza una nueva carrera de medicina "
+            "deportiva junto al hospital universitario de Cartagena."
+        )
+        with patch.object(app.openai.ChatCompletion, "create", side_effect=boom):
+            et = clf._generar_etiqueta(
+                [blob],
+                ["UTB lanza carrera de medicina deportiva"],
+                [blob],
+            )
+        self.assertEqual(calls["n"], 0)
+        self.assertFalse(app._es_etiqueta_generica(et), et)
+        self.assertFalse(app._subtema_de_baja_calidad(et, blob), et)
+
+    def test_validar_completa_sin_llm_por_defecto(self):
+        calls = {"n": 0}
+
+        def boom(*_a, **_k):
+            calls["n"] += 1
+            raise AssertionError("no LLM")
+
+        with patch.object(app.openai.ChatCompletion, "create", side_effect=boom):
+            et = app._validar_etiqueta_completa(
+                "Lanzamiento de",
+                titulos_grp=["UTB lanza carrera de medicina deportiva"],
+                resumenes_grp=["La UTB abre medicina deportiva."],
+                marca=MARCA, aliases=ALIAS, usar_llm=False,
+            )
+        self.assertEqual(calls["n"], 0)
+        self.assertTrue(str(et).strip())
+
+    def test_umbrales_corpus_grande_no_exigen_090(self):
+        u = app._umbrales_adaptativos(313)
+        self.assertLessEqual(u["sim_minima_agrupacion"], 0.84)
+        self.assertLess(u["sim_minima_agrupacion"], 0.90)
+        u_chico = app._umbrales_adaptativos(4)
+        self.assertGreaterEqual(u_chico["sim_minima_agrupacion"], 0.90)
+
+    def test_gpt5_nano_se_fuerza_a_default(self):
+        env = {
+            "OPENAI_CLASIF_MODEL": "gpt-5-nano-2025-08-07",
+            "OPENAI_CLASIF_ALLOW_GPT5": "",
+        }
+        with patch.dict(__import__("os").environ, env, clear=False):
+            modelo = app._resolver_modelo_clasificacion()
+        self.assertEqual(modelo, app.MODELO_CLASIF_DEFAULT)
+        self.assertTrue(app.advertencia_modelo_clasificacion())
+
+
+class TestContextoTonoFuente(unittest.TestCase):
+    def test_contexto_combina_titulo_y_resumen(self):
+        ctx = app.extraer_contexto_marca(
+            "UTB inaugura laboratorio de biotecnología",
+            "La Universidad Tecnológica de Bolívar abrió un laboratorio de biotecnología marina en Cartagena.",
+            MARCA, ALIAS,
+        )
+        self.assertTrue(ctx)
+        self.assertIn("laboratorio", ctx.lower())
+        self.assertTrue(app._menciona_marca_o_alias(ctx, MARCA, ALIAS))
+        self.assertGreaterEqual(len(ctx.split()), 6)
+
+    def test_contexto_no_inventa_marca(self):
+        ctx = app.extraer_contexto_marca(
+            "Crisis del sector avícola nacional",
+            "Los productores piden ayudas al gobierno por el alza de insumos.",
+            MARCA, ALIAS,
+        )
+        self.assertEqual(ctx, "")
+
+    def test_contexto_prioriza_titulo_resumen_sobre_cuerpo(self):
+        cuerpo = ("HTML scrap sucio. " * 40) + "La UTB aparece al final del cuerpo sucio."
+        ctx = app.extraer_contexto_marca(
+            "UTB lanza carrera de medicina",
+            "La UTB presenta medicina deportiva en Cartagena.",
+            MARCA, ALIAS, cuerpo,
+        )
+        self.assertIn("medicina", ctx.lower())
+        self.assertNotIn("HTML scrap", ctx)
+        self.assertTrue(app._menciona_marca_o_alias(ctx, MARCA, ALIAS))
+
+    def test_texto_clasificacion_sigue_orden_marca_resumen_titulo(self):
+        texto, hay = app._texto_clasificacion(
+            "El gobierno anuncia reforma tributaria nacional",
+            "El Congreso debate impuestos. La UTB lanza una carrera de medicina deportiva en Cartagena.",
+            MARCA, ALIAS,
+        )
+        self.assertTrue(hay)
+        self.assertIn("carrera", texto.lower())
+        self.assertNotIn("reforma tributaria", texto.lower())
+
+    def test_tono_sin_mencion_es_neutro_sin_inventar(self):
+        clf = app.ClasificadorTono(MARCA, ALIAS)
+        self.assertFalse(clf._menciona_marca("Crisis del sector sin la institución"))
+        det = app._tono_determinista(
+            "Crisis del sector avícola nacional sin mención institucional",
+            MARCA, ALIAS,
+        )
+        self.assertIsNone(det)
+
+    def test_clasificar_core_sin_llm_expone_columnas(self):
+        df = app.clasificar_noticias_core(
+            ["UTB lanza carrera de medicina deportiva"],
+            ["La Universidad Tecnológica de Bolívar abre medicina deportiva."],
+            MARCA, ALIAS, usar_llm=False,
+        )
+        for col in ("Contexto analizado", "Tono IA", "Tema", "Subtema", "Grupo noticia"):
+            self.assertIn(col, df.columns)
+        self.assertFalse(app._es_etiqueta_generica(df.loc[0, "Subtema"]), df.loc[0, "Subtema"])
+
+
 if __name__ == "__main__":
     unittest.main()

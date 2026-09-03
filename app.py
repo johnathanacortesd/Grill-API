@@ -30,6 +30,7 @@ import xml.etree.ElementTree as ET
 import html
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 # ======================================
 # Configuración general
@@ -41,29 +42,66 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
+MODELO_CLASIF_DEFAULT = "gpt-4.1-nano-2025-04-14"
+_MODELO_OVERRIDE_MSG = ""
+
+
+def _es_gpt5_nano(nombre) -> bool:
+    return "gpt-5-nano" in unidecode(str(nombre or "")).lower()
+
+
 def _resolver_modelo_clasificacion():
     """Modelo de clasificación configurable sin redeploy.
+
     Orden: env OPENAI_CLASIF_MODEL → secret OPENAI_CLASIF_MODEL → gpt-4.1-nano por defecto.
-    (gpt-5-nano-2025-08-07 NO es fiable con esta pila: subtemas 'X de Y' y tono todo Neutro.)"""
-    env = os.environ.get("OPENAI_CLASIF_MODEL")
-    if env:
-        return env
-    try:
-        s = st.secrets.get("OPENAI_CLASIF_MODEL")
-        if s:
-            return s
-    except Exception:
-        pass
-    return "gpt-4.1-nano-2025-04-14"
+    gpt-5-nano-2025-08-07 NO es fiable con esta pila: subtemas 'X de Y', tono todo Neutro
+    y TTFT de decenas de segundos. Se fuerza el default salvo OPENAI_CLASIF_ALLOW_GPT5=1.
+    """
+    global _MODELO_OVERRIDE_MSG
+    _MODELO_OVERRIDE_MSG = ""
+    raw = os.environ.get("OPENAI_CLASIF_MODEL")
+    if not raw:
+        try:
+            raw = st.secrets.get("OPENAI_CLASIF_MODEL")
+        except Exception:
+            raw = None
+    if not raw:
+        return MODELO_CLASIF_DEFAULT
+    raw = str(raw).strip()
+    if _es_gpt5_nano(raw) and os.environ.get("OPENAI_CLASIF_ALLOW_GPT5", "").strip() != "1":
+        _MODELO_OVERRIDE_MSG = (
+            f"OPENAI_CLASIF_MODEL={raw} no es fiable en esta pila "
+            f"(subtemas 'X de Y', tono todo Neutro, TTFT de decenas de segundos). "
+            f"Se usa {MODELO_CLASIF_DEFAULT}. Para experimentar con gpt-5-nano defina "
+            f"OPENAI_CLASIF_ALLOW_GPT5=1 y reasoning_effort=minimal; no es el default "
+            f"mientras el etiquetado 1/N esté bloqueado."
+        )
+        return MODELO_CLASIF_DEFAULT
+    return raw
+
+
+def refrescar_modelo_clasificacion():
+    """Relee env/secret (p. ej. tras setear la clave en Colab)."""
+    global OPENAI_MODEL_CLASIFICACION
+    OPENAI_MODEL_CLASIFICACION = _resolver_modelo_clasificacion()
+    return OPENAI_MODEL_CLASIFICACION
+
+
+def advertencia_modelo_clasificacion() -> str:
+    return _MODELO_OVERRIDE_MSG
+
 
 OPENAI_MODEL_EMBEDDING     = "text-embedding-3-small"
 OPENAI_MODEL_CLASIFICACION = _resolver_modelo_clasificacion()
 
-CONCURRENT_REQUESTS          = 50
+# Tono async + etiquetado de grupos. 50 saturaba rate-limits; 8–16 es el rango seguro.
+CONCURRENT_REQUESTS          = 16
+LABELING_WORKERS             = int(os.environ.get("GRILL_LABELING_WORKERS", "12"))
+MAX_LLM_CALLS_POR_ETIQUETA   = 2
 SIMILARITY_THRESHOLD_TONO    = 0.94
 SIMILARITY_THRESHOLD_TITULOS = 0.92
-MAX_PALABRAS_SUBTEMA         = 5
-# Frases de evento (subtema) pueden ser más largas que un n-grama de 5 tokens.
+MAX_PALABRAS_SUBTEMA         = 6
+# Tope del extractor: frases de evento completas (el objetivo de estilo es ~3–6).
 MAX_PALABRAS_FRASE_EVENTO    = 8
 
 # ── Umbrales base (corpus grande ≥ 20 noticias) ──────────────────────────────
@@ -629,6 +667,15 @@ hr{border-color:var(--s3)!important;margin:0.5rem 0!important}
 # Umbrales adaptativos según tamaño del corpus
 # ======================================
 def _umbrales_adaptativos(n: int) -> dict:
+    """Umbrales según n.
+
+    Corpus pequeño: altos (no mezclar hechos distintos).
+    Corpus mediano/grande: un poco más permisivos para que republicaciones
+    y la misma noticia en varios medios compartan grupo — el candado duro
+    sigue siendo `_historias_son_el_mismo_hecho` (Fenavi ≠ FLA).
+    Un piso de 0.90 en clustering convertía un dossier de ~300 filas en
+    ~300 grupos singleton y disparaba 300+ ChatCompletions en serie.
+    """
     if n <= 5:
         return dict(
             subtema=0.93,
@@ -646,7 +693,7 @@ def _umbrales_adaptativos(n: int) -> dict:
             usar_paso2b=False,
             usar_fusion_iterativa=False,
         )
-    elif n <= 10:
+    if n <= 10:
         return dict(
             subtema=0.90,
             tema=0.84,
@@ -663,40 +710,73 @@ def _umbrales_adaptativos(n: int) -> dict:
             usar_paso2b=False,
             usar_fusion_iterativa=False,
         )
-    elif n <= 20:
+    if n <= 20:
         return dict(
-            subtema=0.87,
-            tema=0.82,
+            subtema=0.86,
+            tema=0.80,
             dedup_label=0.86,
             fusion_subtemas=0.88,
-            fusion_intergrupo=0.91,
+            fusion_intergrupo=0.90,
             min_pertenencia_subtema=0.66,
             min_pertenencia_tema=0.58,
             coherencia_etiqueta=0.38,
-            sim_minima_agrupacion=0.87,
-            sim_minima_keywords=0.87,
+            sim_minima_agrupacion=0.86,
+            sim_minima_keywords=0.86,
             max_iter_fusion=3,
             num_temas_max=min(n // 2, NUM_TEMAS_MAX),
             usar_paso2b=True,
             usar_fusion_iterativa=True,
         )
-    else:
+    if n <= 80:
         return dict(
-            subtema=UMBRAL_SUBTEMA,
-            tema=UMBRAL_TEMA,
+            subtema=0.80,
+            tema=0.74,
             dedup_label=UMBRAL_DEDUP_LABEL,
             fusion_subtemas=UMBRAL_FUSION_SUBTEMAS,
-            fusion_intergrupo=UMBRAL_FUSION_INTERGRUPO,
+            fusion_intergrupo=0.86,
             min_pertenencia_subtema=UMBRAL_MIN_PERTENENCIA_SUBTEMA,
             min_pertenencia_tema=UMBRAL_MIN_PERTENENCIA_TEMA,
             coherencia_etiqueta=UMBRAL_COHERENCIA_ETIQUETA,
-            sim_minima_agrupacion=SIM_MINIMA_AGRUPACION_SUBTEMA,
-            sim_minima_keywords=SIM_MINIMA_KEYWORDS_RARAS,
+            sim_minima_agrupacion=0.84,
+            sim_minima_keywords=0.84,
             max_iter_fusion=MAX_ITER_FUSION,
             num_temas_max=NUM_TEMAS_MAX,
             usar_paso2b=True,
             usar_fusion_iterativa=True,
         )
+    if n <= 200:
+        return dict(
+            subtema=0.78,
+            tema=UMBRAL_TEMA,
+            dedup_label=UMBRAL_DEDUP_LABEL,
+            fusion_subtemas=UMBRAL_FUSION_SUBTEMAS,
+            fusion_intergrupo=0.84,
+            min_pertenencia_subtema=UMBRAL_MIN_PERTENENCIA_SUBTEMA,
+            min_pertenencia_tema=UMBRAL_MIN_PERTENENCIA_TEMA,
+            coherencia_etiqueta=UMBRAL_COHERENCIA_ETIQUETA,
+            sim_minima_agrupacion=0.82,
+            sim_minima_keywords=0.82,
+            max_iter_fusion=MAX_ITER_FUSION,
+            num_temas_max=NUM_TEMAS_MAX,
+            usar_paso2b=True,
+            usar_fusion_iterativa=True,
+        )
+    return dict(
+        subtema=0.76,
+        tema=UMBRAL_TEMA,
+        dedup_label=UMBRAL_DEDUP_LABEL,
+        fusion_subtemas=UMBRAL_FUSION_SUBTEMAS,
+        fusion_intergrupo=0.84,
+        min_pertenencia_subtema=UMBRAL_MIN_PERTENENCIA_SUBTEMA,
+        min_pertenencia_tema=UMBRAL_MIN_PERTENENCIA_TEMA,
+        coherencia_etiqueta=UMBRAL_COHERENCIA_ETIQUETA,
+        sim_minima_agrupacion=0.80,
+        sim_minima_keywords=0.80,
+        max_iter_fusion=MAX_ITER_FUSION,
+        num_temas_max=NUM_TEMAS_MAX,
+        usar_paso2b=True,
+        usar_fusion_iterativa=True,
+    )
 
 
 # ======================================
@@ -845,6 +925,9 @@ def check_password():
                     st.error("Contraseña incorrecta")
     return False
 
+_TOKEN_LOCK = threading.Lock()
+
+
 def call_with_retries(fn, *a, **kw):
     d = 1
     for att in range(3):
@@ -864,6 +947,18 @@ async def acall_with_retries(fn, *a, **kw):
             if att == 2: raise e
             await asyncio.sleep(d)
             d *= 2
+
+
+def _acumular_uso_chat(resp):
+    """Suma tokens de ChatCompletion de forma segura entre hilos."""
+    u = resp.get('usage', {}) if isinstance(resp, dict) else getattr(resp, 'usage', {})
+    if not u:
+        return
+    pin = (u.get('prompt_tokens') if isinstance(u, dict) else getattr(u, 'prompt_tokens', 0)) or 0
+    pout = (u.get('completion_tokens') if isinstance(u, dict) else getattr(u, 'completion_tokens', 0)) or 0
+    with _TOKEN_LOCK:
+        st.session_state['tokens_input'] = st.session_state.get('tokens_input', 0) + pin
+        st.session_state['tokens_output'] = st.session_state.get('tokens_output', 0) + pout
 
 def norm_key(text):
     if text is None: return ""
@@ -1909,6 +2004,14 @@ def _candidato_subtema_ok(frase, texto, marca="", aliases=None) -> bool:
     return True
 
 
+def _subtema_alta_calidad(frase, texto, marca="", aliases=None) -> bool:
+    """Heurística suficiente para saltar el LLM: frase nominal específica y gramatical."""
+    if not _candidato_subtema_ok(frase, texto, marca, aliases):
+        return False
+    n = len(str(frase).split())
+    return 2 <= n <= MAX_PALABRAS_FRASE_EVENTO
+
+
 def _extraer_subtema_especifico(texto, marca="", aliases=None) -> str:
     """Subtema: un sintagma nominal del HECHO, no un collage de keywords ni un eslogan."""
     blob = str(texto or "").strip()
@@ -2293,12 +2396,10 @@ def _safe_filename_part(value):
     return cleaned.strip('_') or 'marca'
 
 _TERMINAL_PUNCT = re.compile(r'[.!?…]')
+_RE_ORACION = re.compile(r'(?<=[.!?…])\s+(?=[A-ZÁÉÍÓÚÑ¡¿"«])')
 MIN_PALABRAS_CONTEXTO = 10
-# Contexto amplio: más caracteres alrededor de la mención de la marca/alias para un análisis
-# más preciso de tono y subtema (el usuario pidió ampliarlo). ~600 carácter. mínimos garantizados,
-# tope de ~2600.
-CONTEXTO_MIN_CHARS = 600
-MAX_CONTEXTO_CHARS = 2600
+CONTEXTO_MIN_CHARS = 400
+MAX_CONTEXTO_CHARS = 2200
 
 def _texto_hasta_terminal(texto, n=1):
     """Recorta 'texto' para que termine justo tras el enésimo signo de cierre (punto)."""
@@ -2310,17 +2411,56 @@ def _texto_hasta_terminal(texto, n=1):
             return texto[:m.end()].strip(" \n\t")
     return texto.strip(" \n\t")
 
-def _contexto_para_excel(contexto, max_chars=1400, umbral_corto=127):
-    """Paso final de limpieza del 'Contexto analizado' para el Excel: toma hasta 3 oraciones
-    (más contexto de la marca) con tope ~max_chars, ampliado tras el reciente aumento de caracteres."""
+def _partir_oraciones(texto):
+    t = re.sub(r"\s+", " ", str(texto or "")).strip()
+    if not t:
+        return []
+    parts = _RE_ORACION.split(t)
+    out = [p.strip() for p in parts if p.strip()]
+    return out or [t]
+
+
+def _limpiar_parrafo_contexto(texto, max_chars=MAX_CONTEXTO_CHARS):
+    t = re.sub(r"\s+", " ", str(texto or "")).strip()
+    t = t.replace(" .", ".").replace("..", ".")
+    if t and t[0].islower():
+        t = t[0].upper() + t[1:]
+    if len(t) > max_chars:
+        t = _texto_hasta_terminal(t[:max_chars], n=8) or t[:max_chars].rstrip()
+    return t.strip()
+
+
+def _ventanas_mencion(fuente, marca, aliases, radio=1):
+    """Oraciones que mencionan la marca/alias, con 1 oración de radio."""
+    oraciones = _partir_oraciones(fuente)
+    if not oraciones:
+        return []
+    hits = []
+    usados = set()
+    for i, o in enumerate(oraciones):
+        if not _menciona_marca_o_alias(o, marca, aliases):
+            continue
+        lo, hi = max(0, i - radio), min(len(oraciones), i + radio + 1)
+        key = (lo, hi)
+        if key in usados:
+            continue
+        usados.add(key)
+        hits.append(" ".join(oraciones[lo:hi]).strip())
+    return hits
+
+
+def _contexto_para_excel(contexto, max_chars=1800, umbral_corto=80):
+    """Párrafo legible para Excel: hasta 5 oraciones, no un recorte de scrap."""
     if not contexto:
         return ""
-    texto = str(contexto).strip()
-    tramo = _texto_hasta_terminal(texto, n=2)
+    texto = _limpiar_parrafo_contexto(contexto, max_chars=max_chars)
+    tramo = _texto_hasta_terminal(texto, n=5)
     if 0 < len(tramo) < umbral_corto:
-        ampliada = _texto_hasta_terminal(texto, n=3)
+        ampliada = _texto_hasta_terminal(texto, n=6)
         if len(ampliada) > len(tramo):
             tramo = ampliada
+    if not tramo:
+        tramo = texto
     if len(tramo) > max_chars:
         tramo = tramo[:max_chars].rstrip()
     return tramo.strip()
@@ -2386,26 +2526,36 @@ def _brand_audit(titulo, resumen, marca, aliases, cuerpo=None):
     return d['contexto'], d['coincidencia'], d['origen']
 
 def extraer_contexto_marca(titulo, resumen, marca, aliases=None, cuerpo=None, ventana=320):
-    """Contexto analizado de la marca: párrafo completo desde su inicio hasta su
-    punto final. Prioridad de fuentes: Cuerpo Completo → Resumen → Título. Si el
-    tramo queda muy corto, extiende hasta el segundo punto del texto siguiente."""
+    """Contexto analizado: párrafos legibles centrados en la mención de marca/alias.
+
+    Fuentes, en este orden: Título + Resumen-Aclaración; Cuerpo solo si aporta
+    mención y título/resumen no alcanzan. Vacío si la marca no aparece
+    (nunca se inventa presencia).
+    """
     titulo   = clean_text(str(titulo or "")).strip()
     resumen  = clean_text(str(resumen or "")).strip()
     cuerpo   = clean_text(str(cuerpo or "")).strip()
     if not marca:
         return ""
-    fuentes = []
-    if cuerpo:   fuentes.append(cuerpo)
-    if resumen:  fuentes.append(resumen)
-    if titulo:   fuentes.append(titulo)
-    fuente = ""
-    for f in fuentes:
-        if _menciona_marca_o_alias(f, marca, aliases):
-            fuente = f
-            break
-    if not fuente:
+    fragmentos = []
+    vistos = set()
+
+    def _agregar(ventanas):
+        for v in ventanas:
+            key = unidecode(v.lower())[:240]
+            if not v or key in vistos:
+                continue
+            vistos.add(key)
+            fragmentos.append(v)
+
+    _agregar(_ventanas_mencion(titulo, marca, aliases, radio=0))
+    _agregar(_ventanas_mencion(resumen, marca, aliases, radio=1))
+    hay_tit_res = bool(fragmentos)
+    if cuerpo and not hay_tit_res:
+        _agregar(_ventanas_mencion(cuerpo, marca, aliases, radio=1)[:3])
+    if not fragmentos:
         return ""
-    return _extraer_parrafo_marca(fuente, marca, aliases)
+    return _limpiar_parrafo_contexto(" ".join(fragmentos))
 
 def extraer_contexto_marca_detallado(titulo, resumen, marca, aliases=None, cuerpo=None):
     """Return auditable brand match metadata for sentiment analysis."""
@@ -2426,7 +2576,7 @@ def extraer_contexto_marca_detallado(titulo, resumen, marca, aliases=None, cuerp
         "marca_encontrada": "Sí", "origen": origen, "coincidencia": matched,
     }
 
-def _validar_etiqueta_completa(etiqueta, titulos_grp=None, resumenes_grp=None, marca="", aliases=None, fallback_fn=None, textos_grp=None):
+def _validar_etiqueta_completa(etiqueta, titulos_grp=None, resumenes_grp=None, marca="", aliases=None, fallback_fn=None, textos_grp=None, usar_llm=False):
     blob = " ".join(
         str(x) for x in list(textos_grp or [])[:3] + list(resumenes_grp or [])[:3] + list(titulos_grp or [])[:4]
         if str(x).strip()
@@ -2439,7 +2589,8 @@ def _validar_etiqueta_completa(etiqueta, titulos_grp=None, resumenes_grp=None, m
     recortada = _recortar_frase_completa(etiqueta, max_palabras=MAX_PALABRAS_SUBTEMA)
     if _frase_esta_completa(recortada) and len(recortada.split()) >= 2:
         return capitalizar_etiqueta(recortada)
-    if titulos_grp and len(titulos_grp) > 0:
+    # Por defecto sin LLM: el refine spiral de _generar_etiqueta ya está acotado.
+    if usar_llm and titulos_grp and len(titulos_grp) > 0:
         try:
             prompt = (
                 f"La frase '{etiqueta}' está incompleta o es genérica. "
@@ -2461,10 +2612,7 @@ def _validar_etiqueta_completa(etiqueta, titulos_grp=None, resumenes_grp=None, m
                 temperature=0.1,
                 response_format={"type": "json_object"}
             )
-            u = resp.get('usage', {}) if isinstance(resp, dict) else getattr(resp, 'usage', {})
-            if u:
-                st.session_state['tokens_input'] += (u.get('prompt_tokens') if isinstance(u, dict) else getattr(u, 'prompt_tokens', 0)) or 0
-                st.session_state['tokens_output'] += (u.get('completion_tokens') if isinstance(u, dict) else getattr(u, 'completion_tokens', 0)) or 0
+            _acumular_uso_chat(resp)
             raw = json.loads(resp.choices[0].message.content).get("subtema", "")
             if raw:
                 cleaned = limpiar_tema(raw)
@@ -2475,7 +2623,7 @@ def _validar_etiqueta_completa(etiqueta, titulos_grp=None, resumenes_grp=None, m
                     and "," not in cleaned
                 ):
                     return capitalizar_etiqueta(cleaned)
-        except:
+        except Exception:
             pass
     if fallback_fn: return fallback_fn(titulos_grp or [])
     especifica = _extraer_subtema_especifico(blob, marca, aliases)
@@ -3432,6 +3580,82 @@ def etiquetar_sin_llm(titulos, resumenes, marca, aliases=None, cuerpos=None):
     return temas, subtemas
 
 
+class _PBarNulo:
+    """Progress bar no-op para Colab / tests sin Streamlit."""
+    def progress(self, *args, **kwargs):
+        return None
+
+
+def clasificar_noticias_core(
+    titulos, resumenes, marca, aliases=None, cuerpos=None,
+    pkl_tono=None, pkl_tema=None, usar_llm=True, pbar=None,
+):
+    """Pipeline compartido Streamlit/Colab: contexto, tono, subtema, tema, grupo.
+
+    Orden de análisis: menciones de marca/alias → resumen → título.
+    Tono: impacto reputacional sobre la marca; Neutro si no hay mención.
+    """
+    pbar = pbar or _PBarNulo()
+    n = len(titulos)
+    titulos = [str(t or "") for t in titulos]
+    resumenes = [str(r or "") for r in resumenes]
+    if cuerpos is None:
+        cuerpos_l = [""] * n
+    else:
+        cuerpos_l = [str(c or "") for c in cuerpos]
+    textos, contextos = [], []
+    for i in range(n):
+        txt, _hay = _texto_clasificacion(titulos[i], resumenes[i], marca, aliases, cuerpos_l[i])
+        textos.append(txt)
+        contextos.append(extraer_contexto_marca(titulos[i], resumenes[i], marca, aliases, cuerpos_l[i]))
+
+    s_txt = pd.Series(textos)
+    s_res = pd.Series(resumenes)
+    s_tit = pd.Series(titulos)
+    s_cue = pd.Series(cuerpos_l)
+
+    if pkl_tono:
+        tonos_raw = analizar_tono_con_pkl(
+            textos, pkl_tono, titulos=titulos, resumenes=resumenes,
+            marca=marca, aliases=aliases, progress=pbar, cuerpos=cuerpos_l,
+        ) or [{"tono": "Neutro"}] * n
+        tonos = [r.get("tono", "Neutro") for r in tonos_raw]
+    elif usar_llm:
+        tonos_raw = asyncio.run(
+            ClasificadorTono(marca, aliases).procesar_lote_async(s_txt, pbar, s_res, s_tit, s_cue)
+        )
+        tonos = [r.get("tono", "Neutro") for r in tonos_raw]
+    else:
+        tonos = ["N/A"] * n
+
+    vocab_tema = None
+    if not usar_llm:
+        temas, subtemas = etiquetar_sin_llm(titulos, resumenes, marca, aliases, cuerpos_l)
+    else:
+        subtemas = ClasificadorSubtema(marca, aliases).procesar_lote(s_txt, pbar, s_res, s_tit)
+        temas = consolidar_temas(subtemas, textos, pbar, marca)
+    if pkl_tema:
+        pack = analizar_temas_con_pkl(textos, pkl_tema)
+        if pack:
+            temas, vocab_tema = pack
+    temas = _unificar_tema_por_subtema(list(temas), list(subtemas))
+    if vocab_tema:
+        temas = _forzar_vocabulario_pkl(temas, vocab_tema, textos)
+
+    df = pd.DataFrame({
+        "Título": titulos,
+        "Resumen - Aclaracion": resumenes,
+        "Contexto analizado": [_contexto_para_excel(c) for c in contextos],
+        "Tono IA": tonos,
+        "Tema": temas,
+        "Subtema": subtemas,
+    })
+    return aplicar_consistencia_grupos(
+        df, "Título", "Resumen - Aclaracion",
+        marca=marca, aliases=aliases, vocabulario_tema=vocab_tema,
+    )
+
+
 def _etiquetas_desde_pkl_o_heuristica(
     predicciones, titulos, resumenes, marca, aliases=None, cuerpos=None,
     clases_pkl=None, textos=None,
@@ -3558,8 +3782,8 @@ class ClasificadorSubtema:
                             dsu.union(ia, ib)
 
     def _paso3(self, et, ae, dsu, pbar, ps):
-        umbral_cluster = max(self._umbrales.get('subtema', UMBRAL_SUBTEMA), 0.82)
-        sim_min = max(self._umbrales.get('sim_minima_agrupacion', SIM_MINIMA_AGRUPACION_SUBTEMA), 0.90)
+        umbral_cluster = self._umbrales.get('subtema', UMBRAL_SUBTEMA)
+        sim_min = self._umbrales.get('sim_minima_agrupacion', SIM_MINIMA_AGRUPACION_SUBTEMA)
         n = len(et)
         if n < 2: return
 
@@ -3654,7 +3878,7 @@ class ClasificadorSubtema:
                     vg.append(gid)
             if len(vg) < 2: break
             sim = cosine_similarity(np.array(centroids))
-            umbral_efectivo = max(umbral_inter, sim_min)
+            umbral_efectivo = umbral_inter
             pairs = sorted(
                 [(sim[i][j], i, j) for i in range(len(vg)) for j in range(i + 1, len(vg))
                  if sim[i][j] >= umbral_efectivo], reverse=True
@@ -3665,13 +3889,19 @@ class ClasificadorSubtema:
                 if dsu.find(ri) != dsu.find(rj):
                     textos_i = [textos[k] for k in grupos[vg[i]][:20]]
                     textos_j = [textos[k] for k in grupos[vg[j]][:20]]
-                    if _grupos_contenido_compatibles(
-                        textos_i,
-                        textos_j,
-                        "",
-                        "",
-                        min_sim=umbral_efectivo,
-                        min_overlap=0.40,
+                    if (
+                        _grupos_contenido_compatibles(
+                            textos_i,
+                            textos_j,
+                            "",
+                            "",
+                            min_sim=umbral_efectivo,
+                            min_overlap=0.40,
+                        )
+                        and textos_i and textos_j
+                        and _historias_son_el_mismo_hecho(
+                            textos_i[0], textos_j[0], self.marca, self.aliases
+                        )
                     ):
                         dsu.union(ri, rj)
                         fus += 1
@@ -3697,7 +3927,21 @@ class ClasificadorSubtema:
         fuentes_grounding = [str(t) for t in textos_grp[:4] if t and str(t).strip()]
         fuentes_grounding += [str(r) for r in resumenes_grp if r and str(r).strip()]
         fuentes_grounding += [str(t) for t in titulos_grp if t and str(t).strip()]
-        self._last_blob = " ".join(fuentes_grounding[:8])
+        blob = " ".join(fuentes_grounding[:8])
+        self._last_blob = blob
+
+        heur = _extraer_subtema_especifico(blob, self.marca, self.aliases)
+        if _subtema_alta_calidad(heur, blob, self.marca, self.aliases) and not evitar_etiqueta:
+            et = heur
+            anclados = [t for t in (textos_grp or []) if str(t).strip()]
+            if not anclados or all(_etiqueta_pertenece_al_texto(et, t) for t in anclados):
+                self._cache[ck] = et
+                return et
+            if len(anclados) == 1:
+                et = _extraer_subtema_especifico(anclados[0], self.marca, self.aliases)
+                if _subtema_alta_calidad(et, anclados[0], self.marca, self.aliases):
+                    self._cache[ck] = et
+                    return et
 
         lista_existentes = ""
         existentes_anclados = [
@@ -3804,6 +4048,34 @@ class ClasificadorSubtema:
             p0 = prim[0].rstrip(".,!?;:")
             return p0 in _VERBOS_LEAD_SUBTEMA or bool(_RE_VERBO_SUBTEMA.search(p0))
 
+        def _es_robotico(s):
+            palabras = (s or "").split()
+            if len(palabras) <= 2:
+                nexos = {"de", "del", "para", "sobre", "en", "con", "por",
+                         "ante", "hacia", "entre", "sin", "al", "las", "los",
+                         "una", "uno", "que", "como", "y", "o", "a", "e", "u"}
+                tiene_nexo = any(unidecode(p.lower()) in nexos for p in palabras[1:])
+                if not tiene_nexo: return True
+            return False
+
+        def _etiqueta_llm_usable(s):
+            if not s or _es_etiqueta_generica(s) or "," in str(s):
+                return False
+            if _subtema_de_baja_calidad(s, blob):
+                return False
+            if _tiene_verbo_conjugado(s) or _primera_palabra_verbo(s) or _es_robotico(s):
+                return False
+            if _es_nombre_o_fragmento_marca(s, self.marca, self.aliases):
+                return False
+            if not _validar_estructura_subtema(s):
+                return False
+            if not _subtema_grounded(s, fuentes_grounding):
+                return False
+            return True
+
+        llm_usados = 0
+        et = heur if heur and not _es_etiqueta_generica(heur) else ""
+
         try:
             resp = call_with_retries(
                 openai.ChatCompletion.create,
@@ -3813,89 +4085,34 @@ class ClasificadorSubtema:
                 temperature=0.0,
                 response_format={"type": "json_object"}
             )
-            u = resp.get('usage', {}) if isinstance(resp, dict) else getattr(resp, 'usage', {})
-            if u:
-                st.session_state['tokens_input'] += (u.get('prompt_tokens') if isinstance(u, dict) else getattr(u, 'prompt_tokens', 0)) or 0
-                st.session_state['tokens_output'] += (u.get('completion_tokens') if isinstance(u, dict) else getattr(u, 'completion_tokens', 0)) or 0
-
+            llm_usados += 1
+            _acumular_uso_chat(resp)
             raw = json.loads(resp.choices[0].message.content).get("subtema", "Varios")
             et = limpiar_tema(raw)
 
-            if not et or et.strip().lower() == "sin tema":
+            if not _etiqueta_llm_usable(et) and llm_usados < MAX_LLM_CALLS_POR_ETIQUETA:
                 et = self._refinar(tm, None, rm, forzar_preposicion=True, prohibir_verbos=True)
-            if _tiene_verbo_conjugado(et):
-                et = self._refinar(tm, None, rm, forzar_preposicion=True, prohibir_verbos=True)
-
-            def _es_robotico(s):
-                palabras = s.split()
-                if len(palabras) <= 2:
-                    nexos = {"de", "del", "para", "sobre", "en", "con", "por",
-                             "ante", "hacia", "entre", "sin", "al", "las", "los",
-                             "una", "uno", "que", "como", "y", "o", "a", "e", "u"}
-                    tiene_nexo = any(unidecode(p.lower()) in nexos for p in palabras[1:])
-                    if not tiene_nexo: return True
-                return False
-
-            genericas = {"gestión", "gestion", "actividades", "acciones", "noticias",
-                         "información", "informacion", "eventos", "varios", "sin tema",
-                         "actividad corporativa", "gestion corporativa",
-                         "impacto en la reputacion", "impacto reputacional",
-                         "reputacion corporativa", "impacto corporativo",
-                         "cobertura de información relevante", "cobertura de informacion relevante",
-                         "cobertura informativa general", "cobertura informativa"}
-            es_gen = _es_etiqueta_generica(et) or string_norm_label(et) in {string_norm_label(g) for g in genericas}
-            es_solo_marca = _es_nombre_o_fragmento_marca(et, self.marca, self.aliases)
-            es_verboso_marca = _es_verboso_con_marca(et, self.marca, self.aliases)
-            es_rob = _es_robotico(et)
-
-            if es_gen or es_solo_marca or es_verboso_marca or es_rob or len(et.split()) < 3:
-                et = self._refinar(tm, None, rm, forzar_preposicion=True, prohibir_verbos=True)
-
-            if not _validar_estructura_subtema(et):
-                et = self._refinar(tm, None, rm, forzar_preposicion=True, prohibir_verbos=True)
-                if not _validar_estructura_subtema(et):
-                    et = self._fallback(titulos_grp)
-
-            # Refuerzo 1: nombres propios / cargos / números / siglas
-            if _empieza_por_nombre_propio(et, titulos_grp) or _contiene_numero_o_acronimo(et):
-                et = self._refinar(tm, None, rm, forzar_preposicion=True, prohibir_verbos=True, prohibir_nombres=True)
-            if _empieza_por_nombre_propio(et, titulos_grp) or _contiene_numero_o_acronimo(et):
-                et = self._fallback(titulos_grp)
-
-            # Refuerzo 2: grounding (no inventos)
-            if not _subtema_grounded(et, fuentes_grounding):
-                et = self._refinar(tm, None, rm, forzar_preposicion=True, prohibir_verbos=True)
-            if not _subtema_grounded(et, fuentes_grounding):
-                et = self._fallback(titulos_grp)
-
-            # Refuerzo final anti-frases-sin-sentido
-            if _tiene_verbo_conjugado(et) or _primera_palabra_verbo(et) or _es_robotico(et) or _empieza_por_nombre_propio(et, titulos_grp):
-                et = self._fallback(titulos_grp)
-            if _subtema_de_baja_calidad(et, getattr(self, "_last_blob", "") or " ".join(str(t) for t in titulos_grp[:4])):
-                et = self._fallback(titulos_grp)
+                llm_usados += 1
+            if not _etiqueta_llm_usable(et):
+                et = self._fallback(titulos_grp, blob)
 
             et = _validar_etiqueta_completa(
                 et, titulos_grp=titulos_grp, resumenes_grp=resumenes_grp,
-                marca=self.marca, aliases=self.aliases, fallback_fn=self._fallback,
-                textos_grp=textos_grp,
+                marca=self.marca, aliases=self.aliases,
+                fallback_fn=lambda t: self._fallback(t, blob),
+                textos_grp=textos_grp, usar_llm=False,
             )
-            if _es_nombre_o_fragmento_marca(et, self.marca, self.aliases):
-                et = self._refinar(tm, None, rm, forzar_preposicion=True, prohibir_verbos=True, prohibir_nombres=True)
             if _es_nombre_o_fragmento_marca(et, self.marca, self.aliases) or _es_etiqueta_generica(et) or "," in str(et):
-                et = self._fallback(titulos_grp)
-        except:
-            et = self._fallback(titulos_grp)
+                et = self._fallback(titulos_grp, blob)
+        except Exception:
+            et = self._fallback(titulos_grp, blob)
 
-        et = _asegurar_etiqueta_especifica(
-            et,
-            getattr(self, "_last_blob", "") or " ".join(str(t) for t in titulos_grp[:4]),
-            self.marca,
-            self.aliases,
-        )
+        et = _asegurar_etiqueta_especifica(et, blob, self.marca, self.aliases)
         anclados = [t for t in (textos_grp or []) if str(t).strip()]
         if anclados and not all(_etiqueta_pertenece_al_texto(et, t) for t in anclados):
             if len(anclados) == 1:
                 et = _extraer_subtema_especifico(anclados[0], self.marca, self.aliases)
+        self._llm_calls_last = llm_usados
         self._cache[ck] = et
         return et
 
@@ -3933,20 +4150,21 @@ class ClasificadorSubtema:
                 temperature=0.2,
                 response_format={"type": "json_object"}
             )
+            _acumular_uso_chat(resp)
             raw = json.loads(resp.choices[0].message.content).get("subtema", "Varios")
             et = limpiar_tema(raw)
             if _es_etiqueta_generica(et) or "," in str(et):
-                return self._fallback(titulos)
+                return self._fallback(titulos, getattr(self, "_last_blob", ""))
             if not _frase_esta_completa(et):
                 et = _recortar_frase_completa(et)
-                if not _frase_esta_completa(et): return self._fallback(titulos)
+                if not _frase_esta_completa(et): return self._fallback(titulos, getattr(self, "_last_blob", ""))
             return et
-        except:
-            return self._fallback(titulos)
+        except Exception:
+            return self._fallback(titulos, getattr(self, "_last_blob", ""))
 
-    def _fallback(self, titulos):
+    def _fallback(self, titulos, blob=None):
         blob = " ".join(
-            str(x) for x in [getattr(self, "_last_blob", "")] + list(titulos or [])
+            str(x) for x in [blob if blob is not None else getattr(self, "_last_blob", "")] + list(titulos or [])
             if str(x).strip()
         )
         et = _extraer_subtema_especifico(blob, self.marca, self.aliases)
@@ -4021,30 +4239,14 @@ class ClasificadorSubtema:
         mapa = {}
         sg = sorted(gf.items(), key=lambda x: -len(x[1]))  # grupos grandes primero (revert: lógica estable)
         subtemas_aprobados = []
-        textos_por_subtema_aprobado = defaultdict(list)
-
-        def _existentes_anclados(textos_grp):
-            return [
-                s for s in subtemas_aprobados
-                if s and textos_grp and all(
-                    _etiqueta_pertenece_al_texto(s, t) for t in textos_grp if str(t).strip()
-                )
-            ]
 
         def _etiqueta_de_item(i):
             et_i = self._generar_etiqueta(
                 [textos[i]], [titulos[i]], [resumenes[i]],
-                subtemas_existentes=_existentes_anclados([textos[i]]),
             )
             if not _etiqueta_pertenece_al_texto(et_i, textos[i]):
                 et_i = _extraer_subtema_especifico(textos[i], self.marca, self.aliases)
             return et_i
-
-        def _registrar(etiqueta, textos_grp):
-            if etiqueta and etiqueta not in subtemas_aprobados:
-                subtemas_aprobados.append(etiqueta)
-            if etiqueta:
-                textos_por_subtema_aprobado[etiqueta].extend(textos_grp)
 
         def _generar_etiqueta_segura(idxs):
             """Una etiqueta de grupo solo si es el mismo hecho y está anclada en CADA ítem."""
@@ -4054,29 +4256,7 @@ class ClasificadorSubtema:
             resumenes_grp = [resumenes[i] for i in sample]
             asignadas = {}
             if _grupo_mismo_hecho(textos, idxs, self.marca, self.aliases):
-                etiqueta = self._generar_etiqueta(
-                    textos_grp, titulos_grp, resumenes_grp,
-                    subtemas_existentes=_existentes_anclados(textos_grp),
-                )
-                if etiqueta in textos_por_subtema_aprobado:
-                    previos = textos_por_subtema_aprobado.get(etiqueta, [])
-                    if not _grupos_contenido_compatibles(
-                        textos_grp, previos, etiqueta, etiqueta,
-                        min_sim=max(u['sim_minima_agrupacion'], 0.88), min_overlap=0.40,
-                    ):
-                        rechazada = etiqueta
-                        etiqueta = self._generar_etiqueta(
-                            textos_grp, titulos_grp, resumenes_grp,
-                            subtemas_existentes=_existentes_anclados(textos_grp),
-                            evitar_etiqueta=rechazada
-                        )
-                        if etiqueta in textos_por_subtema_aprobado:
-                            previos2 = textos_por_subtema_aprobado.get(etiqueta, [])
-                            if not _grupos_contenido_compatibles(
-                                textos_grp, previos2, etiqueta, etiqueta,
-                                min_sim=max(u['sim_minima_agrupacion'], 0.88), min_overlap=0.40,
-                            ):
-                                etiqueta = capitalizar_etiqueta(self._fallback(titulos_grp))
+                etiqueta = self._generar_etiqueta(textos_grp, titulos_grp, resumenes_grp)
                 for i in idxs:
                     if _etiqueta_pertenece_al_texto(etiqueta, textos[i]):
                         asignadas[i] = etiqueta
@@ -4085,14 +4265,27 @@ class ClasificadorSubtema:
             else:
                 for i in idxs:
                     asignadas[i] = _etiqueta_de_item(i)
-            for i, e in asignadas.items():
-                _registrar(e, [textos[i]])
             return asignadas
 
-        for k, (lid, idxs) in enumerate(sg):
-            if k % 10 == 0: pbar.progress(0.55 + 0.25 * (k / max(ng, 1)), f"Etiquetando {k + 1}/{ng}...")
-            for i, e in _generar_etiqueta_segura(idxs).items():
-                mapa[i] = e
+        workers = max(1, min(int(LABELING_WORKERS), CONCURRENT_REQUESTS, ng or 1))
+        if workers > 1 and ng > 1:
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                futuras = {ex.submit(_generar_etiqueta_segura, idxs): k for k, (_lid, idxs) in enumerate(sg)}
+                done = 0
+                for f in as_completed(futuras):
+                    try:
+                        asignadas = f.result()
+                    except Exception:
+                        asignadas = {}
+                    for i, e in asignadas.items():
+                        mapa[i] = e
+                    done += 1
+                    pbar.progress(0.55 + 0.25 * (done / max(ng, 1)), f"Etiquetando {done}/{ng}...")
+        else:
+            for k, (_lid, idxs) in enumerate(sg):
+                pbar.progress(0.55 + 0.25 * (k / max(ng, 1)), f"Etiquetando {k + 1}/{ng}...")
+                for i, e in _generar_etiqueta_segura(idxs).items():
+                    mapa[i] = e
 
         subtemas = [mapa.get(i, "") for i in range(n)]
 
@@ -4418,27 +4611,20 @@ def consolidar_temas(subtemas, textos, pbar, marca=""):
                 partes = txt.split('. ')
                 if partes: titulos_cluster.append(partes[0][:120])
                 textos_cluster.append(txt[:200])
+        blob_cluster = " ".join(textos_cluster[:4])
+        heur_tema = _extraer_tema_especifico(subtemas_cluster[0], blob_cluster, marca)
         if len(subtemas_cluster) == 1:
             sub_unico = subtemas_cluster[0]
             nombre = _generar_nombre_tema_llm(subtemas_cluster, textos_cluster, titulos_cluster, marca)
             if not nombre or _tema_es_igual_a_subtema(nombre, subtemas_cluster):
-                nombre = _regenerar_tema_diferente(subtemas_cluster, titulos_cluster)
-            if not nombre or _tema_es_igual_a_subtema(nombre, subtemas_cluster):
                 p = sub_unico.split()
                 nombre = _recortar_frase_completa(" ".join(p), max_palabras=3) if len(p) > 3 else sub_unico
-                if _tema_es_igual_a_subtema(nombre, subtemas_cluster): nombre = sub_unico
+                if _tema_es_igual_a_subtema(nombre, subtemas_cluster):
+                    nombre = heur_tema or sub_unico
         else:
             nombre = _generar_nombre_tema_llm(subtemas_cluster, textos_cluster, titulos_cluster, marca)
             if not nombre or _tema_es_igual_a_subtema(nombre, subtemas_cluster):
-                nombre = _regenerar_tema_diferente(subtemas_cluster, titulos_cluster)
-            if not nombre or _tema_es_igual_a_subtema(nombre, subtemas_cluster):
-                nombre = _regenerar_tema_diferente(subtemas_cluster, titulos_cluster, intento=1)
-            if not nombre or _tema_es_igual_a_subtema(nombre, subtemas_cluster):
-                all_words = []
-                for sub in subtemas_cluster:
-                    for w in string_norm_label(sub).split():
-                        if len(w) > 3: all_words.append(w)
-                nombre = capitalizar_etiqueta(" ".join(w for w, _ in Counter(all_words).most_common(2))) if all_words else subtemas_cluster[0]
+                nombre = heur_tema or subtemas_cluster[0]
         if not _frase_esta_completa(nombre):
             nombre = _recortar_frase_completa(nombre, max_palabras=4)
             if not _frase_esta_completa(nombre):
@@ -5499,10 +5685,19 @@ def main():
         <div class="app-header-icon">◈</div>
         <div class="app-header-text">
             <div class="app-header-title">Análisis de Noticias - API</div>
-            <div class="app-header-version">v18.5 · 😼 Realizado por Johnathan Cortés 🕵️‍♂️ </div>
+            <div class="app-header-version">v19.0 · 😼 Realizado por Johnathan Cortés 🕵️‍♂️ </div>
         </div>
         <div class="app-header-badge">IA</div>
     </div>""", unsafe_allow_html=True)
+
+    _msg_modelo = advertencia_modelo_clasificacion()
+    if _msg_modelo:
+        st.warning(_msg_modelo)
+    else:
+        st.caption(
+            f"Modelo de clasificación: `{OPENAI_MODEL_CLASIFICACION}`. "
+            "gpt-5-nano no es el default de esta pila (subtemas 'X de Y' y tono todo Neutro)."
+        )
 
     tab1, tab2, tab3, tab4 = st.tabs(["Análisis Completo", "Análisis Rápido", "Excel Personalizado", "Sentimiento"])
 

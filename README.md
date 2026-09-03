@@ -42,7 +42,7 @@ El acceso a la interfaz de producción está resguardado mediante autenticación
 
 El pipeline crea un identificador `Grupo noticia` para republicaciones y noticias equivalentes. La pertenencia se valida con título normalizado, palabras distintivas y similitud semántica; no se fusionan hechos con acciones contradictorias (por ejemplo, aprobación frente a rechazo). Una vez clasificado el grupo, se propagan sus valores canónicos de `Tono IA`, `Tema` y `Subtema` a todas sus filas, evitando que una misma noticia cambie de tono o tema entre medios.
 
-Los subtemas se limpian y limitan a un máximo de cinco palabras, sin frases incompletas, verbos conjugados ni etiquetas genéricas. Las filas marcadas como duplicadas conservan su relación mediante `ID duplicada`; las filas equivalentes no eliminadas conservan toda su clasificación y el nuevo `Grupo noticia`.
+Los subtemas se limpian y limitan a un máximo de seis palabras, como frases nominales completas, sin collages de keywords, verbos conjugados ni etiquetas genéricas. Las filas marcadas como duplicadas conservan su relación mediante `ID duplicada`; las filas equivalentes no eliminadas conservan toda su clasificación y el nuevo `Grupo noticia`.
 
 `Marca principal` es el eje obligatorio del análisis. El motor busca el nombre completo, sus alias y coincidencias distintivas relacionadas en `Título` y `Resumen - Aclaración`. El tono mide exclusivamente el impacto reputacional sobre esa marca; el tema y el subtema describen el hecho relacionado con ella. Una etiqueta que sea solamente el nombre de la marca, una versión incompleta del nombre o una frase genérica se rechaza y se regenera.
 
@@ -141,6 +141,15 @@ streamlit run app.py
 ```
 
 La aplicación estará disponible en `http://localhost:8501`.
+
+### 5. Alternativa Colab (si Streamlit Cloud se queda en Etiquetando 1/N)
+
+Abra `Grill_API_Colab.py` en Google Colab (*Runtime → Run all*):
+
+- `pip install -q` de las dependencias (sin Streamlit).
+- `OPENAI_API_KEY` desde Colab Secrets (`userdata.get`) o el recuadro de la UI.
+- Interfaz Gradio naranja/negro: xlsx (+ PKL opcionales) → xlsx con contexto, tono, tema, subtema y grupo.
+- Modelo por defecto: **gpt-4.1-nano-2025-04-14**. No use gpt-5-nano en esta pila.
 
 ---
 
