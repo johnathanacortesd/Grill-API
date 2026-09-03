@@ -154,6 +154,49 @@ def _flag_env(nombre, default="0") -> bool:
     return v in ("1", "true", "yes", "on", "si", "sí")
 
 
+_LAST_PHASE_TIMINGS = []
+
+
+class _FaseTimer:
+    """Tiempos por fase del pipeline (Streamlit caption + lista global)."""
+
+    def __init__(self, pbar=None):
+        self.t0 = time.perf_counter()
+        self.last = self.t0
+        self.marks = []
+        self.pbar = pbar
+
+    def mark(self, name, frac=None, detail=""):
+        now = time.perf_counter()
+        dt = now - self.last
+        tot = now - self.t0
+        self.marks.append((name, dt, tot))
+        self.last = now
+        msg = f"⏱ {name}: {dt:.2f}s (acum {tot:.2f}s)"
+        if detail:
+            msg += f" · {detail}"
+        if self.pbar is not None and frac is not None:
+            try:
+                self.pbar.progress(frac, msg)
+            except Exception:
+                pass
+        try:
+            st.caption(msg)
+        except Exception:
+            print(msg, flush=True)
+        return msg
+
+    def report(self):
+        total = self.marks[-1][2] if self.marks else 0.0
+        parts = [f"{n}={dt:.2f}s" for n, dt, _ in self.marks]
+        return f"total={total:.2f}s | " + " | ".join(parts)
+
+
+def _registrar_timings(timer):
+    global _LAST_PHASE_TIMINGS
+    _LAST_PHASE_TIMINGS = list(timer.marks)
+    return timer.report()
+
 def _es_gpt5_nano(nombre) -> bool:
     return "gpt-5-nano" in unidecode(str(nombre or "")).lower()
 
@@ -366,6 +409,7 @@ _CABEZAS_SUBTEMA_VALIDAS = {
     "estacion", "memoria", "patrimonio", "identidad", "grieta", "duelo", "salud",
     "cobertura", "plataforma", "bootcamp", "open", "house", "sede", "revision",
     "desarrollo", "experiencia",
+    "pronostico", "consulta", "forma", "lineas", "acreditacion", "certificacion",
 }
 
 # Adjetivos/demostrativos que no pueden ser el objeto tras "de" ni encabezar el subtema.
@@ -1138,6 +1182,11 @@ def _historias_son_el_mismo_hecho(texto_a, texto_b, marca="", aliases=None, min_
     b = str(texto_b or "").strip()
     if not a or not b:
         return False
+    if marca and (
+        _es_texto_solo_autoria(a, marca, aliases)
+        or _es_texto_solo_autoria(b, marca, aliases)
+    ):
+        return False
     if _hay_conflicto_accion(a, b):
         return False
     na = normalize_title_for_comparison(a)
@@ -1158,7 +1207,6 @@ def _historias_son_el_mismo_hecho(texto_a, texto_b, marca="", aliases=None, min_
     if len(excl_a) >= 2 and len(excl_b) >= 2 and ratio < 0.60:
         return False
     return True
-
 
 def _hechos_nucleo_distinto(texto_a, texto_b, marca="", aliases=None) -> bool:
     """True si cada texto tiene un núcleo léxico que el otro no comparte (Fenavi ≠ FLA)."""
@@ -1311,13 +1359,28 @@ def _etiqueta_pertenece_al_texto(etiqueta, texto) -> bool:
         return False
     if not str(texto or "").strip():
         return False
+    if _es_subtema_autoria(etiqueta) or string_norm_label(etiqueta) in {
+        string_norm_label(_TEMA_AUTORIA_EGRESADOS),
+        string_norm_label(_TEMA_AUTORIA_ESTUDIANTES),
+        string_norm_label(_TEMA_AUTORIA_GENERAL),
+    }:
+        return True
     return _subtema_grounded(etiqueta, [texto], estricto=True)
-
 
 def _sanear_etiquetas_por_item(etiquetas, textos, marca="", aliases=None, es_subtema=True):
     """Regenera cualquier etiqueta que no esté anclada en el texto de análisis de esa fila."""
     out = []
     for et, tx in zip(etiquetas, textos):
+        if es_subtema and _es_subtema_autoria(et):
+            out.append(SUBTEMA_AUTORIA)
+            continue
+        if (not es_subtema) and string_norm_label(et) in {
+            string_norm_label(_TEMA_AUTORIA_EGRESADOS),
+            string_norm_label(_TEMA_AUTORIA_ESTUDIANTES),
+            string_norm_label(_TEMA_AUTORIA_GENERAL),
+        }:
+            out.append(capitalizar_etiqueta(_sin_comas_etiqueta(str(et))))
+            continue
         if _etiqueta_pertenece_al_texto(et, tx) and not (
             es_subtema and _subtema_de_baja_calidad(et, tx)
         ):
@@ -1428,8 +1491,10 @@ def _validar_estructura_subtema(etiqueta: str) -> bool:
     if _empieza_por_adj_muletilla(etiqueta):
         return False
     palabras = etiqueta.split()
+    if _es_subtema_autoria(etiqueta):
+        return True
     # Dos palabras sueltas sin nexo ("Guajira escenario") no son un encabezado.
-    # Tres o más pueden ser [hecho] + adjetivo + objeto sin relleno.
+    # Sustantivo + adjetivo sí ("artículo periodístico", "acreditación institucional").
     if len(palabras) <= 2:
         nexos = {
             "de","del","para","sobre","en","con","por","ante","hacia",
@@ -1437,7 +1502,17 @@ def _validar_estructura_subtema(etiqueta: str) -> bool:
             "y","o","a","e","u",
         }
         tiene_nexo = any(unidecode(p.lower().rstrip(".,;:!?")) in nexos for p in palabras[1:])
-        if not tiene_nexo: return False
+        if not tiene_nexo:
+            n0 = _normaliza_token(palabras[0])
+            n1 = _normaliza_token(palabras[1]) if len(palabras) > 1 else ""
+            if (
+                _es_cabeza_nominal_valida(n0)
+                and n1
+                and n1 not in STOPWORDS_ES
+                and not _es_resto_verbal(palabras[1])
+            ):
+                return True
+            return False
     return True
 
 def _es_nombre_o_fragmento_marca(etiqueta: str, marca: str, aliases=None) -> bool:
@@ -1535,6 +1610,9 @@ _DOMINIOS_TEMA = [
     (r"\b(cultura|patrimonio|festival|libro)\b", "Cultura y patrimonio"),
     (r"\b(empleo|trabajo|laboral|contratacion)\b", "Empleo y trabajo"),
     (r"\b(ambiental|sostenib|clima|energia)\b", "Sostenibilidad ambiental"),
+    (r"\b(egresad|alumni|graduad)\b", "Egresados"),
+    (r"\b(acreditaci|certificaci|alta calidad)\b", "Acreditación institucional"),
+    (r"\b(periodista|editor|autor[ií]a|byline)\b", "Autoría periodística"),
 ]
 
 
@@ -1586,18 +1664,32 @@ def _es_participio_cabeza(w) -> bool:
     return bool(re.search(r"(ada|ado|idas|idos|iendo|ando)$", n)) and len(n) >= 6
 
 
+def _es_resto_verbal(token) -> bool:
+    """True si el token es un verbo conjugado/recorte (hara, jugara, tengo, necesita)."""
+    n = _normaliza_token(token)
+    if not n or _es_cabeza_nominal_valida(n):
+        return False
+    if n in _VERBOS_LEAD_SUBTEMA or n in _VERBOS_NARRATIVOS_EVENTO:
+        return True
+    if n in _VERBOS_CONJUGADOS_RESTANTES:
+        return True
+    if _RE_VERBO_SUBTEMA.search(n):
+        return True
+    if n.startswith(("enfrent", "present", "anunci", "firm", "lanz", "inaugur", "investiga")):
+        return True
+    if re.search(r"(aron|ieron|aban|ian|ando|iendo)$", n) and len(n) >= 6:
+        return True
+    # Futuro/condicional sin tilde: hará→hara, jugará→jugara, tendrá→tendra.
+    if len(n) >= 4 and re.search(r"(ara|era|ira|aran|eran|iran|aria|eria|iria)$", n):
+        if n not in {"cara", "manera", "bandera", "frontera", "primavera", "espera"}:
+            return True
+    return False
+
 def _es_verbo_cabeza(w) -> bool:
     n = _normaliza_token(w)
     if not n or _es_cabeza_nominal_valida(n):
         return False
-    if n in _VERBOS_LEAD_SUBTEMA or _RE_VERBO_SUBTEMA.search(n):
-        return True
-    if n.startswith(
-        ("enfrent", "present", "anunci", "firm", "lanz", "inaugur", "investiga")
-    ):
-        return True
-    return bool(re.search(r"(aron|ieron|aban|ian|ando|iendo)$", n)) and len(n) >= 6
-
+    return _es_resto_verbal(w)
 
 def _partir_oraciones(texto) -> list:
     s = re.sub(r"\s+", " ", str(texto or "")).strip()
@@ -1853,6 +1945,17 @@ _VERBOS_NARRATIVOS_EVENTO = {
 }
 
 
+_VERBOS_CONJUGADOS_RESTANTES = {
+    "hara", "haran", "jugara", "jugaran", "tendra", "tendran",
+    "tengo", "tienes", "tiene", "tienen", "tuvo", "tuvieron",
+    "necesita", "necesito", "necesitan", "sabe", "saben", "saber",
+    "confirma", "confirman", "devela", "develan", "llega", "llegan", "llegaron",
+    "reporta", "reportan", "celebra", "celebran", "reacciona", "reaccionan",
+    "toman", "toma", "colapsaron", "colapsa", "habilitan", "habilita",
+    "gana", "ganan", "convirtio", "convirtieron", "posesiona", "tendra",
+    "hara", "jugara", "sera", "estara", "podra", "debera",
+}
+
 def _tokens_palabras_fuente(texto) -> list:
     return re.findall(r"[A-Za-zÁÉÍÓÚÑÜáéíóúñü]+", str(texto or ""))
 
@@ -2018,9 +2121,219 @@ def _objeto_tras_evento_nominal(texto) -> str:
     return ""
 
 
+SUBTEMA_AUTORIA = "Artículo periodístico"
+_TEMA_AUTORIA_EGRESADOS = "Egresados"
+_TEMA_AUTORIA_ESTUDIANTES = "Estudiantes"
+_TEMA_AUTORIA_GENERAL = "Autoría periodística"
+
+_RE_CREDITO_ROL = re.compile(
+    r'\b(editor(?:a)?(?:\s+web)?|periodista|comunicador(?:a)?|redactor(?:a)?|'
+    r'fotograf[oa]|corresponsal|estudiante en formaci[oó]n|'
+    r'egresad[oa]s?|realizado por|producci[oó]n de|conduccion de)\b',
+    re.I,
+)
+
+_RE_SPLIT_CREDITOS = re.compile(
+    r'(?=(?:Estudiante en formaci[oó]n|Editor(?:a)? web|Periodista egresad|'
+    r'Editora web|Comunicador(?:a)? (?:egresad|de)|Redactor(?:a)? (?:egresad|de)))',
+    re.I,
+)
+
+
+def _norm_autoria_key(s) -> str:
+    return re.sub(r"[^a-z]+", "", unidecode(str(s or "").lower()))
+
+
+def _es_subtema_autoria(etiqueta) -> bool:
+    n = _norm_autoria_key(etiqueta)
+    return n in {"articuloperiodistico", "articuloperiodista"} or n.startswith("articuloperiodistic")
+
+
+def _es_oracion_credito(oracion) -> bool:
+    """True si la oración es un crédito/byline (periodista, editor, egresado, estudiante)."""
+    s = unidecode((oracion or "").strip().lower())
+    if not s:
+        return False
+    if s.startswith((
+        "estudiante en formacion", "editor ", "editora ", "periodista ",
+        "comunicador", "redactor", "egresado", "egresada",
+    )):
+        return True
+    if _RE_CREDITO_ROL.search(s) and re.search(
+        r"\b(egresad|estudiante en formacion|editor(?:a)? web|periodista egresad)\b", s
+    ):
+        return True
+    if len(s.split()) <= 28 and re.search(r"\b(egresad[oa]s?|estudiante en formacion)\b", s):
+        if _RE_CREDITO_ROL.search(s) or s.startswith("estudiante en formacion"):
+            return True
+    return False
+
+
+def _segmentar_creditos(texto) -> list:
+    s = re.sub(r"\s+", " ", str(texto or "")).strip()
+    if not s:
+        return []
+    partes = [p.strip() for p in _RE_SPLIT_CREDITOS.split(s) if p and p.strip()]
+    if len(partes) >= 2:
+        return partes
+    return _partir_oraciones(s) or [s]
+
+
+def _ventana_mencion_es_credito(texto, marca, aliases=None) -> bool:
+    raw = unidecode(str(texto or "").lower())
+    if not raw:
+        return False
+    halladas = False
+    for nombre in _variantes_marca(marca, aliases):
+        nn = unidecode(str(nombre or "").lower()).strip()
+        if len(nn) < 3:
+            continue
+        start = 0
+        while True:
+            i = raw.find(nn, start)
+            if i < 0:
+                break
+            halladas = True
+            win = raw[max(0, i - 90): i + len(nn) + 90]
+            if not _RE_CREDITO_ROL.search(win):
+                return False
+            start = i + max(1, len(nn))
+    return halladas
+
+
+def _es_texto_solo_autoria(texto, marca="", aliases=None) -> bool:
+    """True si la única mención de marca/alias es un crédito de autor/afiliación."""
+    src = str(texto or "").strip()
+    if not src or not marca or not _menciona_marca_o_alias(src, marca, aliases):
+        return False
+    segs = _segmentar_creditos(src)
+    menciones = 0
+    creditos = 0
+    for seg in segs:
+        if not _menciona_marca_o_alias(seg, marca, aliases):
+            continue
+        menciones += 1
+        if _es_oracion_credito(seg) or _ventana_mencion_es_credito(seg, marca, aliases):
+            creditos += 1
+    if menciones and creditos == menciones:
+        return True
+    return _ventana_mencion_es_credito(src, marca, aliases)
+
+
+def _es_contexto_solo_autoria(titulo, contexto, marca="", aliases=None) -> bool:
+    """Bylines-only: el título no nombra la marca como hecho; el contexto es solo crédito."""
+    if _menciona_marca_o_alias(titulo, marca, aliases) and not _es_oracion_credito(titulo):
+        return False
+    ctx = str(contexto or "").strip()
+    if not ctx:
+        return False
+    return _es_texto_solo_autoria(ctx, marca, aliases)
+
+
+def _mapear_tema_autoria_pkl(candidato, blob, clases) -> str:
+    if not clases:
+        return candidato
+    scored = []
+    blob_n = unidecode(f"{candidato} {blob}".lower())
+    for c in clases:
+        nc = unidecode(str(c).lower())
+        score = 0.0
+        if "egresad" in nc and "egresad" in blob_n:
+            score += 5.0
+        if "estudiant" in nc and "estudiant" in blob_n:
+            score += 4.0
+        if any(k in nc for k in ("autoria", "autoría", "periodis", "alumni", "egres")):
+            score += 3.0
+        score += _score_clase_pkl(candidato + " " + blob, c)
+        scored.append((score, not _es_etiqueta_generica(c), c))
+    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    return scored[0][2]
+
+
+def _tema_autoria(contexto, marca="", aliases=None, clases_pkl=None) -> str:
+    blob = unidecode(str(contexto or "").lower())
+    if re.search(r"egresad", blob):
+        cand = _TEMA_AUTORIA_EGRESADOS
+    elif re.search(r"estudiante", blob):
+        cand = _TEMA_AUTORIA_ESTUDIANTES
+    else:
+        cand = _TEMA_AUTORIA_GENERAL
+    if clases_pkl:
+        return _mapear_tema_autoria_pkl(cand, blob, clases_pkl)
+    return capitalizar_etiqueta(cand)
+
+
+def _es_pegamento_de_tokens(etiqueta, texto) -> bool:
+    """True si el subtema es 'X de Y' pegando dos tokens sueltos del titular."""
+    et = str(etiqueta or "").strip()
+    toks = et.split()
+    if len(toks) != 3 or unidecode(toks[1].lower()) != "de":
+        return False
+    if _es_subtema_autoria(et):
+        return False
+    x, y = toks[0], toks[2]
+    frase_n = unidecode(et.lower())
+    src_n = unidecode(str(texto or "").lower())
+    if frase_n in src_n:
+        return False
+    alt = f"{unidecode(x.lower())} del {unidecode(y.lower())}"
+    if alt in src_n:
+        return False
+    if _es_resto_verbal(x) or _es_resto_verbal(y):
+        return True
+    src_toks = set(re.findall(r"[a-z]+", src_n))
+    xn, yn = unidecode(x.lower()), unidecode(y.lower())
+    if xn not in src_toks or yn not in src_toks:
+        return False
+    # Pegamento de leftovers: la cabeza no es un hecho nominal canónico.
+    if not _es_cabeza_nominal_valida(_normaliza_token(x)):
+        return True
+    if _parece_adjetivo_et(y) or _es_resto_verbal(y):
+        return True
+    return False
+
+
+def _hecho_nominal_desde_pregunta(texto: str) -> str:
+    """Convierte un titular interrogativo en un SN del hecho, sin pegar leftovers."""
+    s = str(texto or "")
+    qn = unidecode(re.sub(r"[¿?]", "", s).lower())
+    m = re.search(r"que clima har[aá].*?\ben\s+([a-z]+)", qn)
+    if m:
+        return f"Pronóstico del clima en {m.group(1).title()}"
+    if re.search(r"\b(clima|pronostico|temperatura)\b", qn) and re.search(r"\bhar[aá]|tiempo\b", qn):
+        return "Pronóstico del clima"
+    m = re.search(r"\bla\s+(\w+)\s+es\s+(redonda|plana)\b", qn)
+    if m:
+        return f"Forma de la {m.group(1).title()}"
+    if re.search(r"\bmulta", qn) and re.search(r"\b(tengo|tiene|saber|consultar|consulta)\b", qn):
+        return "Consulta de multa policial"
+    m = re.search(r"donde jugar[aá]\s+(.+?)(?:\s+el\b|\s+este\b|\s+hoy\b|$)", qn)
+    if m:
+        team = re.sub(r"\b(el|la|los|las)\s+", "", m.group(1)).strip(" .")
+        if team:
+            return f"Sede de {team.title()}"
+    if re.search(r"\b(necesita ayuda|linea(?:s)? de (?:emergencia|atencion)|numeros? de emergencia)\b", qn):
+        return "Líneas de emergencia"
+    return ""
+
+
+def _aplicar_etiquetas_autoria(titulos, textos, temas, subtemas, marca, aliases=None, clases_pkl=None):
+    temas = list(temas)
+    subtemas = list(subtemas)
+    n = len(subtemas)
+    for i in range(n):
+        tit = titulos[i] if titulos is not None and i < len(titulos) else ""
+        tx = textos[i] if i < len(textos) else ""
+        if _es_contexto_solo_autoria(tit, tx, marca, aliases) or _es_texto_solo_autoria(tx, marca, aliases):
+            subtemas[i] = SUBTEMA_AUTORIA
+            temas[i] = _tema_autoria(tx, marca, aliases, clases_pkl)
+    return temas, subtemas
+
 def _subtema_de_baja_calidad(etiqueta, texto) -> bool:
     """Rechaza recortes, eslóganes, nombres de pila y collages agramaticales."""
     et = str(etiqueta or "").strip()
+    if _es_subtema_autoria(et):
+        return False
     if not et or _es_etiqueta_generica(et) or "," in et:
         return True
     toks = et.split()
@@ -2030,9 +2343,13 @@ def _subtema_de_baja_calidad(etiqueta, texto) -> bool:
         return True
     if _normaliza_token(toks[0]) in _CARGOS_SUBTEMA:
         return True
+    if _es_pegamento_de_tokens(et, texto):
+        return True
     for t in toks:
         n = _normaliza_token(t)
         if n in _VERBOS_LEAD_SUBTEMA or n in _VERBOS_NARRATIVOS_EVENTO or _RE_VERBO_SUBTEMA.search(n):
+            return True
+        if _es_resto_verbal(t):
             return True
         if _token_truncado_respecto_fuente(t, texto):
             return True
@@ -2041,6 +2358,7 @@ def _subtema_de_baja_calidad(etiqueta, texto) -> bool:
     m = re.search(r"(?i)\b(?:de|del|en|sobre|para)\s+(\S+)", et)
     if m and (
         _es_verbo_cabeza(m.group(1))
+        or _es_resto_verbal(m.group(1))
         or _es_nombre_de_pila_en_fuente(m.group(1), texto)
         or _normaliza_token(m.group(1)) in _VERBOS_NARRATIVOS_EVENTO
         or _normaliza_token(m.group(1)) in _ADJ_MULETILLA_ETIQUETA
@@ -2056,7 +2374,6 @@ def _subtema_de_baja_calidad(etiqueta, texto) -> bool:
         ):
             return True
     return False
-
 
 def _objeto_evento_en_texto(texto: str) -> str:
     """Objeto del hecho (quién otorga, dominio del cargo, tema del encuentro)."""
@@ -2153,7 +2470,11 @@ def _recortar_etiqueta_sin_trocear(frase, texto, marca="", aliases=None, max_pal
 
 
 def _candidato_subtema_ok(frase, texto, marca="", aliases=None) -> bool:
+    if _es_subtema_autoria(frase):
+        return True
     if not frase or _es_etiqueta_generica(frase) or "," in str(frase):
+        return False
+    if _es_pegamento_de_tokens(frase, texto):
         return False
     if _etiqueta_trocea_nombre(frase, texto, marca, aliases):
         return False
@@ -2167,7 +2488,6 @@ def _candidato_subtema_ok(frase, texto, marca="", aliases=None) -> bool:
         return False
     return True
 
-
 def _subtema_alta_calidad(frase, texto, marca="", aliases=None) -> bool:
     """Heurística suficiente para saltar el LLM: frase nominal específica y gramatical."""
     if not _candidato_subtema_ok(frase, texto, marca, aliases):
@@ -2179,6 +2499,12 @@ def _subtema_alta_calidad(frase, texto, marca="", aliases=None) -> bool:
 def _extraer_subtema_especifico(texto, marca="", aliases=None) -> str:
     """Subtema: un sintagma nominal del HECHO, no un collage de keywords ni un eslogan."""
     blob = str(texto or "").strip()
+    if marca and _es_texto_solo_autoria(blob, marca, aliases):
+        return SUBTEMA_AUTORIA
+    hecho_preg = _hecho_nominal_desde_pregunta(blob)
+    if hecho_preg and not _subtema_de_baja_calidad(hecho_preg, blob):
+        if _candidato_subtema_ok(hecho_preg, blob, marca, aliases) or _es_subtema_autoria(hecho_preg):
+            return capitalizar_etiqueta(hecho_preg)
     trabajo = _quitar_frases_marca(blob, marca, aliases) or blob
     excluir = _excluir_para_etiqueta(marca, aliases)
     accion = _accion_principal_en_texto(blob) or _accion_principal_en_texto(trabajo)
@@ -2260,6 +2586,8 @@ def _extraer_subtema_especifico(texto, marca="", aliases=None) -> str:
         frase = _limpiar_candidato(_componer_frase_hecho(accion, objeto))
         if _candidato_subtema_ok(frase, blob, marca, aliases):
             return capitalizar_etiqueta(frase)
+    if hecho_preg:
+        return capitalizar_etiqueta(hecho_preg)
     for np in nps:
         frase = _sin_comas_etiqueta(np)
         if (
@@ -2268,6 +2596,7 @@ def _extraer_subtema_especifico(texto, marca="", aliases=None) -> str:
             and "," not in frase
             and not _contiene_eslogan_subtema(frase)
             and not _de_adjetivo_huerfano(frase)
+            and not _es_pegamento_de_tokens(frase, blob)
             and not (marca and _es_nombre_o_fragmento_marca(frase, marca, aliases))
         ):
             return capitalizar_etiqueta(frase)
@@ -2275,9 +2604,10 @@ def _extraer_subtema_especifico(texto, marca="", aliases=None) -> str:
         return capitalizar_etiqueta(accion)
     return capitalizar_etiqueta("Hecho de la noticia")
 
-
 def _extraer_tema_especifico(subtema, texto, marca="", aliases=None) -> str:
     """Tema único y específico: más general que el subtema, nunca un cubo vago."""
+    if _es_subtema_autoria(subtema) or (marca and _es_texto_solo_autoria(texto, marca, aliases)):
+        return _tema_autoria(texto, marca, aliases)
     blob_sub = unidecode(str(subtema or "").lower())
     for patron, nombre in _DOMINIOS_TEMA:
         if re.search(patron, blob_sub):
@@ -2300,9 +2630,10 @@ def _extraer_tema_especifico(subtema, texto, marca="", aliases=None) -> str:
         return capitalizar_etiqueta(sub)
     return _extraer_subtema_especifico(texto or subtema, marca, aliases)
 
-
 def _asegurar_etiqueta_especifica(etiqueta, texto, marca="", aliases=None, es_subtema=True) -> str:
     et = _sin_comas_etiqueta(str(etiqueta or "")).strip()
+    if _es_subtema_autoria(et):
+        return SUBTEMA_AUTORIA
     if et and not _es_etiqueta_generica(et) and "," not in et:
         if es_subtema and marca and _es_nombre_o_fragmento_marca(et, marca, aliases):
             et = ""
@@ -2314,7 +2645,6 @@ def _asegurar_etiqueta_especifica(etiqueta, texto, marca="", aliases=None, es_su
         return _extraer_subtema_especifico(texto, marca, aliases)
     sub = _extraer_subtema_especifico(texto, marca, aliases)
     return _extraer_tema_especifico(sub, texto, marca, aliases)
-
 
 def extract_link(cell):
     if hasattr(cell, "hyperlink") and cell.hyperlink:
@@ -3327,6 +3657,13 @@ class ClasificadorTono:
             eval_txt = (contexto_marca or texto or "").strip()
             if not eval_txt or not self._menciona_marca(eval_txt):
                 return {"tono": "Neutro"}
+            if _es_texto_solo_autoria(eval_txt, self.marca, self.aliases):
+                return {
+                    "tono": "Neutro",
+                    "confianza": "Alta",
+                    "justificacion": "La marca aparece solo como crédito del autor, sin rol en la noticia.",
+                    "evidencia": eval_txt[:1800],
+                }
 
             # Pre-despacho determinista (ahorra LLM en hechos inequívocos y elimina varianza)
             if os.environ.get("GRILL_TONO_DETERMINISTA", "1") != "0":
@@ -3707,6 +4044,9 @@ def etiquetar_sin_llm(titulos, resumenes, marca, aliases=None, cuerpos=None):
     dsu = construir_grafo_equivalencia(titulos, resumenes, contextos, marca, aliases)
     subtemas = [_extraer_subtema_especifico(textos[i], marca, aliases) for i in range(n)]
     temas = [_extraer_tema_especifico(subtemas[i], textos[i], marca, aliases) for i in range(n)]
+    temas, subtemas = _aplicar_etiquetas_autoria(
+        titulos, textos, temas, subtemas, marca, aliases
+    )
     for idxs in dsu.grupos(n).values():
         if len(idxs) < 2:
             continue
@@ -3729,7 +4069,6 @@ def etiquetar_sin_llm(titulos, resumenes, marca, aliases=None, cuerpos=None):
     temas = _sanear_etiquetas_por_item(temas, textos, marca, aliases, es_subtema=False)
     return temas, subtemas
 
-
 class _PBarNulo:
     """Progress bar no-op para Colab / tests sin Streamlit."""
     def progress(self, *args, **kwargs):
@@ -3747,6 +4086,7 @@ def clasificar_noticias_core(
     Un solo pase de embeddings sobre el texto canónico.
     """
     pbar = pbar or _PBarNulo()
+    timer = _FaseTimer(pbar)
     n = len(titulos)
     titulos = [str(t or "") for t in titulos]
     resumenes = [str(r or "") for r in resumenes]
@@ -3761,6 +4101,7 @@ def clasificar_noticias_core(
         textos.append(txt)
         contextos.append(txt)
         hay_marca.append(hay)
+    timer.mark("contexto", 0.06, f"n={n}")
 
     s_txt = pd.Series(textos)
     s_res = pd.Series(resumenes)
@@ -3771,6 +4112,7 @@ def clasificar_noticias_core(
     if usar_llm or pkl_tono or pkl_tema:
         pbar.progress(0.08, "Embeddings (un pase)...")
         embs = get_embeddings_batch(textos)
+    timer.mark("embeddings", 0.16, "omitido" if embs is None else "1 pase")
 
     pbar.progress(0.18, "Tono")
     if pkl_tono:
@@ -3791,6 +4133,9 @@ def clasificar_noticias_core(
     for i, hay in enumerate(hay_marca):
         if not hay:
             tonos[i] = "Neutro"
+        elif _es_contexto_solo_autoria(titulos[i], textos[i], marca, aliases):
+            tonos[i] = "Neutro"
+    timer.mark("tono", 0.38)
 
     vocab_tema = None
     clf = None
@@ -3809,6 +4154,10 @@ def clasificar_noticias_core(
     temas = _unificar_tema_por_subtema(list(temas), list(subtemas))
     if vocab_tema:
         temas = _forzar_vocabulario_pkl(temas, vocab_tema, textos)
+    temas, subtemas = _aplicar_etiquetas_autoria(
+        titulos, textos, temas, subtemas, marca, aliases, vocab_tema
+    )
+    timer.mark("subtema_tema", 0.82)
 
     df = pd.DataFrame({
         "Título": titulos,
@@ -3820,12 +4169,19 @@ def clasificar_noticias_core(
     })
     grupos_noticia = getattr(clf, "last_grupos", None) if clf is not None else None
     pbar.progress(0.85, "Grupos")
-    return aplicar_consistencia_grupos(
+    out = aplicar_consistencia_grupos(
         df, "Título", "Resumen - Aclaracion",
         marca=marca, aliases=aliases, vocabulario_tema=vocab_tema,
         grupos_noticia=grupos_noticia, embs=embs, textos_canonicos=textos, pbar=pbar,
     )
-
+    timer.mark("grupos", 1.0)
+    summary = _registrar_timings(timer)
+    pbar.progress(1.0, summary)
+    try:
+        st.info(f"⏱ Fases · {summary}")
+    except Exception:
+        print(f"⏱ Fases · {summary}", flush=True)
+    return out
 
 def _etiquetas_desde_pkl_o_heuristica(
     predicciones, titulos, resumenes, marca, aliases=None, cuerpos=None,
@@ -4236,6 +4592,8 @@ class ClasificadorSubtema:
         sg = sorted(gf.items(), key=lambda x: -len(x[1]))
 
         def _etiqueta_de_item(i):
+            if _es_contexto_solo_autoria(titulos[i], textos[i], self.marca, self.aliases):
+                return SUBTEMA_AUTORIA
             et_i = _extraer_subtema_especifico(textos[i], self.marca, self.aliases)
             if not _etiqueta_pertenece_al_texto(et_i, textos[i]):
                 et_i = etiquetar_sin_llm(
@@ -4323,6 +4681,9 @@ class ClasificadorSubtema:
                     subtemas[i] = canon
         subtemas = _sanear_etiquetas_por_item(
             subtemas, textos, self.marca, self.aliases, es_subtema=True
+        )
+        _, subtemas = _aplicar_etiquetas_autoria(
+            titulos, textos, ["_"] * n, subtemas, self.marca, self.aliases
         )
         nf = len(set(subtemas))
         pbar.progress(1.0, f"{nf} subtemas · {modelo}")
@@ -4660,6 +5021,9 @@ def consolidar_temas(subtemas, textos, pbar, marca="", embs=None):
     ]
     tf_validado = _unificar_tema_por_subtema(tf_validado, subtemas)
     tf_validado = _sanear_etiquetas_por_item(tf_validado, textos, marca, es_subtema=False)
+    tf_validado, _subs = _aplicar_etiquetas_autoria(
+        None, textos, tf_validado, subtemas, marca
+    )
     st.info(f"Temas: **{len(set(tf_validado))}** (de {len(set(subtemas))} subtemas) · Máx: {num_temas_max}")
     pbar.progress(1.0, "Temas listos")
     return tf_validado

@@ -1134,5 +1134,138 @@ class TestGrupoNoticiaCoberturaSimilar(unittest.TestCase):
         self.assertLess(app._PARES_GRAFO_REVISADOS, nxn // 4)
 
 
+CTX_UAO_BYLINE = (
+    "Estudiante en formación Universidad Autónoma de Occidente "
+    "Editor web y periodista egresado de la Universidad Autónoma de Occidente. "
+    "Editora web y periodista egresada de la Universidad Autónoma de Occidente."
+)
+MARCA_UAO = "Universidad Autónoma de Occidente"
+ALIAS_UAO = "UAO"
+
+CASOS_SCRAP_UAO = [
+    ("¿Qué clima hará en Cali este lunes?", "Clima de hara"),
+    ("¿La Tierra es redonda?", "Tierra de redonda"),
+    ("¿Cómo saber si tengo una multa de tránsito en Cali?", "Tengo de multa"),
+    ("¿Dónde jugará América de Cali este domingo?", "Jugara de america"),
+    ("¿Qué hacer si una persona necesita ayuda en una emergencia?", "Necesita de ayuda"),
+]
+
+
+class TestScrapsYAutoriaBylines(unittest.TestCase):
+    """Reglas del dossier UAO 410: nada de 'X de Y' pegado; bylines ≠ el hecho."""
+
+    def test_cinco_scraps_no_salen_con_contexto_byline(self):
+        for titulo, scrap in CASOS_SCRAP_UAO:
+            with self.subTest(titulo=titulo):
+                temas, subs = app.etiquetar_sin_llm(
+                    [titulo], [CTX_UAO_BYLINE], MARCA_UAO, ALIAS_UAO
+                )
+                self.assertNotEqual(
+                    app.string_norm_label(subs[0]), app.string_norm_label(scrap), subs[0]
+                )
+                self.assertTrue(app._es_pegamento_de_tokens(scrap, titulo), scrap)
+                self.assertFalse(app._es_pegamento_de_tokens(subs[0], titulo + " " + CTX_UAO_BYLINE), subs[0])
+                self.assertTrue(app._es_subtema_autoria(subs[0]), subs[0])
+                self.assertEqual(app.string_norm_label(temas[0]), app.string_norm_label("Egresados"))
+
+    def test_byline_marca_no_universitaria(self):
+        marca = "Hospital Nubaria"
+        ctx = (
+            "Editora web y periodista de Hospital Nubaria. "
+            "Comunicador del Hospital Nubaria."
+        )
+        titulo = "¿Qué clima hará en Cali este lunes?"
+        temas, subs = app.etiquetar_sin_llm([titulo], [ctx], marca, None)
+        self.assertTrue(app._es_subtema_autoria(subs[0]), subs[0])
+        self.assertNotEqual(app.string_norm_label(subs[0]), app.string_norm_label("Clima de hara"))
+        n = app.string_norm_label(temas[0])
+        self.assertTrue(
+            any(tok in n for tok in ("autoria", "periodist", "egresad")),
+            temas[0],
+        )
+
+    def test_evento_real_de_la_marca_no_es_articulo(self):
+        ctx = (
+            "La Universidad Autónoma de Occidente recibió la acreditación de alta calidad "
+            "del Ministerio de Educación Nacional y se convirtió en referente del Valle."
+        )
+        titulo = "La UAO recibe acreditación de alta calidad"
+        temas, subs = app.etiquetar_sin_llm([titulo], [ctx], MARCA_UAO, ALIAS_UAO)
+        self.assertFalse(app._es_subtema_autoria(subs[0]), subs[0])
+        n = app.unidecode(subs[0].lower())
+        self.assertTrue(
+            any(tok in n for tok in ("acredit", "alta calidad", "certific", "ministerio")),
+            subs[0],
+        )
+        self.assertFalse(app._es_pegamento_de_tokens(subs[0], ctx), subs[0])
+
+    def test_pkl_autoria_mapea_a_egresados(self):
+        helper = TestPklYHeuristica()
+        buf, clases = helper._pipeline_temas(
+            [
+                "egresados alumni graduados universidad periodista",
+                "acreditacion alta calidad institucional ministerio",
+                "investigacion laboratorios campus",
+            ],
+            ["egresados", "Acreditación institucional", "Investigación"],
+        )
+        with patch.object(app, "get_embeddings_batch", return_value=[None]), \
+             patch.object(app.openai.ChatCompletion, "create", side_effect=AssertionError("no LLM")):
+            out = app.clasificar_noticias_core(
+                ["¿Qué clima hará en Cali este lunes?"],
+                [CTX_UAO_BYLINE],
+                MARCA_UAO, ALIAS_UAO,
+                pkl_tema=buf, usar_llm=False,
+            )
+        tema = out.loc[0, "Tema"]
+        self.assertIn(tema, clases)
+        self.assertEqual(app.string_norm_label(tema), app.string_norm_label("egresados"), tema)
+        self.assertTrue(app._es_subtema_autoria(out.loc[0, "Subtema"]), out.loc[0, "Subtema"])
+
+    def test_preguntas_sin_marca_no_pegan_tokens_con_de(self):
+        for titulo, scrap in CASOS_SCRAP_UAO:
+            with self.subTest(titulo=titulo):
+                sub = app._extraer_subtema_especifico(titulo, "", None)
+                self.assertNotEqual(app.string_norm_label(sub), app.string_norm_label(scrap), sub)
+                self.assertFalse(app._es_pegamento_de_tokens(sub, titulo), sub)
+                self.assertFalse(app._es_subtema_autoria(sub), sub)
+
+    def test_tono_byline_sigue_siendo_neutro_con_mencion(self):
+        self.assertTrue(app._menciona_marca_o_alias(CTX_UAO_BYLINE, MARCA_UAO, ALIAS_UAO))
+        self.assertTrue(app._es_contexto_solo_autoria(
+            "¿Qué clima hará en Cali este lunes?", CTX_UAO_BYLINE, MARCA_UAO, ALIAS_UAO
+        ))
+        clf = app.ClasificadorTono(MARCA_UAO, ALIAS_UAO)
+        self.assertTrue(clf._menciona_marca(CTX_UAO_BYLINE))
+
+
+class TestVelocidadDossier410(unittest.TestCase):
+    """410 notas no pueden tardar ~483s: heurística + 0 ChatCompletions por defecto."""
+
+    def test_410_byline_sin_llm_muy_por_debajo_de_2_min(self):
+        import time as _time
+        n = 410
+        titulos = [CASOS_SCRAP_UAO[i % len(CASOS_SCRAP_UAO)][0] + f" ({i})" for i in range(n)]
+        resumenes = [CTX_UAO_BYLINE] * n
+        t0 = _time.perf_counter()
+        with patch.object(app, "get_embeddings_batch", return_value=[None] * n), \
+             patch.object(app.openai.ChatCompletion, "create", side_effect=AssertionError("no LLM")):
+            df = app.clasificar_noticias_core(
+                titulos, resumenes, MARCA_UAO, ALIAS_UAO, usar_llm=False
+            )
+        elapsed = _time.perf_counter() - t0
+        self.assertEqual(len(df), n)
+        self.assertLess(elapsed, 30.0, elapsed)
+        scraps = {app.string_norm_label(s) for _, s in CASOS_SCRAP_UAO}
+        produced = {app.string_norm_label(s) for s in df["Subtema"].tolist()}
+        self.assertFalse(produced & scraps, produced & scraps)
+        self.assertTrue(all(app._es_subtema_autoria(s) for s in df["Subtema"].head(15)), df["Subtema"].head(3).tolist())
+        self.assertTrue(
+            all(app.string_norm_label(t) == app.string_norm_label("Egresados") for t in df["Tema"].head(15)),
+            df["Tema"].head(3).tolist(),
+        )
+        self.assertTrue(app._LAST_PHASE_TIMINGS, "faltan timings de fase")
+
+
 if __name__ == "__main__":
     unittest.main()
