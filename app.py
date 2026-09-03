@@ -56,10 +56,27 @@ MAX_TOKENS_LOTE_SUBTEMA = 800
 MAX_TOKENS_LOTE_TEMA    = 600
 MAX_TOKENS_LOTE_TONO    = 400
 
-# Nunca el producto cartesiano n×n (410 títulos ⇒ ~84k SequenceMatcher).
-MAX_BLOQUE_INDICE       = 64
-MAX_PARES_COMPARACION   = 4000
+# Bloqueo de pares: cubetas de prefijo/título/resumen NUNCA se saltan (agrupan
+# titulares similares). Solo se omiten cubetas de tokens comunes muy grandes.
+# Sin tope global de 4000 pares: ese tope de PR #13 dejaba de agrupar.
+MAX_BLOQUE_TOKEN        = 80
 _PARES_GRAFO_REVISADOS  = 0
+# Compatibilidad con tests/código que aún nombra los topes de PR #13.
+MAX_BLOQUE_INDICE       = MAX_BLOQUE_TOKEN
+MAX_PARES_COMPARACION   = 10**9
+
+COLUMNAS_XLSX_OBLIGATORIAS = (
+    "ID Noticia", "Fecha", "Hora", "Medio", "Tipo de Medio",
+    "Sección - Programa", "Región", "Título", "Tono IA", "Tema", "Subtema",
+    "Link Nota", "Resumen - Aclaracion", "Link (Streaming - Imagen)",
+    "Menciones - Empresa", "ID duplicada", "Cuerpo Completo",
+    "Contexto analizado", "Coincidencia marca", "Origen coincidencia",
+    "Tono", "Grupo noticia",
+)
+COLUMNAS_XLSX_EXTRA = (
+    "Autor - Conductor", "Nro. Pagina", "Dimensión",
+    "Duración - Nro. Caracteres", "CPE", "Audiencia", "Tier",
+)
 
 
 def _flag_env(nombre, default="0") -> bool:
@@ -1235,56 +1252,94 @@ def _grupo_mismo_hecho(textos, idxs, marca="", aliases=None) -> bool:
     )
 
 
+def _prefijo_bloqueo(texto, n=12) -> str:
+    """Primeros n caracteres alfanuméricos normalizados (sin espacios)."""
+    compact = re.sub(r"[^a-z0-9]+", "", unidecode(str(texto or "").lower()))
+    return compact[:n]
+
+
 def _clave_bloqueo_titulo(titulo_norm: str) -> str:
-    """Primer token distintivo o prefijo de 8 chars. Nunca el corpus entero."""
-    t = str(titulo_norm or "").strip()
-    if not t:
-        return ""
-    toks = [p for p in t.split() if len(p) >= 4 and p not in _TOKENS_DEBILES_AGRUPACION]
-    if toks:
-        return toks[0]
-    compact = re.sub(r"\s+", "", t)
-    return compact[:8] if compact else t[:8]
+    """Prefijo de 12 chars compactos. Cubetas de prefijo sí agrupan titulares parecidos."""
+    return _prefijo_bloqueo(titulo_norm, 12)
 
 
-def _claves_bloqueo_fila(titulo_norm, texto="", marca="", aliases=None) -> set:
-    """Claves de índice invertido: título exacto, prefijo y tokens distintivos."""
+def _es_clave_prefijo_bloqueo(k: str) -> bool:
+    return str(k).startswith(("#p:", "#r:", "#eq:", "#re:", "#1:"))
+
+
+def _claves_bloqueo_fila(titulo_norm, texto="", marca="", aliases=None, resumen_norm="") -> set:
+    """Índice invertido: prefijo de título (12), prefijo de resumen, tokens distintivos."""
     claves = set()
     t = str(titulo_norm or "").strip()
     if t:
         claves.add("#eq:" + t[:160])
-        pref = _clave_bloqueo_titulo(t)
+        pref = _prefijo_bloqueo(t, 12)
         if pref:
+            claves.add("#p:" + pref)
             claves.add("#1:" + pref)
-            claves.add("#p:" + t[:12])
         for tok in list(_tokens_distintivos_historia(t, marca, aliases))[:8]:
             claves.add(tok)
+    r = str(resumen_norm or "").strip()
+    if r:
+        claves.add("#re:" + r[:200])
+        rp = _prefijo_bloqueo(r, 12)
+        if rp:
+            claves.add("#r:" + rp)
     if texto:
         for tok in list(_tokens_distintivos_historia(str(texto), marca, aliases))[:6]:
             claves.add("tx:" + tok)
     return claves
 
 
-def _pares_bloqueados(claves_por_fila, max_bloque=MAX_BLOQUE_INDICE, max_pares=MAX_PARES_COMPARACION):
-    """Pares candidatos por token/prefijo. Nunca for i in range(n): for j in range(i+1,n)."""
+def _pares_bloqueados(claves_por_fila, max_bloque=MAX_BLOQUE_TOKEN, max_pares=None):
+    """Pares candidatos por prefijo/token. Nunca el n×n del corpus.
+
+    Cubetas de prefijo/título/resumen no se saltan (aunque tengan >64 ítems):
+    ahí viven los titulares similares. Solo se omiten cubetas de tokens comunes.
+    Sin tope global de pares: un tope de 4000 cortaba grupos reales.
+    """
     indice = defaultdict(list)
     for i, claves in enumerate(claves_por_fila):
         for k in claves or ():
             if k:
                 indice[k].append(i)
     pares = set()
-    for idxs in indice.values():
+    for k, idxs in indice.items():
         if len(idxs) < 2:
             continue
         u = sorted(set(idxs))
-        if len(u) > max_bloque:
+        if not _es_clave_prefijo_bloqueo(k) and len(u) > max_bloque:
             continue
         for a in range(len(u)):
             for b in range(a + 1, len(u)):
                 pares.add((u[a], u[b]))
-                if len(pares) >= max_pares:
-                    return pares
     return pares
+
+
+def _ratio_norm(a, b) -> float:
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    if min(len(a), len(b)) >= 20 and (a in b or b in a):
+        return 0.96
+    return SequenceMatcher(None, a, b).ratio()
+
+
+def _cos_par(a, b) -> float:
+    if a is None or b is None:
+        return 0.0
+    va = np.asarray(a, dtype=np.float64)
+    vb = np.asarray(b, dtype=np.float64)
+    na = np.linalg.norm(va)
+    nb = np.linalg.norm(vb)
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return float(np.dot(va, vb) / (na * nb))
+
+
+def _norm_cmp_texto(texto) -> str:
+    return re.sub(r"\W+", " ", unidecode(str(texto or "").lower())).strip()
 
 
 def _embeddings_reusar(textos, embs=None):
@@ -2630,6 +2685,12 @@ def _texto_suficiente_analisis(texto, min_palabras=6) -> bool:
     return len(toks) >= min_palabras
 
 
+def contexto_analizado_salida(titulo, resumen, marca, aliases=None, cuerpo=None):
+    """Columna Contexto analizado: ventanas de marca, o resumen, o título."""
+    txt, _hay = _texto_clasificacion(titulo, resumen, marca, aliases, cuerpo)
+    return _contexto_para_excel(txt)
+
+
 def _texto_clasificacion(titulo, resumen, marca, aliases=None, cuerpo=None):
     """Orden obligatorio del texto de análisis:
     1) fragmentos que mencionan la marca o sus alias (contexto analizado)
@@ -3002,7 +3063,7 @@ def agrupar_textos_similares(textos, umbral):
     return dict(enumerate(g.values()))
 
 def agrupar_por_titulo_similar(titulos):
-    """Agrupa títulos similares con bloqueo por primer token/prefijo. Nunca n×n."""
+    """Agrupa títulos similares con bloqueo por prefijo de 12. Nunca n×n."""
     norm = [normalize_title_for_comparison(t) for t in titulos]
     n = len(norm)
     dsu = DSU(n)
@@ -3010,7 +3071,7 @@ def agrupar_por_titulo_similar(titulos):
     for i, j in _pares_bloqueados(claves):
         if not norm[i] or not norm[j]:
             continue
-        if SequenceMatcher(None, norm[i], norm[j]).ratio() >= SIMILARITY_THRESHOLD_TITULOS:
+        if _ratio_norm(norm[i], norm[j]) >= SIMILARITY_THRESHOLD_TITULOS:
             dsu.union(i, j)
     grupos, gid = {}, 0
     for idxs in dsu.grupos(n).values():
@@ -3030,43 +3091,25 @@ def seleccionar_representante(indices, textos):
 
 def construir_grupos_consistentes(titulos, resumenes, marca="", aliases=None,
                                   embs=None, textos=None):
-    """Agrupa republicaciones con bloqueo por token. Reusa embeddings canónicos."""
-    titulos = [str(x or "") for x in titulos]
-    resumenes = [str(x or "") for x in resumenes]
-    if textos is None:
-        textos = [(t + " " + r).strip() for t, r in zip(titulos, resumenes)]
-    else:
-        textos = [str(x or "") for x in textos]
-    n = len(textos)
-    dsu = DSU(n)
-    embs = list(embs) if embs is not None and len(embs) == n else [None] * n
-    norm = [normalize_title_for_comparison(t) for t in titulos]
-    claves = [_claves_bloqueo_fila(norm[i], textos[i], marca, aliases) for i in range(n)]
+    """Agrupa cobertura similar (título/resumen/embedding). Reusa embeddings canónicos."""
+    dsu = construir_grafo_equivalencia(
+        titulos, resumenes, contextos=textos, marca=marca, aliases=aliases, embs=embs,
+    )
+    return dsu.grupos(len(titulos))
 
-    for i, j in _pares_bloqueados(claves):
-        if _hay_conflicto_accion(textos[i], textos[j]):
-            continue
-        title_sim = SequenceMatcher(None, norm[i], norm[j]).ratio() if norm[i] and norm[j] else 0.0
-        overlap = _overlap_distintivo_historia(textos[i], textos[j], marca, aliases)
-        semantic = 0.0
-        if embs[i] is not None and embs[j] is not None:
-            semantic = cosine_similarity(
-                np.array(embs[i]).reshape(1, -1), np.array(embs[j]).reshape(1, -1)
-            )[0][0]
-        if title_sim >= SIMILARITY_THRESHOLD_TITULOS or (semantic >= SIMILARITY_THRESHOLD_TONO and overlap >= 0.45):
-            if _historias_son_el_mismo_hecho(textos[i], textos[j], marca, aliases):
-                dsu.union(i, j)
-    return dsu.grupos(n)
+def construir_grafo_equivalencia(titulos, resumenes, contextos=None, marca="", aliases=None,
+                                 embs=None):
+    """Grupo noticia: título similar O resumen similar O embedding de contexto.
 
-def construir_grafo_equivalencia(titulos, resumenes, contextos=None, marca="", aliases=None):
-    # Grafo UNICO de 'noticias equivalentes' (misma historia), con criterios ESTRICTOS.
-    # Bloqueo por token/prefijo: NUNCA for i in range(n): for j in range(i+1,n) si n≥80.
+    Fenavi ≠ FLA: `_hechos_nucleo_distinto` veta la unión. Nunca n×n.
+    """
     global _PARES_GRAFO_REVISADOS
     n = len(titulos)
     dsu = DSU(n)
-    tn = [norm_key(str(t or "")) for t in titulos]
     tcomp = [normalize_title_for_comparison(t) for t in titulos]
+    rcomp = [_norm_cmp_texto(r) for r in (resumenes if resumenes is not None else [""] * n)]
     cn = [norm_key(str(c or "")) for c in contextos] if contextos is not None else None
+    embs = list(embs) if embs is not None and len(embs) == n else [None] * n
     _PARES_GRAFO_REVISADOS = 0
 
     def _analisis(i):
@@ -3076,69 +3119,32 @@ def construir_grafo_equivalencia(titulos, resumenes, contextos=None, marca="", a
             return str(resumenes[i])
         return str(titulos[i] or "")
 
+    analisis = [_analisis(i) for i in range(n)]
+
     def _revisar_par(i, j):
         global _PARES_GRAFO_REVISADOS
         if dsu.find(i) == dsu.find(j):
             return
         _PARES_GRAFO_REVISADOS += 1
-        ti, tj = tn[i], tn[j]
-        igual = False
-        if ti and tj and ti == tj:
-            # Título idéntico no agrupa hechos distintos (p.ej. dos notas
-            # "Presidente de Fenavi" con contextos de avicultura vs FLA).
-            if cn and cn[i] and cn[j] and cn[i] != cn[j]:
-                igual = _historias_son_el_mismo_hecho(
-                    _analisis(i), _analisis(j), marca, aliases
-                )
-            else:
-                igual = True
-        elif cn and cn[i] and cn[j] and cn[i] == cn[j]:
-            igual = True
-        if not igual:
-            a, b = tcomp[i], tcomp[j]
-            if not a or not b:
-                return
-            title_sim = SequenceMatcher(None, a, b).ratio() if len(a) >= 10 and len(b) >= 10 else 0.0
-            mismo_titular = title_sim >= 0.92 or (
-                len(a) >= 20 and len(b) >= 20 and (a in b or b in a)
-            )
-            if mismo_titular or title_sim >= 0.80:
-                igual = _historias_son_el_mismo_hecho(
-                    _analisis(i), _analisis(j), marca, aliases
-                )
-        if igual:
+        ai, aj = analisis[i], analisis[j]
+        if _hay_conflicto_accion(ai, aj) or _hechos_nucleo_distinto(ai, aj, marca, aliases):
+            return
+        title_sim = _ratio_norm(tcomp[i], tcomp[j])
+        res_sim = _ratio_norm(rcomp[i], rcomp[j])
+        ctx_eq = bool(cn and cn[i] and cn[j] and cn[i] == cn[j])
+        semantic = _cos_par(embs[i], embs[j])
+        if (
+            title_sim >= 0.88
+            or res_sim >= 0.88
+            or ctx_eq
+            or semantic >= SIMILARITY_THRESHOLD_TONO
+        ):
             dsu.union(i, j)
 
-    # O(n) cubetas: título exacto / contexto exacto. Dentro de cada cubeta, a lo sumo
-    # MAX_BLOQUE_INDICE ítems (nunca el n×n del corpus).
-    por_tit = defaultdict(list)
-    for i, t in enumerate(tn):
-        if t:
-            por_tit[t].append(i)
-    for idxs in por_tit.values():
-        if len(idxs) < 2:
-            continue
-        tope = idxs[:MAX_BLOQUE_INDICE]
-        for a in range(len(tope)):
-            for b in range(a + 1, len(tope)):
-                _revisar_par(tope[a], tope[b])
-
-    if cn:
-        por_ctx = defaultdict(list)
-        for i, c in enumerate(cn):
-            if c:
-                por_ctx[c].append(i)
-        for idxs in por_ctx.values():
-            if len(idxs) < 2:
-                continue
-            tope = idxs[:MAX_BLOQUE_INDICE]
-            for a in range(len(tope)):
-                for b in range(a + 1, len(tope)):
-                    _revisar_par(tope[a], tope[b])
-
-    analisis = [_analisis(i) for i in range(n)]
     claves = [
-        _claves_bloqueo_fila(tcomp[i], analisis[i], marca, aliases)
+        _claves_bloqueo_fila(
+            tcomp[i], analisis[i], marca, aliases, resumen_norm=rcomp[i],
+        )
         for i in range(n)
     ]
     for i, j in _pares_bloqueados(claves):
@@ -3168,23 +3174,8 @@ def aplicar_consistencia_grupos(df, titulo_col, resumen_col,
         else None
     )
 
-    pbar.progress(0.05, "Consistencia 0/3")
-    if grupos_noticia:
-        grupos = {}
-        for k, idxs in grupos_noticia.items():
-            grupos[k] = list(idxs)
-    else:
-        grupos = construir_grupos_consistentes(
-            titulos, resumenes, marca, aliases,
-            embs=embs, textos=textos_canonicos,
-        )
+    pbar.progress(0.08, "Grupos")
     df = df.copy()
-    df["Grupo noticia"] = ""
-    for numero, idxs in enumerate(grupos.values(), start=1):
-        gid = f"G{numero:05d}"
-        for i in idxs:
-            df.at[df.index[i], "Grupo noticia"] = gid
-
     if subtema_col in df.columns:
         df[subtema_col] = df[subtema_col].apply(
             lambda x: capitalizar_etiqueta(_recortar_frase_completa(_sin_comas_etiqueta(str(x)), 8))
@@ -3193,17 +3184,38 @@ def aplicar_consistencia_grupos(df, titulo_col, resumen_col,
 
     contextos = ([str(x) for x in df['Contexto analizado'].fillna('')]
                  if 'Contexto analizado' in df.columns else None)
+    textos_analisis = textos_canonicos or contextos or [
+        f"{titulos[i]} {resumenes[i]}" for i in range(n)
+    ]
 
-    pbar.progress(0.45, f"Consistencia 1/3 · grafo bloqueado ({n} filas)")
-    dsu = construir_grafo_equivalencia(titulos, resumenes, contextos, marca, aliases)
-    pbar.progress(
-        0.75,
-        f"Consistencia 2/3 · { _PARES_GRAFO_REVISADOS } pares",
+    pbar.progress(0.35, f"Grupos · grafo bloqueado ({n} filas)")
+    dsu = construir_grafo_equivalencia(
+        titulos, resumenes, contextos if contextos is not None else textos_analisis,
+        marca, aliases, embs=embs,
     )
+    if grupos_noticia:
+        for idxs in grupos_noticia.values():
+            idxs = list(idxs)
+            if len(idxs) < 2:
+                continue
+            base = idxs[0]
+            for j in idxs[1:]:
+                if _hechos_nucleo_distinto(
+                    textos_analisis[base], textos_analisis[j], marca, aliases
+                ):
+                    continue
+                dsu.union(base, j)
+    pbar.progress(0.7, f"Grupos · {_PARES_GRAFO_REVISADOS} pares")
 
     grupos_eq = defaultdict(list)
     for i in range(n):
         grupos_eq[dsu.find(i)].append(i)
+
+    df["Grupo noticia"] = ""
+    for numero, idxs in enumerate(grupos_eq.values(), start=1):
+        gid = f"G{numero:05d}"
+        for i in idxs:
+            df.at[df.index[i], "Grupo noticia"] = gid
 
     def _analisis_fila(i):
         if contextos and str(contextos[i] or "").strip():
@@ -3212,55 +3224,76 @@ def aplicar_consistencia_grupos(df, titulo_col, resumen_col,
             return textos_canonicos[i]
         return f"{titulos[i]} {resumenes[i]}"
 
-    def _canon_mas_frecuente(idxs, col):
-        vals = [str(df.iloc[i][col]).strip() for i in idxs]
-        vals = [
-            v for v in vals
-            if v and v.lower() not in ("nan", "none", "-", "n/a", "") and not _es_etiqueta_generica(v)
-        ]
-        if not vals:
-            return None
-        order = []
-        for v in vals:
-            if v not in order:
-                order.append(v)
-        freq = {v: vals.count(v) for v in order}
-        return max(order, key=lambda v: (freq[v], -order.index(v)))
+    def _indice_representante(idxs):
+        def _score(i):
+            tono = str(df.iloc[i][tono_col]).strip().title() if tono_col in df.columns else ""
+            sub = str(df.iloc[i][subtema_col]).strip() if subtema_col in df.columns else ""
+            tema = str(df.iloc[i][tema_col]).strip() if tema_col in df.columns else ""
+            polar = 2 if tono in ("Positivo", "Negativo") else (1 if tono == "Neutro" else 0)
+            calidad = (0 if _es_etiqueta_generica(sub) else 2) + (0 if _es_etiqueta_generica(tema) else 1)
+            return (polar, calidad, len(_analisis_fila(i)))
+        return max(idxs, key=_score)
 
     n_eq = max(len(grupos_eq), 1)
     for gi, idxs in enumerate(grupos_eq.values()):
         if gi % 40 == 0:
-            pbar.progress(0.75 + 0.2 * (gi / n_eq), f"Consistencia 3/3 · {gi}/{n_eq}")
+            pbar.progress(0.75 + 0.15 * (gi / n_eq), f"Grupos · etiquetas {gi}/{n_eq}")
         if len(idxs) < 2:
             continue
+        ri = _indice_representante(idxs)
+        tvals = [str(df.iloc[i][tono_col]).strip().title() for i in idxs] if tono_col in df.columns else []
+        pos_neg = "Positivo" in tvals and "Negativo" in tvals
         for col in (subtema_col, tema_col):
-            if col in df.columns:
-                vocab = vocabulario_tema if col == tema_col else None
-                canon = _canon_mas_frecuente(idxs, col)
-                if canon:
-                    for i in idxs:
-                        if vocab:
-                            en_vocab = _canon_en_vocabulario_pkl(canon, vocab)
-                            if en_vocab:
-                                df.at[df.index[i], col] = en_vocab
-                        elif _etiqueta_pertenece_al_texto(canon, _analisis_fila(i)):
-                            df.at[df.index[i], col] = capitalizar_etiqueta(canon)
-        # Tono: Positivo/Negativo 'gana' sobre Neutro; conflicto Pos+Neg no se toca.
-        if tono_col in df.columns:
-            tvals = [str(df.iloc[i][tono_col]).strip().title() for i in idxs]
-            if "Positivo" in tvals and "Negativo" in tvals:
+            if col not in df.columns:
                 continue
-            canon_tono = "Positivo" if "Positivo" in tvals else ("Negativo" if "Negativo" in tvals else None)
-            if canon_tono:
+            canon = str(df.iloc[ri][col]).strip()
+            if not canon or canon.lower() in ("nan", "none", "-", "n/a"):
+                continue
+            vocab = vocabulario_tema if col == tema_col else None
+            if vocab:
+                en_vocab = _canon_en_vocabulario_pkl(canon, vocab)
+                if en_vocab:
+                    canon = en_vocab
+                else:
+                    continue
+            elif _es_etiqueta_generica(canon):
+                continue
+            else:
+                canon = capitalizar_etiqueta(canon)
+            for i in idxs:
+                df.at[df.index[i], col] = canon
+        if tono_col in df.columns and not pos_neg:
+            tono_rep = str(df.iloc[ri][tono_col]).strip().title()
+            if tono_rep and tono_rep not in ("Duplicada", "Nan", ""):
                 for i in idxs:
                     cur = str(df.iloc[i][tono_col]).strip().title()
-                    if cur in ("Neutro", "N/A", "", "Nan"):
-                        df.at[df.index[i], tono_col] = canon_tono
+                    if cur != "Duplicada":
+                        df.at[df.index[i], tono_col] = tono_rep
 
     textos_anclaje = [_analisis_fila(i) for i in range(n)]
+    en_grupo = {i for idxs in grupos_eq.values() if len(idxs) >= 2 for i in idxs}
+
+    def _sanear_selectivo(etiquetas, es_subtema):
+        out = list(etiquetas)
+        solos_et, solos_tx, solos_ix = [], [], []
+        for i, (et, tx) in enumerate(zip(etiquetas, textos_anclaje)):
+            if i in en_grupo:
+                continue
+            solos_et.append(et)
+            solos_tx.append(tx)
+            solos_ix.append(i)
+        if not solos_et:
+            return out
+        limpios = _sanear_etiquetas_por_item(
+            solos_et, solos_tx, marca, aliases, es_subtema=es_subtema
+        )
+        for i, et in zip(solos_ix, limpios):
+            out[i] = et
+        return out
+
     if subtema_col in df.columns:
-        df[subtema_col] = _sanear_etiquetas_por_item(
-            [str(x) for x in df[subtema_col].tolist()], textos_anclaje, marca, aliases, es_subtema=True
+        df[subtema_col] = _sanear_selectivo(
+            [str(x) for x in df[subtema_col].tolist()], es_subtema=True
         )
     if tema_col in df.columns:
         if vocabulario_tema:
@@ -3268,8 +3301,8 @@ def aplicar_consistencia_grupos(df, titulo_col, resumen_col,
                 [str(x) for x in df[tema_col].tolist()], vocabulario_tema, textos_anclaje
             )
         else:
-            df[tema_col] = _sanear_etiquetas_por_item(
-                [str(x) for x in df[tema_col].tolist()], textos_anclaje, marca, aliases, es_subtema=False
+            df[tema_col] = _sanear_selectivo(
+                [str(x) for x in df[tema_col].tolist()], es_subtema=False
             )
     pbar.progress(1.0, f"Consistencia lista · {_PARES_GRAFO_REVISADOS} pares")
     return df
@@ -3770,11 +3803,13 @@ def clasificar_noticias_core(
         cuerpos_l = [""] * n
     else:
         cuerpos_l = [str(c or "") for c in cuerpos]
-    textos, contextos = [], []
+    pbar.progress(0.05, "Contexto")
+    textos, contextos, hay_marca = [], [], []
     for i in range(n):
-        txt, _hay = _texto_clasificacion(titulos[i], resumenes[i], marca, aliases, cuerpos_l[i])
+        txt, hay = _texto_clasificacion(titulos[i], resumenes[i], marca, aliases, cuerpos_l[i])
         textos.append(txt)
-        contextos.append(extraer_contexto_marca(titulos[i], resumenes[i], marca, aliases, cuerpos_l[i]))
+        contextos.append(txt)
+        hay_marca.append(hay)
 
     s_txt = pd.Series(textos)
     s_res = pd.Series(resumenes)
@@ -3783,9 +3818,10 @@ def clasificar_noticias_core(
 
     embs = None
     if usar_llm or pkl_tono or pkl_tema:
-        pbar.progress(0.02, "Embeddings (un pase)...")
+        pbar.progress(0.08, "Embeddings (un pase)...")
         embs = get_embeddings_batch(textos)
 
+    pbar.progress(0.18, "Tono")
     if pkl_tono:
         tonos_raw = analizar_tono_con_pkl(
             textos, pkl_tono, titulos=titulos, resumenes=resumenes,
@@ -3801,14 +3837,19 @@ def clasificar_noticias_core(
         tonos = [r.get("tono", "Neutro") for r in tonos_raw]
     else:
         tonos = ["N/A"] * n
+    for i, hay in enumerate(hay_marca):
+        if not hay:
+            tonos[i] = "Neutro"
 
     vocab_tema = None
     clf = None
+    pbar.progress(0.40, "Subtemas")
     if not usar_llm:
         temas, subtemas = etiquetar_sin_llm(titulos, resumenes, marca, aliases, cuerpos_l)
     else:
         clf = ClasificadorSubtema(marca, aliases)
         subtemas = clf.procesar_lote(s_txt, pbar, s_res, s_tit, embs=embs)
+        pbar.progress(0.70, "Temas")
         temas = consolidar_temas(subtemas, textos, pbar, marca, embs=embs)
     if pkl_tema:
         pack = analizar_temas_con_pkl(textos, pkl_tema)
@@ -3827,6 +3868,7 @@ def clasificar_noticias_core(
         "Subtema": subtemas,
     })
     grupos_noticia = getattr(clf, "last_grupos", None) if clf is not None else None
+    pbar.progress(0.85, "Grupos")
     return aplicar_consistencia_grupos(
         df, "Título", "Resumen - Aclaracion",
         marca=marca, aliases=aliases, vocabulario_tema=vocab_tema,
@@ -4748,25 +4790,48 @@ def _normalizar_url(url: str) -> str:
     url = url.rstrip('/')
     return url
 
+def _url_de_campo(val) -> str:
+    if val is None:
+        return ""
+    if isinstance(val, dict):
+        return str(val.get("url") or "")
+    s = str(val).strip()
+    if s.lower() in ("", "nan", "none", "link"):
+        return ""
+    return s
+
 def detectar_duplicados_avanzado(rows, km):
+    """Duplicada = misma publicación (reglas limpieza_grill), NUNCA título similar.
+
+    Internet: Link Nota normalizado + misma mención.
+    Radio/TV: mención + medio + hora (mismo slot).
+    Streaming: Link (Streaming - Imagen) normalizado + misma mención.
+    Mismo ID Noticia + misma mención: copia del mismo ítem Grill.
+    """
     processed = deepcopy(rows)
-    seen_url, seen_bcast = {}, {}
+    seen_url, seen_bcast, seen_id = {}, {}, {}
     seen_streaming: Dict[tuple, int] = {}
-    tb = defaultdict(list)
 
     for i, row in enumerate(processed):
-        if row.get("is_duplicate"): continue
+        if row.get("is_duplicate"):
+            continue
 
         tipo    = normalizar_tipo_medio(str(row.get(km["tipodemedio"], "")))
         mencion = norm_key(row.get(km["menciones"], ""))
         medio   = norm_key(row.get(km["medio"], ""))
+        idn     = str(row.get(km.get("idnoticia"), "") or "").strip()
 
-        streaming_url_raw = row.get(km["link_streaming"])
-        if isinstance(streaming_url_raw, dict):
-            streaming_url_raw = streaming_url_raw.get("url")
-            
+        if idn and idn.lower() not in ("nan", "none") and mencion:
+            ik = (idn, mencion)
+            if ik in seen_id:
+                row["is_duplicate"] = True
+                row[km["idduplicada"]] = processed[seen_id[ik]].get(km["idnoticia"], "")
+                continue
+            seen_id[ik] = i
+
+        streaming_url_raw = _url_de_campo(row.get(km["link_streaming"]))
         if streaming_url_raw and mencion:
-            streaming_url_norm = _normalizar_url(str(streaming_url_raw))
+            streaming_url_norm = _normalizar_url(streaming_url_raw)
             if streaming_url_norm:
                 sk = (streaming_url_norm, mencion)
                 if sk in seen_streaming:
@@ -4776,8 +4841,7 @@ def detectar_duplicados_avanzado(rows, km):
                 seen_streaming[sk] = i
 
         if tipo == "Internet":
-            li = row.get(km["link_nota"])
-            url = li.get("url") if isinstance(li, dict) else li
+            url = _url_de_campo(row.get(km["link_nota"]))
             if url and mencion:
                 url_norm = _normalizar_url(str(url))
                 k = (url_norm, mencion)
@@ -4786,8 +4850,6 @@ def detectar_duplicados_avanzado(rows, km):
                     row[km["idduplicada"]] = processed[seen_url[k]].get(km["idnoticia"], "")
                     continue
                 seen_url[k] = i
-            if medio and mencion:
-                tb[(medio, mencion)].append(i)
 
         elif tipo in ("Radio", "Televisión"):
             hora = str(row.get(km["hora"], "")).strip()
@@ -4798,22 +4860,6 @@ def detectar_duplicados_avanzado(rows, km):
                     row[km["idduplicada"]] = processed[seen_bcast[k]].get(km["idnoticia"], "")
                 else:
                     seen_bcast[k] = i
-
-    for idxs in tb.values():
-        if len(idxs) < 2: continue
-        for i in range(len(idxs)):
-            for j in range(i + 1, len(idxs)):
-                a, b = idxs[i], idxs[j]
-                if processed[a].get("is_duplicate") or processed[b].get("is_duplicate"): continue
-                ta  = normalize_title_for_comparison(processed[a].get(km["titulo"]))
-                tb_ = normalize_title_for_comparison(processed[b].get(km["titulo"]))
-                if ta and tb_ and SequenceMatcher(None, ta, tb_).ratio() >= SIMILARITY_THRESHOLD_TITULOS:
-                    if len(ta) < len(tb_):
-                        processed[a]["is_duplicate"] = True
-                        processed[a][km["idduplicada"]]  = processed[b].get(km["idnoticia"], "")
-                    else:
-                        processed[b]["is_duplicate"] = True
-                        processed[b][km["idduplicada"]]  = processed[a].get(km["idnoticia"], "")
 
     return processed
 
@@ -4955,21 +5001,28 @@ def read_and_normalize_dossier(sheet, region_map, internet_map):
 
     return df
 
+def columnas_salida_xlsx(existentes=None):
+    """Orden de columnas del xlsx: las 22 obligatorias primero; extras después."""
+    order = list(COLUMNAS_XLSX_OBLIGATORIAS)
+    seen = set(order)
+    for c in COLUMNAS_XLSX_EXTRA:
+        if c not in seen:
+            order.append(c)
+            seen.add(c)
+    if existentes:
+        for c in existentes:
+            if c and c not in seen:
+                order.append(c)
+                seen.add(c)
+    return order
+
+
 def generate_output_excel(rows, km):
     wb = Workbook()
     ws = wb.active
     ws.title = "Resultado"
-    ORDER = [
-        "ID Noticia", "Fecha", "Hora", "Medio", "Tipo de Medio",
-        "Sección - Programa", "Región", "Título", "Autor - Conductor",
-        "Nro. Pagina", "Dimensión", "Duración - Nro. Caracteres",
-        "CPE", "Audiencia", "Tier", "Tono IA", "Tema", "Subtema",
-        "Link Nota", "Resumen - Aclaracion", "Link (Streaming - Imagen)", "Menciones - Empresa",
-        "ID duplicada",
-        "Cuerpo Completo"   # ── ADICIÓN: columna final con el CuerpoEs completo, sin truncar ──
-    ]
+    ORDER = columnas_salida_xlsx()
     NUM = {"ID Noticia", "Nro. Pagina", "Dimensión", "Duración - Nro. Caracteres", "CPE", "Tier", "Audiencia"}
-    ORDER += ["Contexto analizado", "Coincidencia marca", "Origen coincidencia", "Tono", "Grupo noticia"]
     ws.append(ORDER)
     
     font_hyperlink = Font(color="000000", underline=None)
@@ -4984,7 +5037,12 @@ def generate_output_excel(rows, km):
         
     for row in rows:
         ctx, match, origin = _brand_audit(row.get(km.get("titulo"), ""), row.get(km.get("resumen"), ""), st.session_state.get("brand_name", ""), st.session_state.get("brand_aliases", []), row.get("Cuerpo Completo"))
-        row["Contexto analizado"] = _contexto_para_excel(ctx)
+        prev = str(row.get("Contexto analizado") or "").strip()
+        row["Contexto analizado"] = _contexto_para_excel(prev) if prev else contexto_analizado_salida(
+            row.get(km.get("titulo"), ""), row.get(km.get("resumen"), ""),
+            st.session_state.get("brand_name", ""), st.session_state.get("brand_aliases", []),
+            row.get("Cuerpo Completo"),
+        )
         row["Coincidencia marca"], row["Origen coincidencia"] = match, origin
         tk = km.get("titulo")
         if tk and tk in row: row[tk] = clean_title_for_output(row.get(tk))
@@ -5072,7 +5130,7 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
             st.error("OPENAI_API_KEY no encontrado.")
             st.stop()
             
-    with st.status("Paso 1 · Carga de Configuración y Dossier", expanded=True) as s:
+    with st.status("Limpieza", expanded=True) as s:
         region_map, internet_map = load_config_from_sheets()
 
         wb_in = load_workbook(df_file, data_only=True)
@@ -5131,17 +5189,16 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
             "idduplicada": "ID duplicada"
         }
         
+        s.update(label="✓ Limpieza", state="complete")
+
+    with st.status("Duplicados", expanded=True) as s:
         rows = detectar_duplicados_avanzado(rows_expanded, km)
         for row in rows:
             if row["is_duplicate"]:
                 row["Tono IA"] = "Duplicada"
                 row["Tema"] = "-"
                 row["Subtema"] = "-"
-                
-        s.update(label="✓ Paso 1 completado", state="complete")
-        
-    with st.status("Paso 2 · Normalización", expanded=True) as s:
-        s.update(label="✓ Paso 2 · Mapeos y normalizaciones aplicados", state="complete")
+        s.update(label="✓ Duplicados", state="complete")
         
     gc.collect()
     ta = [r for r in rows if not r.get("is_duplicate")]
@@ -5152,11 +5209,18 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
             lambda r: _construir_texto_basico(r, km["titulo"], km["resumen"], bn, ba),
             axis=1
         )
-        with st.status("Embeddings...", expanded=True) as s:
+        with st.status("Contexto", expanded=True) as s:
             embs_txt = get_embeddings_batch(df["_txt"].tolist())
-            s.update(label=f"✓ {get_embedding_cache().stats()}", state="complete")
+            df["Contexto analizado"] = [
+                contexto_analizado_salida(
+                    r[km["titulo"]], r[km["resumen"]], bn, ba,
+                    r["Cuerpo Completo"] if "Cuerpo Completo" in df.columns else None,
+                )
+                for _, r in df.iterrows()
+            ]
+            s.update(label=f"✓ Contexto · {get_embedding_cache().stats()}", state="complete")
             
-        with st.status("Paso 3 · Tono (Reputación)", expanded=True) as s:
+        with st.status("Tono", expanded=True) as s:
             pb = st.progress(0)
             if ("PKL" in mode or tpkl) and tpkl:
                 res = analizar_tono_con_pkl(
@@ -5175,9 +5239,9 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
             else:
                 res = [{"tono": "N/A"}] * len(ta)
             df[km["tonoiai"]] = [r["tono"] for r in res]
-            s.update(label="✓ Paso 3 · Tono (Reputación)", state="complete")
+            s.update(label="✓ Tono", state="complete")
             
-        with st.status("Paso 4 · Clasificación", expanded=True) as s:
+        with st.status("Subtemas", expanded=True) as s:
             pb = st.progress(0)
             cuerpos = df['Cuerpo Completo'] if 'Cuerpo Completo' in df.columns else None
             clf_sub = None
@@ -5192,6 +5256,9 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
                 )
                 temas = consolidar_temas(subtemas, df["_txt"].tolist(), pb, bn, embs=embs_txt)
             df[km["subtema"]] = subtemas
+            s.update(label="✓ Subtemas", state="complete")
+
+        with st.status("Temas", expanded=True) as s:
             vocab_tema = None
             if epkl:
                 pack = analizar_temas_con_pkl(df["_txt"].tolist(), epkl)
@@ -5206,13 +5273,10 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
                 df[km["tema"]] = _forzar_vocabulario_pkl(
                     df[km["tema"]].tolist(), vocab_tema, df["_txt"].tolist()
                 )
-            df["Contexto analizado"] = [
-                _contexto_para_excel(extraer_contexto_marca(
-                    r[km["titulo"]], r[km["resumen"]], bn, ba,
-                    r["Cuerpo Completo"] if "Cuerpo Completo" in df.columns else None,
-                ))
-                for _, r in df.iterrows()
-            ]
+            s.update(label="✓ Temas", state="complete")
+
+        with st.status("Grupos", expanded=True) as s:
+            pb = st.progress(0)
             df = aplicar_consistencia_grupos(
                 df, km["titulo"], km["resumen"],
                 km["tonoiai"], km["tema"], km["subtema"],
@@ -5223,7 +5287,7 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
                 textos_canonicos=df["_txt"].tolist(),
                 pbar=pb,
             )
-            s.update(label="✓ Paso 4 · Clasificación", state="complete")
+            s.update(label="✓ Grupos", state="complete")
             
         rm2 = df.set_index("expanded_index").to_dict("index")
         for idx, row in enumerate(rows):

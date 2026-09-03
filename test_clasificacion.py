@@ -844,6 +844,9 @@ class TestContextoTonoFuente(unittest.TestCase):
         self.assertIn("clasificar_noticias_core", src)
         self.assertIn("gpt-4.1-nano-2025-04-14", src)
         compile(src, "Grill_API_Colab.txt", "exec")
+        self.assertIn("detectar_duplicados_avanzado", src)
+        self.assertIn("Duplicados", src)
+        self.assertNotIn("api_key_opcional", src)
 
     def test_colab_tema_claro_y_upload_obvio(self):
         from pathlib import Path
@@ -921,6 +924,214 @@ class TestVelocidadCorpusGrande(unittest.TestCase):
         self.assertIn("Grupo noticia", df.columns)
         self.assertIn("Subtema", df.columns)
         self.assertTrue(all(not app._es_etiqueta_generica(s) for s in df["Subtema"].tolist()[:5]))
+
+
+KM_DUP = {
+    "idnoticia": "ID Noticia",
+    "hora": "Hora",
+    "medio": "Medio",
+    "tipodemedio": "Tipo de Medio",
+    "titulo": "Título",
+    "link_nota": "Link Nota",
+    "link_streaming": "Link (Streaming - Imagen)",
+    "menciones": "Menciones - Empresa",
+    "idduplicada": "ID duplicada",
+}
+
+
+class TestDuplicadosLimpiezaGrill(unittest.TestCase):
+    """Duplicada = misma publicación (limpieza_grill). Título similar NO es duplicado."""
+
+    def test_titulos_similares_urls_distintas_no_son_duplicado(self):
+        rows = [
+            {
+                "ID Noticia": "100",
+                "Hora": "08:00",
+                "Medio": "El Tiempo",
+                "Tipo de Medio": "Internet",
+                "Título": "UTB lanza carrera de medicina deportiva en Cartagena",
+                "Link Nota": {"url": "https://eltiempo.com/nota-a"},
+                "Link (Streaming - Imagen)": None,
+                "Menciones - Empresa": "UTB",
+                "is_duplicate": False,
+            },
+            {
+                "ID Noticia": "101",
+                "Hora": "09:00",
+                "Medio": "El Tiempo",
+                "Tipo de Medio": "Internet",
+                "Título": "La UTB lanza carrera de medicina deportiva en Cartagena",
+                "Link Nota": {"url": "https://eltiempo.com/nota-b"},
+                "Link (Streaming - Imagen)": None,
+                "Menciones - Empresa": "UTB",
+                "is_duplicate": False,
+            },
+        ]
+        out = app.detectar_duplicados_avanzado(rows, KM_DUP)
+        self.assertFalse(out[0]["is_duplicate"])
+        self.assertFalse(out[1]["is_duplicate"])
+
+    def test_misma_url_y_mencion_es_duplicada(self):
+        rows = [
+            {
+                "ID Noticia": "200",
+                "Hora": "",
+                "Medio": "Semana",
+                "Tipo de Medio": "Internet",
+                "Título": "Titular A",
+                "Link Nota": {"url": "https://www.semana.com/nota-x/"},
+                "Link (Streaming - Imagen)": None,
+                "Menciones - Empresa": "UTB",
+                "is_duplicate": False,
+            },
+            {
+                "ID Noticia": "201",
+                "Hora": "",
+                "Medio": "Semana",
+                "Tipo de Medio": "Internet",
+                "Título": "Titular distinto por completo",
+                "Link Nota": {"url": "http://semana.com/nota-x"},
+                "Link (Streaming - Imagen)": None,
+                "Menciones - Empresa": "UTB",
+                "is_duplicate": False,
+            },
+        ]
+        out = app.detectar_duplicados_avanzado(rows, KM_DUP)
+        self.assertFalse(out[0]["is_duplicate"])
+        self.assertTrue(out[1]["is_duplicate"])
+        self.assertEqual(str(out[1]["ID duplicada"]), "200")
+
+    def test_radio_mismo_slot_es_duplicado_hora_distinta_no(self):
+        base = {
+            "Tipo de Medio": "Radio",
+            "Medio": "Caracol Radio",
+            "Menciones - Empresa": "UTB",
+            "Link Nota": None,
+            "Link (Streaming - Imagen)": None,
+            "is_duplicate": False,
+            "Título": "Noticiero de la mañana",
+        }
+        rows = [
+            {**base, "ID Noticia": "301", "Hora": "06:00"},
+            {**base, "ID Noticia": "302", "Hora": "06:00"},
+            {**base, "ID Noticia": "303", "Hora": "07:00"},
+        ]
+        out = app.detectar_duplicados_avanzado(rows, KM_DUP)
+        self.assertFalse(out[0]["is_duplicate"])
+        self.assertTrue(out[1]["is_duplicate"])
+        self.assertEqual(str(out[1]["ID duplicada"]), "301")
+        self.assertFalse(out[2]["is_duplicate"])
+
+    def test_detectar_duplicados_no_usa_sequence_matcher_de_titulo(self):
+        import inspect
+        src = inspect.getsource(app.detectar_duplicados_avanzado)
+        self.assertNotIn("SequenceMatcher", src)
+        self.assertNotIn("tb[(medio", src)
+
+
+class TestGrupoNoticiaCoberturaSimilar(unittest.TestCase):
+    """Grupo noticia = cobertura similar; copia tono/tema/subtema del representante."""
+
+    def test_titulos_similares_urls_distintas_mismo_grupo_y_etiquetas(self):
+        pd = __import__("pandas")
+        df = pd.DataFrame({
+            "Título": [
+                "UTB lanza carrera de medicina deportiva en Cartagena",
+                "La UTB lanza carrera de medicina deportiva en Cartagena",
+            ],
+            "Resumen - Aclaracion": [
+                "La Universidad Tecnológica de Bolívar presentó su nueva carrera de medicina deportiva.",
+                "La Universidad Tecnológica de Bolívar presentó su nueva carrera de medicina deportiva.",
+            ],
+            "Tono IA": ["Positivo", "Neutro"],
+            "Tema": ["Educación superior", "Formación profesional"],
+            "Subtema": [
+                "Lanzamiento de carrera deportiva",
+                "Apertura de programa académico",
+            ],
+        })
+        with patch.object(app, "get_embeddings_batch", return_value=[None, None]):
+            out = app.aplicar_consistencia_grupos(
+                df, "Título", "Resumen - Aclaracion",
+                marca=MARCA, aliases=ALIAS,
+            )
+        self.assertEqual(out.loc[0, "Grupo noticia"], out.loc[1, "Grupo noticia"])
+        self.assertTrue(str(out.loc[0, "Grupo noticia"]).startswith("G"))
+        self.assertEqual(out.loc[0, "Tono IA"], out.loc[1, "Tono IA"])
+        self.assertEqual(out.loc[0, "Tema"], out.loc[1, "Tema"])
+        self.assertEqual(out.loc[0, "Subtema"], out.loc[1, "Subtema"])
+
+    def test_resumenes_similares_agrupan_aunque_titulos_diferan(self):
+        pd = __import__("pandas")
+        resumen = (
+            "La Universidad Tecnológica de Bolívar inauguró el laboratorio de "
+            "biotecnología marina en el campus de Cartagena con apoyo del ministerio."
+        )
+        df = pd.DataFrame({
+            "Título": [
+                "UTB abre laboratorio marino",
+                "Nueva sede científica en Cartagena",
+            ],
+            "Resumen - Aclaracion": [resumen, resumen],
+            "Tono IA": ["Positivo", "Neutro"],
+            "Tema": ["Investigación científica", "Campus universitario"],
+            "Subtema": [
+                "Inauguración de laboratorio marino",
+                "Apertura de campus costero",
+            ],
+        })
+        with patch.object(app, "get_embeddings_batch", return_value=[None, None]):
+            out = app.aplicar_consistencia_grupos(
+                df, "Título", "Resumen - Aclaracion",
+                marca=MARCA, aliases=ALIAS,
+            )
+        self.assertEqual(out.loc[0, "Grupo noticia"], out.loc[1, "Grupo noticia"])
+        self.assertEqual(out.loc[0, "Tono IA"], out.loc[1, "Tono IA"])
+        self.assertEqual(out.loc[0, "Tema"], out.loc[1, "Tema"])
+        self.assertEqual(out.loc[0, "Subtema"], out.loc[1, "Subtema"])
+
+    def test_prefijo_de_70_titulares_iguales_si_agrupa(self):
+        """PR #13 saltaba cubetas >64; 70 copias del mismo titular deben ser un grupo."""
+        pd = __import__("pandas")
+        n = 70
+        tit = "UTB lanza carrera de medicina deportiva en Cartagena"
+        res = "La Universidad Tecnológica de Bolívar presentó medicina deportiva."
+        df = pd.DataFrame({
+            "Título": [tit] * n,
+            "Resumen - Aclaracion": [res] * n,
+            "Tono IA": ["Positivo"] + ["Neutro"] * (n - 1),
+            "Tema": ["Educación superior"] * n,
+            "Subtema": ["Lanzamiento de carrera deportiva"] * n,
+        })
+        with patch.object(app, "get_embeddings_batch", return_value=[None] * n):
+            out = app.aplicar_consistencia_grupos(
+                df, "Título", "Resumen - Aclaracion",
+                marca=MARCA, aliases=ALIAS,
+            )
+        self.assertEqual(len(set(out["Grupo noticia"])), 1)
+        self.assertTrue(all(t == "Positivo" for t in out["Tono IA"]))
+
+    def test_columnas_xlsx_obligatorias_en_orden(self):
+        esperadas = [
+            "ID Noticia", "Fecha", "Hora", "Medio", "Tipo de Medio",
+            "Sección - Programa", "Región", "Título", "Tono IA", "Tema", "Subtema",
+            "Link Nota", "Resumen - Aclaracion", "Link (Streaming - Imagen)",
+            "Menciones - Empresa", "ID duplicada", "Cuerpo Completo",
+            "Contexto analizado", "Coincidencia marca", "Origen coincidencia",
+            "Tono", "Grupo noticia",
+        ]
+        self.assertEqual(list(app.COLUMNAS_XLSX_OBLIGATORIAS), esperadas)
+        orden = app.columnas_salida_xlsx()
+        self.assertEqual(orden[: len(esperadas)], esperadas)
+
+    def test_n400_pares_bloqueados_no_nxn(self):
+        n = 400
+        titulos = [f"Zeta{i} anuncia hecho puntual {i} en Cali" for i in range(n)]
+        resumenes = [f"Resumen corto del hecho {i} en la jornada regional." for i in range(n)]
+        app.construir_grafo_equivalencia(titulos, resumenes, marca="ZetaCorp")
+        nxn = n * (n - 1) // 2
+        self.assertLess(app._PARES_GRAFO_REVISADOS, 5000)
+        self.assertLess(app._PARES_GRAFO_REVISADOS, nxn // 4)
 
 
 if __name__ == "__main__":
