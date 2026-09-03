@@ -320,10 +320,13 @@ def _habla_de_fla(texto: str) -> bool:
 class TestFenaviNoHeredaFla(unittest.TestCase):
     """Una nota del encuentro avícola no puede heredar FLA de otra nota del lote."""
 
-    def test_no_son_el_mismo_hecho(self):
+    def test_nucleo_distinto_bloquea_fusión_aunque_corpus_grande(self):
+        self.assertTrue(
+            app._hechos_nucleo_distinto(CTX_FENAVI_AVICOLA, CTX_FLA_PERSONAS, "Fenavi", None)
+        )
         self.assertFalse(
-            app._historias_son_el_mismo_hecho(
-                CTX_FENAVI_AVICOLA, CTX_FLA_PERSONAS, "Fenavi", None
+            app._pueden_compartir_subtema(
+                CTX_FENAVI_AVICOLA, CTX_FLA_PERSONAS, "Fenavi", None, estricto=False
             )
         )
         self.assertFalse(
@@ -679,12 +682,95 @@ class TestCotaLLMYVelocidad(unittest.TestCase):
     def test_gpt5_nano_se_fuerza_a_default(self):
         env = {
             "OPENAI_CLASIF_MODEL": "gpt-5-nano-2025-08-07",
-            "OPENAI_CLASIF_ALLOW_GPT5": "",
+            "OPENAI_CLASIF_ALLOW_GPT5": "1",
         }
         with patch.dict(__import__("os").environ, env, clear=False):
             modelo = app._resolver_modelo_clasificacion()
+        self.assertEqual(modelo, "gpt-4.1-nano-2025-04-14")
         self.assertEqual(modelo, app.MODELO_CLASIF_DEFAULT)
         self.assertTrue(app.advertencia_modelo_clasificacion())
+
+    def test_80_singletons_como_mucho_4_chatcompletions(self):
+        """80 grupos no pueden disparar 80 ChatCompletions: solo lotes de 25–40."""
+        import json as _json
+        n = 80
+        clf = app.ClasificadorSubtema(MARCA, ALIAS)
+        titulos = [f"Nota institucional {i} del dia" for i in range(n)]
+        resumenes = [
+            f"Cobertura general de hechos varios {i}. Informacion relevante del sector."
+            for i in range(n)
+        ]
+        col = __import__("pandas").Series(resumenes)
+        tit = __import__("pandas").Series(titulos)
+        res = __import__("pandas").Series(resumenes)
+        calls = {"n": 0, "models": []}
+        progress = []
+
+        def fake_create(*_a, **kw):
+            calls["n"] += 1
+            calls["models"].append(kw.get("model"))
+            n_items = 30
+            payload = {str(i): f"Hecho institucional {i}" for i in range(n_items)}
+            resp = MagicMock()
+            choice = MagicMock()
+            choice.message.content = _json.dumps(payload)
+            resp.choices = [choice]
+            resp.get = lambda k, d=None: {} if k == "usage" else d
+            return resp
+
+        class _P:
+            def progress(self, frac, text=""):
+                progress.append(str(text))
+
+        env = {"OPENAI_CLASIF_MODEL": "gpt-5-nano-2025-08-07"}
+        with patch.dict(__import__("os").environ, env, clear=False), \
+             patch.object(app, "get_embeddings_batch", return_value=[None] * n), \
+             patch.object(app, "_candidato_subtema_ok", return_value=False), \
+             patch.object(app.openai.ChatCompletion, "create", side_effect=fake_create):
+            app.refrescar_modelo_clasificacion()
+            subtemas = clf.procesar_lote(col, _P(), res, tit)
+        self.assertEqual(len(subtemas), n)
+        self.assertLessEqual(calls["n"], 4, calls)
+        self.assertTrue(calls["models"])
+        self.assertTrue(all(m == "gpt-4.1-nano-2025-04-14" for m in calls["models"]), calls["models"])
+        uno_a_uno = [
+            t for t in progress
+            if __import__("re").search(r"Etiquetando\s+\d+\s*/\s*\d+", t)
+            and "lote" not in t.lower()
+        ]
+        self.assertFalse(uno_a_uno, uno_a_uno)
+        self.assertTrue(
+            any("lote" in t.lower() or "heurístic" in t.lower() or "heuristic" in t.lower()
+                for t in progress),
+            progress[:8],
+        )
+
+    def test_modelo_usado_es_41_nano_aunque_env_sea_gpt5(self):
+        import json as _json
+        seen = []
+
+        def fake_create(*_a, **kw):
+            seen.append(kw.get("model"))
+            resp = MagicMock()
+            choice = MagicMock()
+            choice.message.content = _json.dumps({"0": "Lanzamiento de carrera deportiva"})
+            resp.choices = [choice]
+            resp.get = lambda k, d=None: {} if k == "usage" else d
+            return resp
+
+        env = {"OPENAI_CLASIF_MODEL": "gpt-5-nano-2025-08-07"}
+        items = [{
+            "idx": 0,
+            "texto": "La UTB lanza una carrera de medicina deportiva en Cartagena.",
+            "titulo": "UTB lanza carrera",
+            "resumen": "La UTB abre medicina deportiva.",
+            "heuristica": "Varios",
+        }]
+        with patch.dict(__import__("os").environ, env, clear=False), \
+             patch.object(app.openai.ChatCompletion, "create", side_effect=fake_create):
+            app.refrescar_modelo_clasificacion()
+            app._pulir_subtemas_en_lotes(items, MARCA, ALIAS)
+        self.assertEqual(seen, ["gpt-4.1-nano-2025-04-14"])
 
 
 class TestContextoTonoFuente(unittest.TestCase):
@@ -746,6 +832,15 @@ class TestContextoTonoFuente(unittest.TestCase):
         for col in ("Contexto analizado", "Tono IA", "Tema", "Subtema", "Grupo noticia"):
             self.assertIn(col, df.columns)
         self.assertFalse(app._es_etiqueta_generica(df.loc[0, "Subtema"]), df.loc[0, "Subtema"])
+
+    def test_colab_txt_es_standalone_sin_import_app(self):
+        from pathlib import Path
+        src = Path(__file__).resolve().parent.joinpath("Grill_API_Colab.txt").read_text(encoding="utf-8")
+        self.assertNotIn("import app", src)
+        self.assertNotIn("from app", src)
+        self.assertIn("clasificar_noticias_core", src)
+        self.assertIn("gpt-4.1-nano-2025-04-14", src)
+        compile(src, "Grill_API_Colab.txt", "exec")
 
 
 if __name__ == "__main__":
