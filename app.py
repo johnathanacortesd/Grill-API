@@ -47,6 +47,13 @@ OPENAI_MODEL_EMBEDDING     = "text-embedding-3-small"
 OPENAI_MODEL_CLASIFICACION = "gpt-4.1-nano-2025-04-14"
 
 CONCURRENT_REQUESTS          = 50
+
+# Pools de hilos LLM por fase (ajustables por env sin redeploy). El fallo historico
+# de rate-limit fue a 50 hilos; estos valores caben comodos bajo los limites de la API.
+SUBTEMA_WORKERS = int(os.environ.get("GRILL_SUBTEMA_WORKERS", "8"))
+TEMA_WORKERS    = int(os.environ.get("GRILL_TEMA_WORKERS", "10"))
+EMBED_WORKERS   = int(os.environ.get("GRILL_EMBED_WORKERS", "6"))
+
 SIMILARITY_THRESHOLD_TONO    = 0.94
 SIMILARITY_THRESHOLD_TITULOS = 0.92
 MAX_PALABRAS_SUBTEMA         = 5
@@ -88,6 +95,8 @@ def _reset_counters():
     with _tok_lock:
         _COUNTERS['input'] = _COUNTERS['output'] = _COUNTERS['embedding'] = 0
 
+        _COUNTERS['clasif'] = 0
+        _COUNTERS['embed'] = 0
 def _add_tokens(input_n=0, output_n=0, embedding_n=0):
     with _tok_lock:
         if input_n:
@@ -616,8 +625,32 @@ def _es_error_429(e) -> bool:
     s = str(e)
     return "429" in s and any(k in s.lower() for k in ("rate", "too many", "limit"))
 
+def _llm_tipo(fn):
+    try:
+        cls = type(fn.__self__).__name__
+        if 'Embedding' in cls:
+            return 'embed'
+        if 'ChatCompletion' in cls or 'Completion' in cls:
+            return 'clasif'
+    except Exception:
+        pass
+    return None
+
+def _llm_contar(fn):
+    t = _llm_tipo(fn)
+    if t is None:
+        return
+    with _tok_lock:
+        _COUNTERS[t] = _COUNTERS.get(t, 0) + 1
+
+def _llm_total():
+    with _tok_lock:
+        return _COUNTERS.get('clasif', 0), _COUNTERS.get('embed', 0)
+
 def call_with_retries(fn, *a, **kw):
     kw.setdefault("request_timeout", 90)
+
+    _llm_contar(fn)
     d = 1.0
     for att in range(4):
         try:
@@ -630,8 +663,11 @@ def call_with_retries(fn, *a, **kw):
             time.sleep(d + random.random() * 0.5)
             d = min(d * 2, 8.0)
 
+
 async def acall_with_retries(fn, *a, **kw):
     kw.setdefault("request_timeout", 90)
+
+    _llm_contar(fn)
     d = 1.0
     for att in range(4):
         try:
@@ -878,10 +914,14 @@ def clean_cuerpo(text):
 # FUNCIÓN DE NORMALIZACIÓN DE TÍTULOS (MEJORADA)
 # ======================================
 def normalize_title_for_comparison(title):
+    # OJO (sep-2026): NO se recorta el texto tras '|' ni otros separadores: en los
+    # dossiers reales "Video | Titular", "Imagenes | Titular", "En vivo | Titular"
+    # el lado IZQUIERDO es el tipo de medio y el derecho el titular real. Recortar
+    # dejaba "Video"/"Imagenes" y fusionaba videos distintos en el mismo grupo.
     if not isinstance(title, str): 
         return ""
     
-    cleaned = re.sub(r"\s+[\|–—-]\s+[^\|–—-]+$", "", title).strip()
+    cleaned = title.strip()
     
     if ":" in cleaned:
         parts = cleaned.split(":", 1)
@@ -893,7 +933,9 @@ def normalize_title_for_comparison(title):
 
 
 def clean_title_for_output(title):
-    return re.sub(r"\s*\|\s*[\w\s]+$", "", str(title)).strip()
+    # Sin recortes: el '|' en "Video | Titular" separa tipo y titular real.
+    return re.sub(r"\s+", " ", str(title or "")).strip()
+
 
 def corregir_texto(text):
     if not isinstance(text, str): return text
@@ -1396,7 +1438,7 @@ def get_embeddings_batch(textos, batch_size=100):
                 _fetch(batch[mid:], bidx[mid:])
 
     if len(chunks) > 1:
-        with ThreadPoolExecutor(max_workers=min(5, len(chunks))) as ex:
+        with ThreadPoolExecutor(max_workers=min(EMBED_WORKERS, len(chunks))) as ex:
             for _ in ex.map(lambda c: _fetch(c[0], c[1]), chunks):
                 pass
     else:
@@ -1749,12 +1791,31 @@ def _propagar_tono_equivalentes(tonos, titulos, resumenes):
     norm_r = [_normalizar_mencion(str(r)[:320]) for r in resumenes]
     combos = [_normalizar_mencion(f"{titulos[i]} {str(resumenes[i])[:320]}") for i in range(n)]
     dsu = DSU(n)
+    # Pares con pre-filtro por COTA DE LONGITUD (sin cambiar criterios):
+    # ratio(a,b) <= 2*min(|a|,|b|)/(|a|+|b|). Si la cota no alcanza el umbral
+    # minimo exigido (sim_t>=0.70 o sim_r>=0.68 segun rama), el par no puede
+    # unir -> se salta sin SequenceMatcher. Con >1000 noticias esto evita el
+    # barrido O(n^2) de difflib.
+    # Pares con pre-filtro por COTA DE LONGITUD (mismas uniones, mismo DSU):
+    # ratio(a,b) <= 2*min(|a|,|b|)/(|a|+|b|). Un par se salta SOLO si NINGUNA de
+    # las tres ramas del criterio puede cumplirse:
+    #   b1: sim_t>=0.90 y sim_r>=0.72 | b2: sim_r>=0.88 y sim_t>=0.70
+    #   b3: sim_t>=0.78 y sim_r>=0.68 y overlap>=0.55 (overlap optimista aqui)
+    # Con >1000 noticias evita el barrido O(n^2) de SequenceMatcher sin perder pares.
     for i in range(n):
+        la = len(norm_t[i]); lra = len(norm_r[i])
         for j in range(i + 1, n):
-            sim_t = SequenceMatcher(None, norm_t[i], norm_t[j]).ratio() if norm_t[i] and norm_t[j] else 0.0
-            sim_r = SequenceMatcher(None, norm_r[i], norm_r[j]).ratio() if norm_r[i] and norm_r[j] else 0.0
+            lb = len(norm_t[j]); lrb = len(norm_r[j])
+            Bt = (2 * min(la, lb) / (la + lb)) if (la and lb) else 0.0
+            Br = (2 * min(lra, lrb) / (lra + lrb)) if (lra and lrb) else 0.0
+            b1 = Bt >= 0.90 and Br >= 0.72
+            b2 = Bt >= 0.70 and Br >= 0.88
+            b3 = Bt >= 0.78 and Br >= 0.68
+            if not (b1 or b2 or b3):
+                continue
+            sim_t = SequenceMatcher(None, norm_t[i], norm_t[j]).ratio() if (la and lb) else 0.0
+            sim_r = SequenceMatcher(None, norm_r[i], norm_r[j]).ratio() if (lra and lrb) else 0.0
             ov = _overlap_distintivo(combos[i], combos[j])
-            # Require joint title and summary evidence to avoid cross-event sentiment bleed.
             mismo = (
                 (sim_t >= 0.90 and sim_r >= 0.72)
                 or (sim_r >= 0.88 and sim_t >= 0.70)
@@ -1762,6 +1823,7 @@ def _propagar_tono_equivalentes(tonos, titulos, resumenes):
             )
             if mismo and not _hay_conflicto_accion(combos[i], combos[j]):
                 dsu.union(i, j)
+
     for idxs in dsu.grupos(n).values():
         if len(idxs) < 2:
             continue
@@ -2136,7 +2198,10 @@ class ClasificadorSubtema:
             r'solicita|solicitan|visita|visitan|atiende|atienden|destaca|destacan|'
             r'señala|señalan|indica|indican|expresa|expresan|afirma|afirman|'
             r'propone|proponen|pide|piden|exige|exigen|apoya|apoyan|'
-            r'informa|informan|reporta|reportan|advierte|advierten)\b',
+            r'informa|informan|reporta|reportan|advierte|advierten|'
+            r'sirve|sirven|funciona|funcionan|sirvio|debe|deben|puede|pueden|'
+            r'tiene|tienen|hace|hacen|dice|dicen|va|van|hay|estan|esta|es|son|'
+            r'permite|permiten|quiere|quieren|saber|hacer|usar)\b',
             re.IGNORECASE
         )
 
@@ -2183,6 +2248,10 @@ class ClasificadorSubtema:
 
             if es_gen or es_solo_marca or es_rob or len(et.split()) < 3:
                 et = self._refinar(tm, kw, rm, forzar_preposicion=True)
+            if _etiqueta_marco_vacio(et):
+                et = self._refinar(tm, kw, rm, forzar_preposicion=True)
+                if _etiqueta_marco_vacio(et):
+                    et = self._fallback(titulos_grp)
 
             if not _validar_estructura_subtema(et):
                 et = self._refinar(tm, kw, rm, forzar_preposicion=True)
@@ -2264,12 +2333,38 @@ class ClasificadorSubtema:
             (r"\b(investiga|investigacion|sancion|demanda)\b", "Investigación"),
         ]
         accion = next((nombre for patron, nombre in acciones if re.search(patron, norm_total)), None)
+
+        # Titulos explicativos 'Que es el RUFE y para que sirve?' -> 'Informacion sobre RUFE'
+        m_q = re.search(r'que es (?:el |la |los |las |una |un )?([a-z0-9]{2,20})', norm_total)
+        if m_q and ('sirve' in norm_total or 'funciona' in norm_total or 'para que' in norm_total):
+            ob = m_q.group(1)
+            orig = re.search(r'\b' + re.escape(ob) + r'\b', texto_total, re.I)
+            ob_final = (orig.group(0).strip() if orig and orig.group(0).isupper() else ob.title())
+            candidato = 'Informacion sobre ' + ob_final
+            if (_frase_esta_completa(candidato)
+                    and not _es_nombre_o_fragmento_marca(candidato, self.marca, self.aliases)):
+                return capitalizar_etiqueta(candidato)
+
+        # Resumenes de noticias / ronda diaria ('90 al dia', 'lo que pasa en la calle')
+        if re.search(r'noticias (mas|m[áa]s) importantes|resumen de noticias', norm_total):
+            return 'Resumen de noticias del día'
+        if 'hechos judiciales' in norm_total:
+            return 'Hechos judiciales del día'
+
         palabras = []
         tokens_marca = set(_normalizar_mencion(" ".join([self.marca] + self.aliases)).split())
         excluir = tokens_marca | STOPWORDS_ES | _CARGOS_SUBTEMA | {
             "universidad", "empresa", "compania", "corporacion", "fundacion", "institucion",
             "anuncio", "anuncia", "anuncio", "lanzamiento", "lanza", "presenta", "presencia",
             "invitado", "especial", "principal", "marca", "cliente",
+            # marco/genericos que producen 'Noticias de importantes' o 'X de Y' sin objeto
+            "noticia", "noticias", "informacion", "informaciona", "importante", "importantes",
+            "relevante", "relevantes", "regional", "regionales", "local", "locales",
+            "nacional", "nacionales", "actualidad", "diario", "diaria", "diarios", "gran",
+            "grandes", "destacado", "destacados", "panorama", "general", "mencion", "menciones",
+            # verbos que el glue tomaba como objeto ('Rufe de sirve')
+            "sirve", "sirven", "funciona", "funcionan", "saber", "hacer", "usar",
+            "debe", "deben", "puede", "pueden", "dice", "dicen", "es", "son", "hay",
         }
         for t in titulos[:5]:
             for w in string_norm_label(t).split():
@@ -2319,6 +2414,8 @@ class ClasificadorSubtema:
             return {s: s for s in subtemas_unicos}
 
     def procesar_lote(self, col, pbar, res_puros, tit_puros):
+        _t0_lote = time.time()
+        _llm0 = _llm_total()
         textos   = col.tolist()
         titulos  = tit_puros.tolist()
         resumenes = res_puros.tolist()
@@ -2416,7 +2513,7 @@ class ClasificadorSubtema:
                 textos_por_subtema_aprobado[etiqueta].extend(textos_grp)
             return k, idxs, etiqueta
 
-        nw = max(1, min(6, ng))
+        nw = max(1, min(SUBTEMA_WORKERS, ng))
         with ThreadPoolExecutor(max_workers=nw) as ex:
             futuros = [ex.submit(_etiquetar_grupo, kcid) for kcid in enumerate(sg)]
             for k, idxs, e in (f.result() for f in futuros):
@@ -2458,6 +2555,9 @@ class ClasificadorSubtema:
         nf = len(set(subtemas))
         pbar.progress(1.0, f"{nf} subtemas")
         st.info(f"Subtemas: **{nf}** · Grupos originales: **{ng}**")
+
+        _c1, _e1 = _llm_total()
+        st.caption(f"⏱ Subtemas: {time.time() - _t0_lote:.0f}s · llamadas LLM: {_c1 - _llm0[0]} clasificación + {_e1 - _llm0[1]} embeddings")
         return subtemas
 
     def _validar_completitud_final(self, subtemas, textos, titulos, resumenes):
@@ -2612,6 +2712,8 @@ def _regenerar_tema_diferente(subtemas_grupo, titulos_muestra, intento=0):
         return None
 
 def consolidar_temas(subtemas, textos, pbar, marca=""):
+    _t0_temas = time.time()
+    _llm0t = _llm_total()
     n = len(textos)
     u = _umbrales_adaptativos(n)
     pbar.progress(0.05, "Preparando temas...")
@@ -2700,7 +2802,7 @@ def consolidar_temas(subtemas, textos, pbar, marca=""):
     # El nombre de cada cluster es independiente del resto: se generan en paralelo
     # (max 8) y se asignan en el orden original. Es la fase con mas llamadas LLM
     # secuenciales de consolidar_temas.
-    nw = max(1, min(8, tc))
+    nw = max(1, min(TEMA_WORKERS, tc))
 
     def _nombre_para_cluster(kcid):
         k, (cid, subtemas_cluster) = kcid
@@ -2785,6 +2887,9 @@ def consolidar_temas(subtemas, textos, pbar, marca=""):
     tf_validado = [capitalizar_etiqueta(_recortar_frase_completa(t) if not _frase_esta_completa(t) else t) for t in tf_validado]
     tf_validado = _unificar_tema_por_subtema(tf_validado, subtemas)
     st.info(f"Temas: **{len(set(tf_validado))}** (de {len(set(subtemas))} subtemas) · Máx: {num_temas_max}")
+
+    _c1t, _e1t = _llm_total()
+    st.caption(f"⏱ Temas: {time.time() - _t0_temas:.0f}s · llamadas LLM: {_c1t - _llm0t[0]} clasificación + {_e1t - _llm0t[1]} embeddings")
     pbar.progress(1.0, "Temas listos")
     return tf_validado
 
@@ -2860,6 +2965,27 @@ def _unificar_tema_por_subtema(temas, subtemas):
 # ======================================
 # Duplicados y Excel (Reglas Nuevas)
 # ======================================
+_MARCO_VACIO_CABEZAS = {"noticias", "noticia", "informacion", "cobertura", "actualidad",
+                       "eventos", "actividades", "destacados", "panorama", "menciones",
+                       "informe"}
+_MARCO_VACIO_RELLENO = {"importante", "importantes", "relevante", "relevantes", "regional",
+                        "regionales", "local", "locales", "nacional", "nacionales", "general",
+                        "principal", "principales", "noticiosa", "noticiosas", "diaria", "dia",
+                        "informativa", "informativo", "corporativa", "corporativo", "social",
+                        "sector", "sectores", "ambito", "temas", "tema"}
+
+def _etiqueta_marco_vacio(etiqueta) -> bool:
+    """True si la etiqueta es 'marco + relleno' sin objeto real: 'Noticias de
+    importantes', 'Cobertura de informacion relevante', 'Resumen informativo'."""
+    if not etiqueta:
+        return False
+    n = string_norm_label(etiqueta)
+    toks = n.split()
+    if not toks or toks[0] not in _MARCO_VACIO_CABEZAS:
+        return False
+    resto = [t for t in toks[1:] if t not in {"de", "del", "para", "sobre", "en", "por", "a", "el", "la", "los", "las"}]
+    return all(t in _MARCO_VACIO_RELLENO or t in _MARCO_VACIO_CABEZAS for t in resto) if resto else True
+
 _SERIES_SINONIMOS_CABEZA = {
     # cabezas que significan lo mismo para una serie (mismo objeto tras la cabeza)
     'precio': {'precio', 'valor', 'cotizacion'},
@@ -2867,34 +2993,60 @@ _SERIES_SINONIMOS_CABEZA = {
     'cotizacion': {'precio', 'valor', 'cotizacion'},
 }
 
+def _raiz_es(w):
+    """Raiz singular liviana: cortes->corte, casos->caso, noticias->noticia."""
+    s = w
+    if s.endswith('s') and len(s) - 1 >= 4 and s[-2] in 'aeiou':
+        return s[:-1]
+    for suf in ('es', 'os', 'as'):
+        if len(s) - len(suf) >= 4 and s.endswith(suf):
+            return s[:len(s) - len(suf)]
+    return s
+
 def _canonizar_subtemas_series(subtemas):
-    """Unifica el TEXTO de subtemas que describen la MISMA serie diaria y solo
-    difieren en un sinonimo de la cabeza ('Precio del dolar en colombia' vs
-    'Valor del dolar en colombia' vs 'Cotizacion del dolar en colombia').
-    NO une eventos distintos: exige objeto identico (>=2 tokens de contenido
-    tras la cabeza) y cabeza sinonima."""
+    """Unifica el TEXTO de subtemas de una MISMA serie:
+    - sinonimo de cabeza con objeto identico ('Precio/Valor/Cotizacion del dolar...')
+    - singular/plural ('Corte de agua' vs 'Cortes de agua en cali')
+    - subconjunto con mismo nucleo ('Corte de agua' dentro de 'Cortes de agua en cali')
+    NO une eventos distintos: exige raiz de cabeza igual y tokens subconjunto."""
     freq = Counter(subtemas)
     by_norm = defaultdict(list)
     for s in subtemas:
         by_norm[string_norm_label(s)].append(s)
-    # tokens de contenido por etiqueta unica (norm)
+
     def _tokens(s):
         return [t for t in string_norm_label(s).split() if len(t) >= 3]
+
+    def _stems(s):
+        return [_raiz_es(t) for t in _tokens(s)]
+
     unicos = list(by_norm.keys())
     canon = {}
     for i, a in enumerate(unicos):
         if a in canon:
             continue
         ta = _tokens(a)
+        sa = set(_stems(a))
         grupo = [a]
         for b in unicos[i + 1:]:
             if b in canon:
                 continue
             tb = _tokens(b)
-            if len(ta) >= 3 and len(tb) == len(ta) and ta[1:] == tb[1:]:
-                ca, cb = ta[0], tb[0]
-                if ca == cb or (ca in _SERIES_SINONIMOS_CABEZA and cb in _SERIES_SINONIMOS_CABEZA.get(ca, set())):
-                    grupo.append(b)
+            sb = set(_stems(b))
+            if len(ta) < 2 or len(tb) < 2:
+                continue
+            ca, cb = _raiz_es(ta[0]), _raiz_es(tb[0])
+            misma_cabeza = ca == cb or (ca in _SERIES_SINONIMOS_CABEZA and cb in _SERIES_SINONIMOS_CABEZA.get(ca, set()))
+            if not misma_cabeza:
+                continue
+            # objeto identico (vale con sinonimo de cabeza: precio/valor/cotizacion)
+            if len(ta) == len(tb) and [_raiz_es(x) for x in ta[1:]] == [_raiz_es(x) for x in tb[1:]]:
+                grupo.append(b)
+                continue
+            # subconjunto: un label es la serie y el otro la serie + lugar/alcance
+            dif = len(sa ^ sb)
+            if 0 < dif <= 2 and (sa <= sb or sb <= sa):
+                grupo.append(b)
         if len(grupo) > 1:
             mejor = max(grupo, key=lambda g: (freq.get(by_norm[g][0], 0), len(by_norm[g][0])))
             for g in grupo:
