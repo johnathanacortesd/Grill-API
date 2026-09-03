@@ -77,9 +77,29 @@ PRICE_INPUT_1M     = 0.10
 PRICE_OUTPUT_1M    = 0.40
 PRICE_EMBEDDING_1M = 0.02
 
-if 'tokens_input' not in st.session_state: st.session_state['tokens_input']     = 0
-if 'tokens_output' not in st.session_state: st.session_state['tokens_output']    = 0
-if 'tokens_embedding' not in st.session_state: st.session_state['tokens_embedding'] = 0
+# Contadores de tokens a nivel de MODULO (thread-safe). st.session_state NO existe
+# en los hilos de ThreadPoolExecutor (Streamlit ata el estado al hilo principal),
+# asi que el accounting no puede vivir alli: los workers del etiquetado paralelo
+# sumarian sobre un estado vacio -> KeyError. Lecturas de costo usan _token_total().
+_tok_lock = threading.Lock()
+_COUNTERS = {'input': 0, 'output': 0, 'embedding': 0}
+
+def _reset_counters():
+    with _tok_lock:
+        _COUNTERS['input'] = _COUNTERS['output'] = _COUNTERS['embedding'] = 0
+
+def _add_tokens(input_n=0, output_n=0, embedding_n=0):
+    with _tok_lock:
+        if input_n:
+            _COUNTERS['input'] += input_n
+        if output_n:
+            _COUNTERS['output'] += output_n
+        if embedding_n:
+            _COUNTERS['embedding'] += embedding_n
+
+def _token_total():
+    with _tok_lock:
+        return _COUNTERS['input'], _COUNTERS['output'], _COUNTERS['embedding']
 
 STOPWORDS_ES = set("""
 a ante bajo cabe con contra de desde durante en entre hacia hasta mediante
@@ -481,11 +501,12 @@ class EmbeddingCache:
         self._hits = 0
         self._misses = 0
 
-if '_emb_cache' not in st.session_state:
-    st.session_state['_emb_cache'] = EmbeddingCache()
+# Caché de embeddings a nivel de modulo: st.session_state no existe en los hilos
+# del pool de etiquetado, asi que el singleton no puede vivir en session_state.
+_EMB_CACHE = EmbeddingCache()
 
 def get_embedding_cache():
-    return st.session_state['_emb_cache']
+    return _EMB_CACHE
 
 # ======================================
 # Configuración vía Google Sheets (CSV público)
@@ -1093,8 +1114,8 @@ def _validar_etiqueta_completa(etiqueta, titulos_grp=None, resumenes_grp=None, m
             )
             u = resp.get('usage', {}) if isinstance(resp, dict) else getattr(resp, 'usage', {})
             if u:
-                st.session_state['tokens_input'] += (u.get('prompt_tokens') if isinstance(u, dict) else getattr(u, 'prompt_tokens', 0)) or 0
-                st.session_state['tokens_output'] += (u.get('completion_tokens') if isinstance(u, dict) else getattr(u, 'completion_tokens', 0)) or 0
+                _add_tokens(input_n=(u.get('prompt_tokens') if isinstance(u, dict) else getattr(u, 'prompt_tokens', 0)) or 0)
+                _add_tokens(output_n=(u.get('completion_tokens') if isinstance(u, dict) else getattr(u, 'completion_tokens', 0)) or 0)
             raw = json.loads(resp.choices[0].message.content).get("subtema", "")
             if raw:
                 cleaned = limpiar_tema(raw)
@@ -1271,8 +1292,8 @@ def _unificar_subtemas_llm(subtemas_a_unificar, textos_por_subtema, marca, alias
         )
         u = resp.get('usage', {}) if isinstance(resp, dict) else getattr(resp, 'usage', {})
         if u:
-            st.session_state['tokens_input'] += (u.get('prompt_tokens') if isinstance(u, dict) else getattr(u, 'prompt_tokens', 0)) or 0
-            st.session_state['tokens_output'] += (u.get('completion_tokens') if isinstance(u, dict) else getattr(u, 'completion_tokens', 0)) or 0
+            _add_tokens(input_n=(u.get('prompt_tokens') if isinstance(u, dict) else getattr(u, 'prompt_tokens', 0)) or 0)
+            _add_tokens(output_n=(u.get('completion_tokens') if isinstance(u, dict) else getattr(u, 'completion_tokens', 0)) or 0)
         raw = json.loads(resp.choices[0].message.content).get("subtema", "")
         if raw: return limpiar_tema(raw)
     except:
@@ -1292,7 +1313,7 @@ def get_embeddings_batch(textos, batch_size=100):
             resp = call_with_retries(openai.Embedding.create, input=batch, model=OPENAI_MODEL_EMBEDDING)
             u = resp.get('usage', {}) if isinstance(resp, dict) else getattr(resp, 'usage', {})
             if u:
-                st.session_state['tokens_embedding'] += (u.get('total_tokens') if isinstance(u, dict) else getattr(u, 'total_tokens', 0)) or 0
+                _add_tokens(embedding_n=(u.get('total_tokens') if isinstance(u, dict) else getattr(u, 'total_tokens', 0)) or 0)
             for j, d in enumerate(resp["data"]):
                 oi = bidx[j]
                 emb = d["embedding"]
@@ -1557,8 +1578,8 @@ class ClasificadorTono:
                 
                 u = resp.get('usage', {}) if isinstance(resp, dict) else getattr(resp, 'usage', {})
                 if u:
-                    st.session_state['tokens_input'] += (u.get('prompt_tokens') if isinstance(u, dict) else getattr(u, 'prompt_tokens', 0)) or 0
-                    st.session_state['tokens_output'] += (u.get('completion_tokens') if isinstance(u, dict) else getattr(u, 'completion_tokens', 0)) or 0
+                    _add_tokens(input_n=(u.get('prompt_tokens') if isinstance(u, dict) else getattr(u, 'prompt_tokens', 0)) or 0)
+                    _add_tokens(output_n=(u.get('completion_tokens') if isinstance(u, dict) else getattr(u, 'completion_tokens', 0)) or 0)
                 
                 resultado = json.loads(resp.choices[0].message.content)
                 tono = str(resultado.get("tono", "Neutro")).strip().title()
@@ -2055,8 +2076,8 @@ class ClasificadorSubtema:
             )
             u = resp.get('usage', {}) if isinstance(resp, dict) else getattr(resp, 'usage', {})
             if u:
-                st.session_state['tokens_input'] += (u.get('prompt_tokens') if isinstance(u, dict) else getattr(u, 'prompt_tokens', 0)) or 0
-                st.session_state['tokens_output'] += (u.get('completion_tokens') if isinstance(u, dict) else getattr(u, 'completion_tokens', 0)) or 0
+                _add_tokens(input_n=(u.get('prompt_tokens') if isinstance(u, dict) else getattr(u, 'prompt_tokens', 0)) or 0)
+                _add_tokens(output_n=(u.get('completion_tokens') if isinstance(u, dict) else getattr(u, 'completion_tokens', 0)) or 0)
 
             raw = json.loads(resp.choices[0].message.content).get("subtema", "Varios")
             et = limpiar_tema(raw)
@@ -3169,7 +3190,7 @@ def generate_output_excel(rows, km):
 # Proceso principal
 # ======================================
 async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=None, cliente="", voceros="", enable_scraping=False):
-    st.session_state.update({'tokens_input': 0, 'tokens_output': 0, 'tokens_embedding': 0})
+    _reset_counters()
 # Cache persists across runs; entries are model-keyed.
     t0 = time.time()
     
@@ -3310,9 +3331,10 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
                 row.update(rm2.get(row.get("expanded_index"), {}))
                 
     gc.collect()
-    ci = (st.session_state['tokens_input']     / 1e6) * PRICE_INPUT_1M
-    co = (st.session_state['tokens_output']    / 1e6) * PRICE_OUTPUT_1M
-    ce = (st.session_state['tokens_embedding'] / 1e6) * PRICE_EMBEDDING_1M
+    _ti, _to, _te = _token_total()
+    ci = (_ti / 1e6) * PRICE_INPUT_1M
+    co = (_to / 1e6) * PRICE_OUTPUT_1M
+    ce = (_te / 1e6) * PRICE_EMBEDDING_1M
     
     st.session_state["brand_name"] = bn
     st.session_state["brand_aliases"] = ba
@@ -3330,7 +3352,7 @@ async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=N
         s.update(label=f"✓ Completado · {get_embedding_cache().stats()}", state="complete")
 
 async def run_quick_async(df, tc, sc, bn, al):
-    st.session_state.update({'tokens_input': 0, 'tokens_output': 0, 'tokens_embedding': 0})
+    _reset_counters()
 # Cache persists across runs; entries are model-keyed.
     df['_txt'] = df.apply(lambda r: texto_para_embedding(str(r.get(tc, "")), str(r.get(sc, ""))), axis=1)
     with st.status("Embeddings...", expanded=True) as s:
@@ -3352,9 +3374,10 @@ async def run_quick_async(df, tc, sc, bn, al):
         df = aplicar_consistencia_grupos(df, tc, sc)
         s.update(label="✓ Clasificación", state="complete")
     df.drop(columns=['_txt'], inplace=True)
-    ci = (st.session_state['tokens_input']     / 1e6) * PRICE_INPUT_1M
-    co = (st.session_state['tokens_output']    / 1e6) * PRICE_OUTPUT_1M
-    ce = (st.session_state['tokens_embedding'] / 1e6) * PRICE_EMBEDDING_1M
+    _ti, _to, _te = _token_total()
+    ci = (_ti / 1e6) * PRICE_INPUT_1M
+    co = (_to / 1e6) * PRICE_OUTPUT_1M
+    ce = (_te / 1e6) * PRICE_EMBEDDING_1M
     st.session_state['quick_cost'] = f"${ci + co + ce:.4f} USD"
     return df
 
@@ -3444,7 +3467,7 @@ def render_quick_tab():
 # EXCEL PERSONALIZADO (Mantiene formato original + 3 columnas al final)
 # ======================================
 async def run_custom_excel_async(file_bytes, tc, sc, bn, al, mode="API de OpenAI", tpkl=None, epkl=None):
-    st.session_state.update({'tokens_input': 0, 'tokens_output': 0, 'tokens_embedding': 0})
+    _reset_counters()
 # Cache persists across runs; entries are model-keyed.
     t0 = time.time()
 
@@ -3551,9 +3574,10 @@ async def run_custom_excel_async(file_bytes, tc, sc, bn, al, mode="API de OpenAI
     buf_out = io.BytesIO()
     wb.save(buf_out)
 
-    ci = (st.session_state['tokens_input']     / 1e6) * PRICE_INPUT_1M
-    co = (st.session_state['tokens_output']    / 1e6) * PRICE_OUTPUT_1M
-    ce = (st.session_state['tokens_embedding'] / 1e6) * PRICE_EMBEDDING_1M
+    _ti, _to, _te = _token_total()
+    ci = (_ti / 1e6) * PRICE_INPUT_1M
+    co = (_to / 1e6) * PRICE_OUTPUT_1M
+    ce = (_te / 1e6) * PRICE_EMBEDDING_1M
 
     cost_str = f"${ci + co + ce:.4f} USD"
     time_str = f"{time.time() - t0:.0f}s"
