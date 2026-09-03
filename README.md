@@ -142,14 +142,15 @@ streamlit run app.py
 
 La aplicación estará disponible en `http://localhost:8501`.
 
-### 5. Alternativa Colab (si Streamlit Cloud se queda en Etiquetando 1/N)
+### 5. Alternativa Colab (si Streamlit Cloud se queda en Etiquetando k/N)
 
-Abra `Grill_API_Colab.py` en Google Colab (*Runtime → Run all*):
+Abra **`Grill_API_Colab.txt`** en Google Colab (*Runtime → Run all*). Es un script **autosuficiente**: no importa `app.py` ni ningún otro archivo.
 
 - `pip install -q` de las dependencias (sin Streamlit).
-- `OPENAI_API_KEY` desde Colab Secrets (`userdata.get`) o el recuadro de la UI.
-- Interfaz Gradio naranja/negro: xlsx (+ PKL opcionales) → xlsx con contexto, tono, tema, subtema y grupo.
-- Modelo por defecto: **gpt-4.1-nano-2025-04-14**. No use gpt-5-nano en esta pila.
+- `OPENAI_API_KEY` **solo** desde Colab Secrets (`userdata.get`) o la variable de entorno. No hace falta pegarla.
+- Interfaz Gradio: xlsx (+ PKL opcionales de tema/tono) → xlsx con `Contexto analizado`, `Tono IA`, `Tema`, `Subtema` y `Grupo noticia`.
+- Modelo **hardcoded** `gpt-4.1-nano-2025-04-14` (se ignora `OPENAI_CLASIF_MODEL`). Embeddings: `text-embedding-3-small`.
+- Subtemas: heurística para todos los grupos + pulido LLM en lotes de 25–40 (un dossier de ~300 filas hace como máximo ~8 ChatCompletions de subtema).
 
 ---
 

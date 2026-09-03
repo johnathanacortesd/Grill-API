@@ -1,46 +1,116 @@
-# ======================================
-# Importaciones
-# ======================================
-import streamlit as st
-import pandas as pd
-from openpyxl import load_workbook, Workbook
-from openpyxl.styles import Font, NamedStyle, Alignment
-from collections import defaultdict, Counter
-from difflib import SequenceMatcher
-from copy import deepcopy
-import datetime
-import io
-import openai
-import re
-import time
-from unidecode import unidecode
-import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.cluster import AgglomerativeClustering
-import json
-import asyncio
-import hashlib
-from typing import List, Dict, Tuple, Optional, Any
-import joblib
-import gc
-import requests
+# %% [markdown]
+# # Grill-API — Colab autónomo
+#
+# Script **autosuficiente**: no necesita `app.py` ni ningún otro archivo del repo.
+# En Colab: *Runtime → Run all*. En cualquier PC: `python Grill_API_Colab.txt`.
+#
+# **Modelo de clasificación (hardcoded):** `gpt-4.1-nano-2025-04-14`.
+# Se ignora `OPENAI_CLASIF_MODEL` (si el secreto apunta a gpt-5-nano, eso colgaba Etiquetando k/N).
+# Embeddings: `text-embedding-3-small`.
+#
+# **Velocidad:** heurística para todos los grupos + pulido LLM en lotes de 25–40
+# (un dossier de ~300 filas hace **como máximo ~8** ChatCompletions de subtema, a menudo 0).
+#
+# **Clave OpenAI:** Colab → Secrets → `OPENAI_API_KEY`. No hace falta pegarla.
+# Fallback opcional: variable de entorno `OPENAI_API_KEY`.
+
+# %%
+import sys
+import subprocess
+
+_PKGS = [
+    "pandas>=2.1,<3",
+    "openpyxl>=3.1,<4",
+    "openai==0.28.0",
+    "scikit-learn>=1.3,<2",
+    "unidecode>=1.3,<2",
+    "joblib>=1.3,<2",
+    "numpy",
+    "xgboost==2.0.3",
+    "gradio",
+]
+subprocess.check_call(
+    [sys.executable, "-m", "pip", "install", "-q", *_PKGS],
+    stdout=subprocess.DEVNULL,
+)
+
+# %%
 import os
+import io
+import re
+import json
+import time
+import gc
+import hashlib
+import asyncio
+import datetime
+import threading
+import requests
 import zipfile
 import xml.etree.ElementTree as ET
 import html
 from pathlib import Path
+from copy import deepcopy
+from collections import defaultdict, Counter
+from difflib import SequenceMatcher
+from typing import List, Dict, Tuple, Optional, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import threading
 
-# ======================================
-# Configuración general
-# ======================================
-st.set_page_config(
-    page_title="Análisis de Noticias · API - Realizado por Johnathan Cortés",
-    page_icon="◈",
-    layout="wide",
-    initial_sidebar_state="collapsed"
-)
+import pandas as pd
+import numpy as np
+import openai
+import joblib
+from unidecode import unidecode
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.cluster import AgglomerativeClustering
+from openpyxl import load_workbook, Workbook
+from openpyxl.styles import Font, NamedStyle, Alignment
+
+
+class _Session(dict):
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+    def __setattr__(self, name, value):
+        self[name] = value
+
+
+class _StStub:
+    session_state = _Session()
+    secrets = {}
+
+    def set_page_config(self, **_k):
+        return None
+
+    def caption(self, *args, **kwargs):
+        return None
+
+    def info(self, *args, **kwargs):
+        return None
+
+    def warning(self, *args, **kwargs):
+        return None
+
+    def error(self, *args, **kwargs):
+        return None
+
+    def markdown(self, *args, **kwargs):
+        return None
+
+    def cache_data(self, **_k):
+        def _deco(fn):
+            return fn
+        return _deco
+
+
+st = _StStub()
+st.session_state["tokens_input"] = 0
+st.session_state["tokens_output"] = 0
+st.session_state["tokens_embedding"] = 0
+
 
 MODELO_CLASIF_DEFAULT = "gpt-4.1-nano-2025-04-14"
 _MODELO_OVERRIDE_MSG = ""
@@ -549,122 +619,6 @@ def corregir_tildes(texto: str) -> str:
         else:
             resultado.append(p)
     return " ".join(resultado)
-
-
-# ======================================
-# CSS
-# ======================================
-def load_custom_css():
-    st.markdown("""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&family=Google+Sans+Text:wght@400;500;700&family=Roboto+Mono:wght@400;500&display=swap');
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
-:root {
-    --bg:#f8f9fa;--s1:#ffffff;--s2:#f1f3f4;--s3:#e8eaed;
-    --border:#dadce0;--border2:#bdc1c6;--border-focus:#f97316;
-    --text:#202124;--text2:#3c4043;--text3:#5f6368;--text4:#9aa0a6;
-    --accent:#f97316;--accent2:#ea580c;--accent3:#c2410c;
-    --accent-bg:#fff7ed;--accent-bg2:#ffedd5;--accent-bdr:#fed7aa;
-    --green:#059669;--green2:#047857;--green-bg:#ecfdf5;--green-bdr:#a7f3d0;
-    --red:#dc2626;--amber:#d97706;--blue:#1a73e8;
-    --r:8px;--r2:12px;--r3:16px;--r4:20px;
-    --shadow-sm:0 1px 2px rgba(60,64,67,0.1),0 1px 3px rgba(60,64,67,0.08);
-    --shadow-md:0 1px 3px rgba(60,64,67,0.12),0 4px 8px rgba(60,64,67,0.08);
-    --shadow-lg:0 2px 6px rgba(60,64,67,0.1),0 8px 24px rgba(60,64,67,0.1);
-    --transition:all 0.2s cubic-bezier(0.4,0,0.2,1);
-}
-html,body,[data-testid="stApp"]{
-    background:var(--bg)!important;color:var(--text)!important;
-    font-family:'Google Sans Text','Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
-    font-size:14px;-webkit-font-smoothing:antialiased;letter-spacing:0.01em;
-}
-#MainMenu,footer,header{visibility:hidden}.stDeployButton{display:none}
-.block-container{padding-top:1rem!important;padding-bottom:0!important}
-[data-testid="stAppViewBlockContainer"]{padding-top:1rem!important}
-.app-header{background:var(--s1);border:1px solid var(--border);border-radius:var(--r3);padding:1rem 1.5rem;margin-bottom:1rem;display:flex;align-items:center;gap:1rem;box-shadow:var(--shadow-sm);position:relative;overflow:hidden;}
-.app-header-icon{width:40px;height:40px;background:linear-gradient(135deg,#f97316,#ea580c);border-radius:12px;display:flex;align-items:center;justify-content:center;font-size:1.2rem;color:white;flex-shrink:0;box-shadow:0 2px 8px rgba(249,115,22,0.3);}
-.app-header-text{flex:1}
-.app-header-title{font-family:'Google Sans',sans-serif;font-size:1.25rem;font-weight:700;color:var(--text);letter-spacing:-0.01em;line-height:1.3}
-.app-header-version{font-family:'Roboto Mono',monospace;font-size:0.65rem;color:var(--text3);letter-spacing:0.03em;margin-top:0.15rem}
-.app-header-badge{background:var(--accent-bg);border:1px solid var(--accent-bdr);color:var(--accent2);font-family:'Roboto Mono',monospace;font-size:0.6rem;font-weight:500;padding:0.25rem 0.75rem;border-radius:100px;letter-spacing:0.04em;text-transform:uppercase;white-space:nowrap;}
-[data-testid="stTabs"] [data-testid="stTabsList"]{background:var(--s1)!important;border:1px solid var(--border)!important;border-radius:var(--r2)!important;padding:4px!important;gap:4px!important;box-shadow:var(--shadow-sm)!important;margin-bottom:0.75rem!important;}
-[data-testid="stTabs"] button[data-baseweb="tab"]{font-family:'Google Sans',sans-serif!important;font-size:0.88rem!important;font-weight:500!important;color:var(--text2)!important;border-radius:var(--r)!important;padding:0.45rem 1.2rem!important;border:none!important;background:transparent!important;transition:var(--transition)!important;}
-[data-testid="stTabs"] button[data-baseweb="tab"]:hover{background:var(--s2)!important;color:var(--text)!important}
-[data-testid="stTabs"] button[data-baseweb="tab"][aria-selected="true"]{background:var(--accent-bg)!important;color:var(--accent2)!important;border:1px solid var(--accent-bdr)!important;font-weight:700!important;}
-.metrics-grid{display:grid;grid-template-columns:repeat(5,1fr);gap:0.6rem;margin:0.8rem 0}
-.metric-card{background:var(--s1);border:1px solid var(--border);border-radius:var(--r2);padding:0.8rem 0.6rem;text-align:center;transition:var(--transition);box-shadow:var(--shadow-sm);position:relative;overflow:hidden;}
-.metric-card::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;border-radius:var(--r2) var(--r2) 0 0}
-.metric-card.m-total::before{background:linear-gradient(90deg,#5f6368,#9aa0a6)}
-.metric-card.m-unique::before{background:linear-gradient(90deg,#059669,#34d399)}
-.metric-card.m-dup::before{background:linear-gradient(90deg,#f59e0b,#fbbf24)}
-.metric-card.m-time::before{background:linear-gradient(90deg,#1a73e8,#4285f4)}
-.metric-card.m-cost::before{background:linear-gradient(90deg,#f97316,#fb923c)}
-.metric-card:hover{transform:translateY(-2px);box-shadow:var(--shadow-lg)}
-.metric-val{font-family:'Google Sans',sans-serif;font-size:1.5rem;font-weight:700;line-height:1;margin-bottom:0.3rem;letter-spacing:-0.01em}
-.metric-lbl{font-family:'Roboto Mono',monospace;font-size:0.62rem;color:var(--text3);text-transform:uppercase;letter-spacing:0.08em;font-weight:500}
-[data-testid="stForm"]{background:var(--s1)!important;border:1px solid var(--border)!important;border-radius:var(--r3)!important;padding:1.2rem 1.5rem!important;box-shadow:var(--shadow-md)!important;}
-.sec-label{font-family:'Google Sans',sans-serif;font-size:0.72rem;font-weight:700;color:var(--text2);letter-spacing:0.08em;text-transform:uppercase;padding-bottom:0.3rem;border-bottom:2px solid var(--s3);margin:0.8rem 0 0.5rem;display:flex;align-items:center;gap:0.5rem;}
-.sec-label::before{content:'';display:inline-block;width:3px;height:12px;background:linear-gradient(180deg,#f97316,#ea580c);border-radius:2px}
-.upload-zone{display:grid;grid-template-columns:repeat(3,1fr);gap:0.6rem;margin:0.3rem 0}
-.upload-zone-card{background:var(--s1);border:1.5px dashed var(--border);border-radius:var(--r2);padding:0.6rem 0.8rem;display:flex;align-items:center;gap:0.6rem;transition:var(--transition);}
-.upload-zone-card:hover{border-color:var(--accent);border-style:solid;transform:translateY(-1px);box-shadow:var(--shadow-md)}
-.upload-zone-icon{width:32px;height:32px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:1rem;flex-shrink:0;}
-.upload-zone-icon.uz-dossier{background:#fff7ed;color:#f97316}
-.upload-zone-icon.uz-region{background:#ecfdf5;color:#059669}
-.upload-zone-icon.uz-internet{background:#eff6ff;color:#1a73e8}
-.upload-zone-text{flex:1;min-width:0}
-.upload-zone-title{font-family:'Google Sans',sans-serif;font-size:0.82rem;font-weight:700;color:var(--text);line-height:1.2}
-.upload-zone-desc{font-size:0.7rem;color:var(--text3);line-height:1.3}
-[data-testid="stFileUploader"]{background:var(--s1)!important;border:1.5px dashed var(--border)!important;border-radius:var(--r)!important;padding:0.4rem 0.6rem!important;transition:var(--transition)!important;min-height:auto!important;}
-[data-testid="stFileUploader"]:hover{border-color:var(--accent)!important;border-style:solid!important;background:var(--accent-bg)!important;}
-[data-testid="stFileUploader"] section{padding:0.2rem!important}
-[data-testid="stFileUploader"] section>div{font-size:0.78rem!important;color:var(--text2)!important}
-[data-testid="stFileUploader"] section small{font-size:0.7rem!important;color:var(--text3)!important}
-[data-testid="stFileUploader"] button{background:var(--accent-bg)!important;border:1px solid var(--accent-bdr)!important;color:var(--accent2)!important;font-weight:500!important;font-size:0.75rem!important;border-radius:100px!important;padding:0.25rem 0.8rem!important;font-family:'Google Sans',sans-serif!important;transition:var(--transition)!important;}
-[data-testid="stFileUploader"] button:hover{background:var(--accent)!important;color:white!important;border-color:var(--accent)!important}
-[data-testid="stTextInput"] input,[data-testid="stTextArea"] textarea{background:var(--s1)!important;border:1.5px solid var(--border)!important;color:var(--text)!important;border-radius:var(--r)!important;font-family:'Google Sans Text',sans-serif!important;font-size:0.9rem!important;padding:0.5rem 0.75rem!important;transition:var(--transition)!important;}
-[data-testid="stTextInput"] input:focus,[data-testid="stTextArea"] textarea:focus{border-color:var(--accent)!important;box-shadow:0 0 0 3px rgba(249,115,22,0.12)!important;}
-[data-testid="stTextInput"] input::placeholder,[data-testid="stTextArea"] textarea::placeholder{color:var(--text4)!important;font-size:0.85rem!important;}
-label[data-testid="stWidgetLabel"] p{font-family:'Google Sans',sans-serif!important;color:var(--text2)!important;font-size:0.82rem!important;font-weight:500!important;margin-bottom:0.15rem!important;}
-.stButton>button,[data-testid="stDownloadButton"]>button{background:var(--s1)!important;border:1.5px solid var(--border)!important;color:var(--text)!important;border-radius:100px!important;font-family:'Google Sans',sans-serif!important;font-weight:500!important;font-size:0.88rem!important;transition:var(--transition)!important;padding:0.5rem 1.2rem!important;box-shadow:none!important;}
-.stButton>button:hover,[data-testid="stDownloadButton"]>button:hover{border-color:var(--accent)!important;color:var(--accent2)!important;background:var(--accent-bg)!important;box-shadow:var(--shadow-sm)!important;transform:translateY(-1px)!important;}
-.stButton>button[kind="primary"],[data-testid="stDownloadButton"]>button[kind="primary"]{background:var(--accent)!important;border:none!important;color:#fff!important;font-weight:500!important;font-size:0.92rem!important;padding:0.6rem 1.5rem!important;box-shadow:0 1px 3px rgba(249,115,22,0.3),0 4px 12px rgba(249,115,22,0.15)!important;letter-spacing:0.01em!important;}
-.stButton>button[kind="primary"]:hover,[data-testid="stDownloadButton"]>button[kind="primary"]:hover{background:var(--accent2)!important;box-shadow:0 2px 6px rgba(234,88,12,0.35),0 8px 24px rgba(234,88,12,0.18)!important;transform:translateY(-1px)!important;color:#fff!important;}
-[data-testid="stRadio"] label{font-family:'Google Sans Text',sans-serif!important;color:var(--text)!important;font-size:0.88rem!important;font-weight:400!important;}
-[data-testid="stRadio"]{margin-bottom:0!important}
-[data-testid="stRadio"]>div{gap:0!important}
-[data-testid="stStatus"]{background:var(--s1)!important;border:1px solid var(--border)!important;border-radius:var(--r2)!important;font-family:'Roboto Mono',monospace!important;font-size:0.8rem!important;}
-[data-testid="stAlert"]{background:var(--s1)!important;border:1px solid var(--border)!important;border-radius:var(--r2)!important;color:var(--text2)!important;font-size:0.85rem!important;padding:0.6rem 0.8rem!important;}
-.success-banner{background:linear-gradient(135deg,#ecfdf5,#d1fae5);border:1px solid var(--green-bdr);border-left:4px solid var(--green);border-radius:var(--r2);padding:0.8rem 1.2rem;margin:0.5rem 0 0.8rem;display:flex;align-items:center;gap:0.8rem;}
-.success-icon{width:34px;height:34px;background:linear-gradient(135deg,#059669,#047857);border-radius:50%;display:flex;align-items:center;justify-content:center;color:white;font-size:1rem;flex-shrink:0;}
-.success-title{font-family:'Google Sans',sans-serif;font-size:1rem;font-weight:700;color:#047857;margin-bottom:0.1rem}
-.success-sub{font-size:0.8rem;color:var(--text2)}
-.auth-wrap{max-width:380px;margin:8vh auto 0;text-align:center}
-.auth-icon{width:60px;height:60px;background:linear-gradient(135deg,#f97316,#ea580c);border-radius:16px;display:inline-flex;align-items:center;justify-content:center;font-size:1.6rem;color:white;margin-bottom:1rem;box-shadow:0 4px 16px rgba(249,115,22,0.3);}
-.auth-title{font-family:'Google Sans',sans-serif;font-size:1.5rem;font-weight:700;color:var(--text);margin-bottom:0.3rem}
-.auth-sub{font-size:0.85rem;color:var(--text3);margin-bottom:2rem}
-.cluster-info{background:var(--accent-bg);border:1px solid var(--accent-bdr);border-radius:var(--r);padding:0.5rem 0.8rem;margin:0.4rem 0;font-family:'Roboto Mono',monospace;font-size:0.68rem;color:var(--text2);line-height:1.6;}
-.cluster-info b{color:var(--accent2);font-size:0.72rem}
-.config-badge{display:inline-flex;align-items:center;gap:0.4rem;background:var(--s2);border:1px solid var(--border);border-radius:100px;padding:0.2rem 0.7rem;font-family:'Roboto Mono',monospace;font-size:0.62rem;color:var(--text3);margin-bottom:0.6rem;}
-[data-testid="stProgressBar"]>div>div{background:linear-gradient(90deg,#f97316,#fb923c,#fdba74)!important;border-radius:100px!important;height:5px!important;}
-[data-testid="stDataFrame"]{border:1px solid var(--border)!important;border-radius:var(--r2)!important;box-shadow:var(--shadow-sm)!important;overflow:hidden!important;}
-::-webkit-scrollbar{width:6px;height:6px}
-::-webkit-scrollbar-track{background:var(--s2);border-radius:3px}
-::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
-::-webkit-scrollbar-thumb:hover{background:var(--accent)}
-.footer{font-family:'Roboto Mono',monospace;font-size:0.6rem;color:var(--text4);text-align:center;padding:0.8rem 0 0.5rem;letter-spacing:0.04em;border-top:1px solid var(--s3);margin-top:1rem;}
-.stElementContainer{margin-bottom:0!important}
-[data-testid="stVerticalBlock"]>div{gap:0.3rem!important}
-[data-testid="stHorizontalBlock"]>div{gap:0.4rem!important}
-hr{border-color:var(--s3)!important;margin:0.5rem 0!important}
-[data-testid="stSelectbox"]>div>div{font-family:'Google Sans Text',sans-serif!important;font-size:0.88rem!important;color:var(--text)!important;}
-@media(max-width:768px){
-    .metrics-grid{grid-template-columns:repeat(2,1fr)}
-    .upload-zone{grid-template-columns:1fr}
-    .app-header{flex-direction:column;text-align:center;gap:0.5rem;padding:1rem}
-}
-</style>
-""", unsafe_allow_html=True)
 
 
 # ======================================
@@ -4657,1072 +4611,178 @@ def _unificar_tema_por_subtema(temas, subtemas):
     return out
 
 # ======================================
-# Duplicados y Excel (Reglas Nuevas)
-# ======================================
-def _normalizar_url(url: str) -> str:
-    if not url: return ""
-    url = url.strip().lower()
-    url = re.sub(r'^https?://', '', url)
-    url = re.sub(r'^www\.', '', url)
-    url = url.rstrip('/')
-    return url
 
-def detectar_duplicados_avanzado(rows, km):
-    processed = deepcopy(rows)
-    seen_url, seen_bcast = {}, {}
-    seen_streaming: Dict[tuple, int] = {}
-    tb = defaultdict(list)
 
-    for i, row in enumerate(processed):
-        if row.get("is_duplicate"): continue
+import gradio as gr
 
-        tipo    = normalizar_tipo_medio(str(row.get(km["tipodemedio"], "")))
-        mencion = norm_key(row.get(km["menciones"], ""))
-        medio   = norm_key(row.get(km["medio"], ""))
 
-        streaming_url_raw = row.get(km["link_streaming"])
-        if isinstance(streaming_url_raw, dict):
-            streaming_url_raw = streaming_url_raw.get("url")
-            
-        if streaming_url_raw and mencion:
-            streaming_url_norm = _normalizar_url(str(streaming_url_raw))
-            if streaming_url_norm:
-                sk = (streaming_url_norm, mencion)
-                if sk in seen_streaming:
-                    row["is_duplicate"] = True
-                    row[km["idduplicada"]] = processed[seen_streaming[sk]].get(km["idnoticia"], "")
-                    continue
-                seen_streaming[sk] = i
-
-        if tipo == "Internet":
-            li = row.get(km["link_nota"])
-            url = li.get("url") if isinstance(li, dict) else li
-            if url and mencion:
-                url_norm = _normalizar_url(str(url))
-                k = (url_norm, mencion)
-                if k in seen_url:
-                    row["is_duplicate"] = True
-                    row[km["idduplicada"]] = processed[seen_url[k]].get(km["idnoticia"], "")
-                    continue
-                seen_url[k] = i
-            if medio and mencion:
-                tb[(medio, mencion)].append(i)
-
-        elif tipo in ("Radio", "Televisión"):
-            hora = str(row.get(km["hora"], "")).strip()
-            if mencion and medio and hora:
-                k = (mencion, medio, hora)
-                if k in seen_bcast:
-                    row["is_duplicate"] = True
-                    row[km["idduplicada"]] = processed[seen_bcast[k]].get(km["idnoticia"], "")
-                else:
-                    seen_bcast[k] = i
-
-    for idxs in tb.values():
-        if len(idxs) < 2: continue
-        for i in range(len(idxs)):
-            for j in range(i + 1, len(idxs)):
-                a, b = idxs[i], idxs[j]
-                if processed[a].get("is_duplicate") or processed[b].get("is_duplicate"): continue
-                ta  = normalize_title_for_comparison(processed[a].get(km["titulo"]))
-                tb_ = normalize_title_for_comparison(processed[b].get(km["titulo"]))
-                if ta and tb_ and SequenceMatcher(None, ta, tb_).ratio() >= SIMILARITY_THRESHOLD_TITULOS:
-                    if len(ta) < len(tb_):
-                        processed[a]["is_duplicate"] = True
-                        processed[a][km["idduplicada"]]  = processed[b].get(km["idnoticia"], "")
-                    else:
-                        processed[b]["is_duplicate"] = True
-                        processed[b][km["idduplicada"]]  = processed[a].get(km["idnoticia"], "")
-
-    return processed
-
-def read_and_normalize_dossier(sheet, region_map, internet_map):
-    headers = [cell.value for cell in sheet[1] if cell.value is not None]
-    rows = []
-    for row in sheet.iter_rows(min_row=2):
-        if all(c.value is None for c in row):
-            continue
-        row_data = {}
-        for i, h in enumerate(headers):
-            if i < len(row):
-                cell = row[i]
-                val = cell.value
-                url = cell.hyperlink.target if (cell.hyperlink and cell.hyperlink.target) else None
-                if url:
-                    row_data[h] = {"value": val or "Link", "url": url}
-                else:
-                    row_data[h] = val
-        rows.append(row_data)
-
-    df = pd.DataFrame(rows)
-
-    tipo_medio_map = {
-        'online': 'Internet', 'internet': 'Internet',
-        'diario': 'Prensa',
-        'am': 'Radio', 'fm': 'Radio',
-        'aire': 'Televisión', 'cable': 'Televisión',
-        'revista': 'Revistas', 'revistas': 'Revistas',
-    }
-    
-    if 'Tipo de Medio' in df.columns:
-        df['Tipo de Medio'] = (
-            df['Tipo de Medio'].astype(str).str.lower().str.strip()
-            .map(tipo_medio_map)
-            .fillna(df['Tipo de Medio'].astype(str).str.strip())
-        )
-    else:
-        df['Tipo de Medio'] = 'Otro'
-
-    is_av = df['Tipo de Medio'].isin(['Radio', 'Televisión'])
-    is_grafica = df['Tipo de Medio'].isin(['Prensa', 'Internet', 'Revistas'])
-    is_internet = df['Tipo de Medio'] == 'Internet'
-
-    if 'Medio' in df.columns:
-        raw_medios_clean = df['Medio'].astype(str).str.lower().str.strip()
-        df['Región'] = raw_medios_clean.map(region_map).fillna("N/A")
-    else:
-        df['Medio'] = 'N/A'
-        df['Región'] = 'N/A'
-
-    if 'Medio' in df.columns:
-        df.loc[is_internet, 'Medio'] = (
-            df.loc[is_internet, 'Medio']
-            .astype(str).str.lower().str.strip()
-            .map(internet_map)
-            .fillna(df.loc[is_internet, 'Medio'])
-        )
-
-    df['ID Noticia'] = df.get('NoticiaId', df.get('ID Noticia', pd.Series(dtype=str)))
-    df['Fecha'] = pd.to_datetime(df.get('Fecha', pd.Series(dtype=str)), dayfirst=True, errors='coerce').dt.normalize()
-    df['Hora'] = df.get('Hora', pd.Series(dtype=str))
-    df['Sección - Programa'] = df.get('Sección - Programa', pd.Series(dtype=str)).astype(str).apply(clean_text)
-    
-    titulo_col = 'Título' if 'Título' in df.columns else 'Titulo'
-    df['Título'] = df.get(titulo_col, pd.Series(dtype=str)).astype(str).apply(clean_text)
-    df['Autor - Conductor'] = df.get('Autor - Conductor', pd.Series(dtype=str)).astype(str).apply(clean_text)
-    df['Nro. Pagina'] = df.get('Nro. Pagina', pd.Series(dtype=str))
-    
-    dim_col = 'Dimensioncm2' if 'Dimensioncm2' in df.columns else 'Dimensión'
-    df['Dimensión'] = df.get(dim_col, pd.Series(dtype=str))
-    df['Duración - Nro. Caracteres'] = df.get('Duración - Nro. Caracteres', pd.Series(dtype=str))
-
-    df.loc[is_av, 'Dimensión'] = df.loc[is_av, 'Duración - Nro. Caracteres']
-    df.loc[is_av, 'Duración - Nro. Caracteres'] = 0
-
-    cpe_av = df.get('CPE', pd.Series([np.nan] * len(df)))
-    cpe_grafica = df.get('Valor de Nota', pd.Series([np.nan] * len(df)))
-    df['CPE'] = np.where(is_av, cpe_av, np.where(is_grafica, cpe_grafica, np.nan))
-
-    df['Tier'] = df.get('Tier', pd.Series(dtype=str))
-    df['Audiencia'] = df.get('Audiencia', pd.Series(dtype=str))
-    df['Tono'] = df.get('Tono', pd.Series(dtype=str)).astype(str).apply(clean_text)
-    df['Tema'] = df.get('Tematica', df.get('Tema', pd.Series(dtype=str))).astype(str).apply(clean_text)
-    df['Temas Generales - Tema'] = df.get('Temas Generales - Tema', pd.Series(dtype=str)).astype(str).apply(clean_text)
-
-    cuerpo_col = 'CuerpoEs' if 'CuerpoEs' in df.columns else 'Resumen - Aclaracion'
-    cuerpo_cleaned = df.get(cuerpo_col, pd.Series([''] * len(df))).astype(str).apply(clean_cuerpo)
-
-    def fmt_grafica(text):
-        if not isinstance(text, str) or not text.strip():
-            return text
-        parrafos = [p.strip() for p in text.split('\n') if p.strip()]
-        return '\n\n'.join(parrafos) if len(parrafos) > 1 else text
-
-    df['Resumen - Aclaracion'] = np.where(is_av, cuerpo_cleaned, cuerpo_cleaned.apply(fmt_grafica))
-
-    # ── ADICIÓN: columna con el CuerpoEs COMPLETO, sin truncar ──────────────
-    # Se guarda tal cual queda cuerpo_cleaned (HTML limpio, <br> -> saltos de línea),
-    # SIN pasar por corregir_texto() (que es lo que recorta/añade "..." al final).
-    df['Cuerpo Completo'] = cuerpo_cleaned
-
-    url_nota_av = df.get('URL Nota AV', df.get('Link Nota AV', pd.Series([''] * len(df))))
-    url_streaming = df.get('URL (Streaming - Imagen)', pd.Series([''] * len(df)))
-    
-    link_nota_final = []
-    for val_av, val_str, is_av_row in zip(url_nota_av, url_streaming, is_av):
-        if is_av_row:
-            if isinstance(val_av, dict):
-                url_t = val_av.get("url", "")
-                link_nota_final.append({"value": "Link", "url": url_t.replace(".com.ar", ".com.co") if url_t else None})
-            else:
-                url_t = str(val_av or "")
-                link_nota_final.append({"value": "Link", "url": url_t.replace(".com.ar", ".com.co") if url_t else None})
-        else:
-            if isinstance(val_str, dict):
-                link_nota_final.append(val_str)
-            else:
-                link_nota_final.append({"value": "Link", "url": val_str if val_str else None})
-                
-    df['Link Nota'] = link_nota_final
-
-    url_nota_raw = df.get('URL Nota', pd.Series([''] * len(df)))
-    link_stream_final = []
-    for val_url, is_int in zip(url_nota_raw, is_internet):
-        if is_int:
-            if isinstance(val_url, dict):
-                link_stream_final.append(val_url)
-            else:
-                link_stream_final.append({"value": "Link", "url": val_url if val_url else None})
-        else:
-            link_stream_final.append(None)
-            
-    df['Link (Streaming - Imagen)'] = link_stream_final
-
-    menciones_av = df.get('Menciones - Empresa', pd.Series([''] * len(df))).fillna('').astype(str).apply(clean_text)
-    menciones_grafica = df.get('Empresa rel.', pd.Series([''] * len(df))).fillna('').astype(str).apply(clean_text)
-    df['Menciones - Empresa'] = np.where(is_av, menciones_av, np.where(is_grafica, menciones_grafica, menciones_av))
-
-    return df
-
-def generate_output_excel(rows, km):
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Resultado"
-    ORDER = [
-        "ID Noticia", "Fecha", "Hora", "Medio", "Tipo de Medio",
-        "Sección - Programa", "Región", "Título", "Autor - Conductor",
-        "Nro. Pagina", "Dimensión", "Duración - Nro. Caracteres",
-        "CPE", "Audiencia", "Tier", "Tono IA", "Tema", "Subtema",
-        "Link Nota", "Resumen - Aclaracion", "Link (Streaming - Imagen)", "Menciones - Empresa",
-        "ID duplicada",
-        "Cuerpo Completo"   # ── ADICIÓN: columna final con el CuerpoEs completo, sin truncar ──
-    ]
-    NUM = {"ID Noticia", "Nro. Pagina", "Dimensión", "Duración - Nro. Caracteres", "CPE", "Tier", "Audiencia"}
-    ORDER += ["Contexto analizado", "Coincidencia marca", "Origen coincidencia", "Tono", "Grupo noticia"]
-    ws.append(ORDER)
-    
-    font_hyperlink = Font(color="000000", underline=None)
-    align_left = Alignment(horizontal='left')
-    font_header = Font(bold=True)
-    
-    for i, col_name in enumerate(ORDER, start=1):
-        cell = ws.cell(row=1, column=i)
-        cell.font = font_header
-
-    col_idx_map = {name: ORDER.index(name) + 1 for name in ORDER}
-        
-    for row in rows:
-        ctx, match, origin = _brand_audit(row.get(km.get("titulo"), ""), row.get(km.get("resumen"), ""), st.session_state.get("brand_name", ""), st.session_state.get("brand_aliases", []), row.get("Cuerpo Completo"))
-        row["Contexto analizado"] = _contexto_para_excel(ctx)
-        row["Coincidencia marca"], row["Origen coincidencia"] = match, origin
-        tk = km.get("titulo")
-        if tk and tk in row: row[tk] = clean_title_for_output(row.get(tk))
-        rk = km.get("resumen")
-        if rk and rk in row: row[rk] = corregir_texto(row.get(rk))
-        
-        out, links = [], {}
-        for ci, h in enumerate(ORDER, start=1):
-            dk = km.get(norm_key(h), norm_key(h))
-            val = row.get(h)
-            cv = None
-            
-            if h == 'Fecha' and pd.notna(val):
-                if isinstance(val, pd.Timestamp):
-                    cv = val.to_pydatetime()
-                elif isinstance(val, (datetime.datetime, datetime.date)):
-                    cv = val
-                else:
-                    cv = str(val) if val is not None else None
-            elif h in NUM:
-                cv = parse_numeric(val)
-            elif isinstance(val, dict) and "url" in val:
-                cv = val.get("value", "Link")
-                if val.get("url"): links[ci] = val["url"]
-            elif val is not None:
-                if isinstance(val, str) and val.startswith("http"):
-                    cv = "Link"
-                    links[ci] = val
-                else:
-                    cv = str(val)
-            out.append(cv)
-        ws.append(out)
-        
-        current_row = ws.max_row
-        for ci, url in links.items():
-            cell = ws.cell(row=current_row, column=ci)
-            cell.hyperlink = url
-            cell.font = font_hyperlink
-            cell.alignment = align_left
-            
-        date_col_idx = ORDER.index("Fecha") + 1
-        date_cell = ws.cell(row=current_row, column=date_col_idx)
-        if isinstance(date_cell.value, (datetime.datetime, datetime.date)):
-            date_cell.number_format = 'DD/MM/YYYY'
-            
-        cols_millares = ["Nro. Pagina", "Dimensión", "Duración - Nro. Caracteres", "Tier", "Audiencia"]
-        for col_name in cols_millares:
-            col_idx = col_idx_map[col_name]
-            cell = ws.cell(row=current_row, column=col_idx)
-            if isinstance(cell.value, (int, float)):
-                cell.number_format = '#,##0'
-
-        cpe_idx = col_idx_map["CPE"]
-        cpe_cell = ws.cell(row=current_row, column=cpe_idx)
-        if isinstance(cpe_cell.value, (int, float)):
-            cpe_cell.number_format = '$#,##0'
-            
-    for i, col_name in enumerate(ORDER, start=1):
-        letter = ws.cell(row=1, column=i).column_letter
-        if col_name in ['Título', 'Resumen - Aclaracion', 'Cuerpo Completo']:
-            ws.column_dimensions[letter].width = 50
-        elif col_name in ['Link Nota', 'Link (Streaming - Imagen)']:
-            ws.column_dimensions[letter].width = 15
-        else:
-            ws.column_dimensions[letter].width = 20
-            
-    buf = io.BytesIO()
-    wb.save(buf)
-    return buf.getvalue()
-
-
-# ======================================
-# Proceso principal
-# ======================================
-async def run_full_process_async(df_file, bn, ba, tpkl, epkl, mode, xlsx_bytes=None, cliente="", voceros="", enable_scraping=False):
-    st.session_state.update({'tokens_input': 0, 'tokens_output': 0, 'tokens_embedding': 0})
-    get_embedding_cache().reset_stats()  # mantiene los embeddings cacheados entre corridas (no los limpia)
-    t0 = time.time()
-    
-    if "API" in mode:
-        try:
-            openai.api_key=st.secrets["OPENAI_API_KEY"]
-            openai.aiosession.set(None)
-        except:
-            st.error("OPENAI_API_KEY no encontrado.")
-            st.stop()
-            
-    with st.status("Paso 1 · Carga de Configuración y Dossier", expanded=True) as s:
-        region_map, internet_map = load_config_from_sheets()
-
-        wb_in = load_workbook(df_file, data_only=True)
-        df_normalized = read_and_normalize_dossier(wb_in.active, region_map, internet_map)
-
-        medios_sin_region = sorted(set(
-            df_normalized.loc[df_normalized['Región'] == 'N/A', 'Medio']
-            .astype(str).str.strip()
-        ) - {'', 'nan', 'None'})
-        if medios_sin_region:
-            st.session_state["medios_sin_mapear"] = medios_sin_region
-        
-        rows_expanded = []
-        for idx, row_series in df_normalized.iterrows():
-            menciones = [m.strip() for m in str(row_series['Menciones - Empresa']).split(';') if m.strip()]
-            if not menciones:
-                row_dict = row_series.to_dict()
-                row_dict['Menciones - Empresa'] = ""
-                row_dict['original_index'] = idx
-                row_dict['expanded_index'] = len(rows_expanded)
-                row_dict['is_duplicate'] = False
-                rows_expanded.append(row_dict)
-            else:
-                for m in menciones:
-                    row_dict = row_series.to_dict()
-                    row_dict['Menciones - Empresa'] = m
-                    row_dict['original_index'] = idx
-                    row_dict['expanded_index'] = len(rows_expanded)
-                    row_dict['is_duplicate'] = False
-                    rows_expanded.append(row_dict)
-
-        km = {
-            "idnoticia": "ID Noticia",
-            "fecha": "Fecha",
-            "hora": "Hora",
-            "medio": "Medio",
-            "tipodemedio": "Tipo de Medio",
-            "seccion_programa": "Sección - Programa",
-            "region": "Región",
-            "titulo": "Título",
-            "autor_conductor": "Autor - Conductor",
-            "nro_pagina": "Nro. Pagina",
-            "dimension": "Dimensión",
-            "duracion_caracteres": "Duración - Nro. Caracteres",
-            "cpe": "CPE",
-            "tier": "Tier",
-            "audiencia": "Audiencia",
-            "tono": "Tono",
-            "tonoiai": "Tono IA",
-            "tema": "Tema",
-            "subtema": "Subtema",
-            "link_nota": "Link Nota",
-            "resumen": "Resumen - Aclaracion",
-            "link_streaming": "Link (Streaming - Imagen)",
-            "menciones": "Menciones - Empresa",
-            "idduplicada": "ID duplicada"
-        }
-        
-        rows = detectar_duplicados_avanzado(rows_expanded, km)
-        for row in rows:
-            if row["is_duplicate"]:
-                row["Tono IA"] = "Duplicada"
-                row["Tema"] = "-"
-                row["Subtema"] = "-"
-                
-        s.update(label="✓ Paso 1 completado", state="complete")
-        
-    with st.status("Paso 2 · Normalización", expanded=True) as s:
-        s.update(label="✓ Paso 2 · Mapeos y normalizaciones aplicados", state="complete")
-        
-    gc.collect()
-    ta = [r for r in rows if not r.get("is_duplicate")]
-    
-    if ta:
-        df = pd.DataFrame(ta)
-        df["_txt"] = df.apply(
-            lambda r: _construir_texto_basico(r, km["titulo"], km["resumen"], bn, ba),
-            axis=1
-        )
-        with st.status("Embeddings...", expanded=True) as s:
-            _ = get_embeddings_batch(df["_txt"].tolist())
-            s.update(label=f"✓ {get_embedding_cache().stats()}", state="complete")
-            
-        with st.status("Paso 3 · Tono (Reputación)", expanded=True) as s:
-            pb = st.progress(0)
-            if ("PKL" in mode or tpkl) and tpkl:
-                res = analizar_tono_con_pkl(
-                    df["_txt"].tolist(), tpkl,
-                    titulos=df[km["titulo"]], resumenes=df[km["resumen"]],
-                    marca=bn, aliases=ba, progress=pb,
-                    cuerpos=df['Cuerpo Completo'] if 'Cuerpo Completo' in df.columns else None,
-                )
-                if res is None: st.stop()
-            elif "API" in mode or "Híbrido" in mode:
-                res = await ClasificadorTono(bn, ba).procesar_lote_async(
-                    df["_txt"], pb, df[km["resumen"]], df[km["titulo"]],
-                    df['Cuerpo Completo'] if 'Cuerpo Completo' in df.columns else None,
-                )
-            else:
-                res = [{"tono": "N/A"}] * len(ta)
-            df[km["tonoiai"]] = [r["tono"] for r in res]
-            s.update(label="✓ Paso 3 · Tono (Reputación)", state="complete")
-            
-        with st.status("Paso 4 · Clasificación", expanded=True) as s:
-            pb = st.progress(0)
-            cuerpos = df['Cuerpo Completo'] if 'Cuerpo Completo' in df.columns else None
-            if "Solo Modelos PKL" in mode:
-                temas, subtemas = etiquetar_sin_llm(
-                    df[km["titulo"]].tolist(), df[km["resumen"]].tolist(), bn, ba, cuerpos
-                )
-            else:
-                subtemas = ClasificadorSubtema(bn, ba).procesar_lote(
-                    df["_txt"], pb, df[km["resumen"]], df[km["titulo"]]
-                )
-                temas = consolidar_temas(subtemas, df["_txt"].tolist(), pb, bn)
-            df[km["subtema"]] = subtemas
-            vocab_tema = None
-            if epkl:
-                pack = analizar_temas_con_pkl(df["_txt"].tolist(), epkl)
-                if pack:
-                    df[km["tema"]], vocab_tema = pack
-                else:
-                    df[km["tema"]] = temas
-            else:
-                df[km["tema"]] = temas
-            df[km["tema"]] = _unificar_tema_por_subtema(df[km["tema"]].tolist(), df[km["subtema"]].tolist())
-            if vocab_tema:
-                df[km["tema"]] = _forzar_vocabulario_pkl(
-                    df[km["tema"]].tolist(), vocab_tema, df["_txt"].tolist()
-                )
-            df["Contexto analizado"] = [
-                _contexto_para_excel(extraer_contexto_marca(
-                    r[km["titulo"]], r[km["resumen"]], bn, ba,
-                    r["Cuerpo Completo"] if "Cuerpo Completo" in df.columns else None,
-                ))
-                for _, r in df.iterrows()
-            ]
-            df = aplicar_consistencia_grupos(
-                df, km["titulo"], km["resumen"],
-                km["tonoiai"], km["tema"], km["subtema"],
-                marca=bn, aliases=ba,
-                vocabulario_tema=vocab_tema,
-            )
-            s.update(label="✓ Paso 4 · Clasificación", state="complete")
-            
-        rm2 = df.set_index("expanded_index").to_dict("index")
-        for idx, row in enumerate(rows):
-            if not row.get("is_duplicate"):
-                row.update(rm2.get(row.get("expanded_index"), {}))
-                
-    gc.collect()
-    ci = (st.session_state['tokens_input']     / 1e6) * PRICE_INPUT_1M
-    co = (st.session_state['tokens_output']    / 1e6) * PRICE_OUTPUT_1M
-    ce = (st.session_state['tokens_embedding'] / 1e6) * PRICE_EMBEDDING_1M
-    
-    st.session_state["brand_name"] = bn
-    st.session_state["brand_aliases"] = ba
-    with st.status("Paso 5 · Informe", expanded=True) as s:
-        st.session_state["output_data"]     = generate_output_excel(rows, km)
-        st.session_state["output_filename"] = f"Informe_IA_{bn.replace(' ', '_')}_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
-        st.session_state["processing_complete"] = True
-        st.session_state.update({
-            "brand_name": bn, "brand_aliases": ba,
-            "total_rows": len(rows), "unique_rows": len(ta), "duplicates": len(rows) - len(ta),
-            "process_duration": f"{time.time() - t0:.0f}s",
-            "process_cost": f"${ci + co + ce:.4f} USD",
-            "cache_stats": get_embedding_cache().stats()
-        })
-        s.update(label=f"✓ Completado · {get_embedding_cache().stats()}", state="complete")
-
-async def run_quick_async(df, tc, sc, bn, al):
-    st.session_state.update({'tokens_input': 0, 'tokens_output': 0, 'tokens_embedding': 0})
-    get_embedding_cache().reset_stats()  # mantiene embeddings cacheados entre corridas
-    df['_txt'] = df.apply(lambda r: _construir_texto_basico(r, tc, sc, bn, al), axis=1)
-    with st.status("Embeddings...", expanded=True) as s:
-        _ = get_embeddings_batch(df['_txt'].tolist())
-        s.update(label=f"✓ {get_embedding_cache().stats()}", state="complete")
-    with st.status("Tono", expanded=True) as s:
-        pb = st.progress(0)
-        res = await ClasificadorTono(bn, al).procesar_lote_async(df["_txt"], pb, df[sc].fillna(''), df[tc].fillna(''))
-        df['Tono IA'] = [r["tono"] for r in res]
-        audits = [_brand_audit(r.get(tc, ''), r.get(sc, ''), bn, al, r.get('Cuerpo Completo')) for _, r in df.iterrows()]
-        df['Contexto analizado'] = [_contexto_para_excel(a[0]) for a in audits]
-        df['Coincidencia marca'], df['Origen coincidencia'] = [a[1] for a in audits], [a[2] for a in audits]
-        s.update(label="✓ Tono", state="complete")
-    with st.status("Clasificación", expanded=True) as s:
-        pb = st.progress(0)
-        subtemas = ClasificadorSubtema(bn, al).procesar_lote(df["_txt"], pb, df[sc].fillna(''), df[tc].fillna(''))
-        df['Subtema'] = subtemas
-        temas = consolidar_temas(subtemas, df["_txt"].tolist(), pb, bn)
-        df['Tema'] = _unificar_tema_por_subtema(temas, subtemas)
-        df = aplicar_consistencia_grupos(df, tc, sc, marca=bn, aliases=al)
-        s.update(label="✓ Clasificación", state="complete")
-    df.drop(columns=['_txt'], inplace=True)
-    ci = (st.session_state['tokens_input']     / 1e6) * PRICE_INPUT_1M
-    co = (st.session_state['tokens_output']    / 1e6) * PRICE_OUTPUT_1M
-    ce = (st.session_state['tokens_embedding'] / 1e6) * PRICE_EMBEDDING_1M
-    st.session_state['quick_cost'] = f"${ci + co + ce:.4f} USD"
-    return df
-
-def gen_quick_excel(df, original_bytes=None):
-    if original_bytes:
-        wb = load_workbook(io.BytesIO(original_bytes))
-        ws = wb.active
-        start = ws.max_column + 1
-        for offset, col in enumerate([c for c in df.columns if c not in list(ws.values)[0]], start):
-            ws.cell(1, offset, col)
-            for i, value in enumerate(df[col].tolist(), 2): ws.cell(i, offset, value)
-        out = io.BytesIO(); wb.save(out); return out.getvalue()
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine='openpyxl') as w:
-        df.to_excel(w, index=False, sheet_name='Analisis')
-    return buf.getvalue()
-
-def render_quick_tab():
-    st.markdown('<div class="sec-label">Análisis rápido</div>', unsafe_allow_html=True)
-    if 'quick_result' in st.session_state:
-        st.markdown(
-            '<div class="success-banner"><div class="success-icon">✓</div>'
-            '<div><div class="success-title">Completado</div>'
-            '<div class="success-sub">Listo para descargar</div></div></div>',
-            unsafe_allow_html=True
-        )
-        st.metric("Costo", st.session_state.get('quick_cost', "$0.00"))
-        st.dataframe(st.session_state.quick_result.head(10), use_container_width=True)
-        st.download_button(
-            "Descargar",
-            data=gen_quick_excel(st.session_state.quick_result, st.session_state.get('quick_bytes')),
-            file_name="Analisis_Rapido_IA.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-            type="primary"
-        )
-        if st.button("Nuevo análisis"):
-            for k in ('quick_result', 'quick_df', 'quick_name', 'quick_cost'):
-                if k in st.session_state:
-                    del st.session_state[k]
-            st.rerun()
-        return
-    if 'quick_df' not in st.session_state:
-        st.markdown("Sube un Excel con columnas de título y resumen.")
-        f = st.file_uploader("Excel", type=["xlsx"], label_visibility="collapsed", key="qu")
-        if f:
-            try:
-                st.session_state.quick_bytes = f.getvalue()
-                st.session_state.quick_df   = pd.read_excel(io.BytesIO(st.session_state.quick_bytes))
-                st.session_state.quick_name = f.name
-                st.rerun()
-            except Exception as e:
-                st.error(f"Error: {e}")
-    else:
-        st.success(f"**{st.session_state.quick_name}** cargado")
-        with st.form("qf"):
-            cols = st.session_state.quick_df.columns.tolist()
-            c1, c2 = st.columns(2)
-            tc = c1.selectbox("Col. título", cols, _default_text_column_index(cols, ['Título', 'Titulo', 'Titular', 'Headline'], 0))
-            sc = c2.selectbox("Col. resumen", cols, _default_text_column_index(cols, ['CuerpoEs', 'Resumen - Aclaración', 'Resumen - Aclaracion', 'Resumen', 'Cuerpo', 'Descripción', 'Descripcion'], 1))
-            bn  = st.text_input("Marca",       placeholder="Ej: Bancolombia")
-            bat = st.text_input("Alias (;)",   placeholder="Ej: Grupo Bancolombia;Ban")
-            if st.form_submit_button("Analizar", use_container_width=True, type="primary"):
-                if not bn:
-                    st.error("Indica la marca.")
-                else:
-                    try:
-                        openai.api_key = st.secrets["OPENAI_API_KEY"]
-                        openai.aiosession.set(None)
-                    except:
-                        st.error("OPENAI_API_KEY no encontrada.")
-                        st.stop()
-                    al = [a.strip() for a in bat.split(";") if a.strip()]
-                    with st.spinner("Procesando..."):
-                        st.session_state.quick_result = asyncio.run(
-                            run_quick_async(st.session_state.quick_df.copy(), tc, sc, bn, al)
-                        )
-                    st.rerun()
-        if st.button("Otro archivo"):
-            for k in ('quick_df', 'quick_name', 'quick_result', 'quick_cost'):
-                if k in st.session_state:
-                    del st.session_state[k]
-            st.rerun()
-
-
-# ======================================
-# EXCEL PERSONALIZADO (Mantiene formato original + 3 columnas al final)
-# ======================================
-async def run_custom_excel_async(file_bytes, tc, sc, bn, al, mode="API de OpenAI", tpkl=None, epkl=None):
-    st.session_state.update({'tokens_input': 0, 'tokens_output': 0, 'tokens_embedding': 0})
-    get_embedding_cache().reset_stats()  # mantiene los embeddings cacheados entre corridas (no los limpia)
-    t0 = time.time()
-
-    # Cargar archivo usando openpyxl para conservar estilos y formato original
-    buf_in = io.BytesIO(file_bytes)
-    wb = load_workbook(buf_in)
-    ws = wb.active
-
-    # Cargar DataFrame solo para extraer textos e índices
-    buf_in.seek(0)
-    df = pd.read_excel(buf_in)
-
-    df['_txt'] = df.apply(
-        lambda r: _construir_texto_basico(r, tc, sc, bn, al),
-        axis=1
-    )
-
-    with st.status("Paso 1 · Generando Embeddings...", expanded=True) as s:
-        _ = get_embeddings_batch(df['_txt'].tolist())
-        s.update(label=f"✓ Embeddings listos · {get_embedding_cache().stats()}", state="complete")
-
-    # --- PASO 2: TONO ---
-    with st.status("Paso 2 · Evaluando Tono (Reputación)...", expanded=True) as s:
-        pb = st.progress(0)
-        if tpkl:
-            # PKL de tono: predecir sobre la mención a Marca principal / Alias, no el artículo entero.
-            res = analizar_tono_con_pkl(
-                df["_txt"].tolist(), tpkl,
-                titulos=df[tc].fillna(""), resumenes=df[sc].fillna(""),
-                marca=bn, aliases=al,
-                cuerpos=df['Cuerpo Completo'] if 'Cuerpo Completo' in df.columns else None,
-            )
-            if res is None: st.stop()
-            tonos = [r["tono"] for r in res]
-        elif "API" in mode or "Híbrido" in mode:
-            res = await ClasificadorTono(bn, al).procesar_lote_async(
-                df["_txt"], pb, df[sc].fillna(''), df[tc].fillna(''),
-                df['Cuerpo Completo'] if 'Cuerpo Completo' in df.columns else None,
-            )
-            tonos = [r["tono"] for r in res]
-        else:
-            tonos = ["N/A"] * len(df)
-        df['Tono IA'] = tonos
-        audits = [_brand_audit(r.get(tc, ''), r.get(sc, ''), bn, al, r.get('Cuerpo Completo')) for _, r in df.iterrows()]
-        df['Contexto analizado'] = [_contexto_para_excel(a[0]) for a in audits]
-        df['Coincidencia marca'], df['Origen coincidencia'] = [a[1] for a in audits], [a[2] for a in audits]
-        s.update(label="✓ Tono IA evaluado", state="complete")
-
-    # --- PASO 3: SUBTEMAS Y TEMAS ---
-    with st.status("Paso 3 · Clasificando Subtemas y Temas...", expanded=True) as s:
-        pb = st.progress(0)
-        
-        # Subtemas y temas: específicos con o sin PKL (nunca N/A genérico).
-        cuerpos = df['Cuerpo Completo'] if 'Cuerpo Completo' in df.columns else None
-        vocab_tema = None
-        if "Solo Modelos PKL" in mode:
-            temas, subtemas = etiquetar_sin_llm(
-                df[tc].fillna('').tolist(), df[sc].fillna('').tolist(), bn, al, cuerpos
-            )
-        else:
-            subtemas = ClasificadorSubtema(bn, al).procesar_lote(
-                df["_txt"], pb, df[sc].fillna(''), df[tc].fillna('')
-            )
-            temas = consolidar_temas(subtemas, df["_txt"].tolist(), pb, bn)
-
-        if epkl:
-            pack = analizar_temas_con_pkl(df["_txt"].tolist(), epkl)
-            if pack:
-                temas, vocab_tema = pack
-
-        df['Subtema'] = subtemas
-        df['Tema']    = _unificar_tema_por_subtema(temas, subtemas)
-        if vocab_tema:
-            df['Tema'] = _forzar_vocabulario_pkl(df['Tema'].tolist(), vocab_tema, df["_txt"].tolist())
-        df = aplicar_consistencia_grupos(
-            df, tc, sc, marca=bn, aliases=al,
-            vocabulario_tema=vocab_tema,
-        )
-        s.update(label="✓ Clasificación completada", state="complete")
-
-    # Escribir las 3 columnas adicionales al final en la hoja openpyxl respetando el formato original
-    max_col = ws.max_column
-    col_tono    = max_col + 1
-    col_tema    = max_col + 2
-    col_subtema = max_col + 3
-    col_contexto = max_col + 4
-    col_coincidencia = max_col + 5
-    col_origen = max_col + 6
-
-    # Encabezados en negrita
-    font_bold = Font(bold=True)
-    ws.cell(row=1, column=col_tono, value="Tono IA").font = font_bold
-    ws.cell(row=1, column=col_tema, value="Tema").font = font_bold
-    ws.cell(row=1, column=col_subtema, value="Subtema").font = font_bold
-    ws.cell(row=1, column=col_contexto, value="Contexto analizado").font = font_bold
-    ws.cell(row=1, column=col_coincidencia, value="Coincidencia marca").font = font_bold
-    ws.cell(row=1, column=col_origen, value="Origen coincidencia").font = font_bold
-
-    # Asignar valores por fila manteniendo la coincidencia exacta
-    for idx, row_data in df.iterrows():
-        r = idx + 2
-        ws.cell(row=r, column=col_tono, value=str(row_data['Tono IA']))
-        ws.cell(row=r, column=col_tema, value=str(row_data['Tema']))
-        ws.cell(row=r, column=col_subtema, value=str(row_data['Subtema']))
-        ws.cell(row=r, column=col_contexto, value=str(row_data['Contexto analizado']))
-        ws.cell(row=r, column=col_coincidencia, value=str(row_data['Coincidencia marca']))
-        ws.cell(row=r, column=col_origen, value=str(row_data['Origen coincidencia']))
-
-    buf_out = io.BytesIO()
-    wb.save(buf_out)
-
-    ci = (st.session_state['tokens_input']     / 1e6) * PRICE_INPUT_1M
-    co = (st.session_state['tokens_output']    / 1e6) * PRICE_OUTPUT_1M
-    ce = (st.session_state['tokens_embedding'] / 1e6) * PRICE_EMBEDDING_1M
-
-    cost_str = f"${ci + co + ce:.4f} USD"
-    time_str = f"{time.time() - t0:.0f}s"
-
-    return buf_out.getvalue(), df, cost_str, time_str
-
-
-def render_custom_excel_tab():
-    st.markdown('<div class="sec-label">Análisis de Excel Personalizado</div>', unsafe_allow_html=True)
-    st.caption("Sube cualquier archivo Excel (.xlsx). Al finalizar se descargarán los mismos datos y formato original con 3 nuevas columnas añadidas al final: **Tono IA**, **Tema** y **Subtema**.")
-
-    if 'custom_result_bytes' in st.session_state:
-        st.markdown(
-            '<div class="success-banner"><div class="success-icon">✓</div>'
-            '<div><div class="success-title">Análisis de Excel Finalizado</div>'
-            '<div class="success-sub">Se han añadido las 3 columnas al final del Excel original manteniendo su formato.</div></div></div>',
-            unsafe_allow_html=True
-        )
-        c1, c2 = st.columns(2)
-        c1.metric("Costo estimado", st.session_state.get('custom_cost', "$0.00"))
-        c2.metric("Tiempo de ejecución", st.session_state.get('custom_time', "0s"))
-
-        if 'custom_df_preview' in st.session_state:
-            st.markdown("##### Vista previa del archivo (primeras filas con columnas añadidas):")
-            st.dataframe(st.session_state.custom_df_preview.head(10), use_container_width=True)
-
-        st.download_button(
-            "⬇ Descargar Excel Actualizado",
-            data=st.session_state.custom_result_bytes,
-            file_name=f"Analisis_{st.session_state.get('custom_filename', 'Personalizado.xlsx')}",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-            type="primary"
-        )
-
-        if st.button("Nuevo análisis personalizado"):
-            for k in ('custom_result_bytes', 'custom_df', 'custom_filename', 'custom_cost', 'custom_time', 'custom_df_preview'):
-                if k in st.session_state:
-                    del st.session_state[k]
-            st.rerun()
-        return
-
-    if 'custom_df' not in st.session_state:
-        f = st.file_uploader("Sube cualquier archivo Excel (.xlsx)", type=["xlsx"], key="custom_uploader")
-        if f:
-            try:
-                bytes_data = f.getvalue()
-                df_temp = pd.read_excel(io.BytesIO(bytes_data))
-                st.session_state.custom_df       = df_temp
-                st.session_state.custom_bytes    = bytes_data
-                st.session_state.custom_filename = f.name
-                st.rerun()
-            except Exception as e:
-                st.error(f"Error al leer el archivo Excel: {e}")
-    else:
-        st.success(f"📁 Archivo cargado: **{st.session_state.custom_filename}** ({len(st.session_state.custom_df)} filas)")
-
-        cols = st.session_state.custom_df.columns.tolist()
-
-        with st.form("custom_form"):
-            st.markdown('<div class="sec-label">Selección de Columnas</div>', unsafe_allow_html=True)
-            c_col1, c_col2 = st.columns(2)
-            tc = c_col1.selectbox("Columna que contiene el TÍTULO", cols, index=_default_text_column_index(cols, ['Título', 'Titulo', 'Titular', 'Headline'], 0))
-            sc = c_col2.selectbox("Columna que contiene el RESUMEN / CUERPO", cols, index=_default_text_column_index(cols, ['CuerpoEs', 'Resumen - Aclaración', 'Resumen - Aclaracion', 'Resumen', 'Cuerpo', 'Descripción', 'Descripcion'], 1))
-
-            st.markdown('<div class="sec-label">Configuración del Análisis</div>', unsafe_allow_html=True)
-            cl, cr = st.columns([3, 2])
-            with cl:
-                bn  = st.text_input("Marca principal", placeholder="Ej: Bancolombia", key="custom_bn")
-                bat = st.text_input("Alias (separados por ;)", placeholder="Ej: Grupo Bancolombia;Ban", key="custom_ba")
-            with cr:
-                mode = st.radio(
-                    "Modo de análisis",
-                    ["API de OpenAI", "Híbrido (PKL + API)", "Solo Modelos PKL"],
-                    index=0, key="custom_mode"
-                )
-
-            tpkl, epkl = None, None
-            st.markdown('<div class="sec-label">Modelos PKL (Opcionales)</div>', unsafe_allow_html=True)
-            p1, p2 = st.columns(2)
-            tpkl = p1.file_uploader("Modelo Sentimiento / Tono (.pkl)", type=["pkl"], key="custom_tpkl")
-            epkl = p2.file_uploader("Modelo Temas (.pkl)", type=["pkl"], key="custom_epkl")
-
-            if st.form_submit_button("▶ Iniciar análisis personalizado", use_container_width=True, type="primary"):
-                if not bn.strip():
-                    st.error("Ingresa el nombre de la marca principal.")
-                elif "Solo Modelos PKL" in mode and not (tpkl or epkl):
-                    st.error("Seleccionaste 'Solo Modelos PKL', por favor adjunta al menos un archivo .pkl para continuar.")
-                else:
-                    if "API" in mode or "Híbrido" in mode:
-                        try:
-                            openai.api_key = st.secrets["OPENAI_API_KEY"]
-                            openai.aiosession.set(None)
-                        except:
-                            st.error("OPENAI_API_KEY no encontrada en st.secrets.")
-                            st.stop()
-
-                    al = [a.strip() for a in bat.split(";") if a.strip()]
-
-                    with st.spinner("Procesando Excel personalizado..."):
-                        res_bytes, res_df, cost_str, time_str = asyncio.run(
-                            run_custom_excel_async(
-                                st.session_state.custom_bytes,
-                                tc, sc, bn, al,
-                                mode=mode, tpkl=tpkl, epkl=epkl
-                            )
-                        )
-
-                        st.session_state.custom_result_bytes = res_bytes
-                        st.session_state.custom_df_preview   = res_df
-                        st.session_state.custom_cost         = cost_str
-                        st.session_state.custom_time         = time_str
-                        st.rerun()
-
-        if st.button("Subir otro archivo Excel"):
-            for k in ('custom_df', 'custom_bytes', 'custom_filename', 'custom_result_bytes', 'custom_cost', 'custom_time', 'custom_df_preview'):
-                if k in st.session_state:
-                    del st.session_state[k]
-            st.rerun()
-
-
-# ======================================
-# Main
-# ======================================
-async def run_sentiment_only_async(df, title_col, summary_col, brand, aliases, pkl_file=None):
-    details = [extraer_contexto_marca_detallado(r.get(title_col, ''), r.get(summary_col, ''), brand, aliases, r.get('Cuerpo Completo')) for _, r in df.iterrows()]
-    df = df.copy()
-    idx = [i for i, d in enumerate(details) if d['contexto']]
-    results = [{'tono':'Neutro','confianza':'Alta','justificacion':'La marca no aparece en el título ni en el resumen.'} for _ in details]
-    if idx:
-        pb = st.progress(0)
-        if pkl_file:
-            raw = analizar_tono_con_pkl([details[i]['contexto'] for i in idx], pkl_file)
-        else:
-            raw = await ClasificadorTono(brand, aliases).procesar_lote_async(pd.Series([details[i]['contexto'] for i in idx]), pb, pd.Series([df.iloc[i][summary_col] for i in idx]), pd.Series([df.iloc[i][title_col] for i in idx]))
-        for i, r in zip(idx, raw or []): results[i].update(r)
-    df['Tono IA'] = [r.get('tono','Neutro') for r in results]
-    df['Confianza Tono'] = [r.get('confianza','Media') for r in results]
-    df['Marca encontrada'] = [d['marca_encontrada'] for d in details]
-    df['Contexto analizado'] = [_contexto_para_excel(d['contexto']) for d in details]
-    df['Coincidencia marca'] = [d['coincidencia'] for d in details]
-    df['Origen coincidencia'] = [d['origen'] for d in details]
-    return df
-
-def render_sentiment_tab():
-    st.markdown('<div class="sec-label">Sentimiento por Marca</div>', unsafe_allow_html=True)
-    st.caption('Analiza exclusivamente el impacto reputacional de la marca encontrada en título y resumen.')
-    f = st.file_uploader('Sube un Excel (.xlsx)', type=['xlsx'], key='sentiment_uploader')
-    if not f: return
+def _leer_openai_key():
+    """Solo secrets / env. No exige recuadro de pegado."""
     try:
-        df = pd.read_excel(io.BytesIO(f.getvalue())); cols = df.columns.tolist()
-        with st.form('sentiment_form'):
-            tc = st.selectbox('Columna de título', cols, _default_text_column_index(cols, ['Título', 'Titulo', 'Titular', 'Headline'], 0))
-            sc = st.selectbox('Columna de resumen / aclaración', cols, _default_text_column_index(cols, ['CuerpoEs', 'Resumen - Aclaración', 'Resumen - Aclaracion', 'Resumen', 'Cuerpo', 'Descripción', 'Descripcion'], 1))
-            brand = st.text_input('Marca principal'); alias_text = st.text_input('Alias separados por ;')
-            pkl = st.file_uploader('Modelo PKL opcional', type=['pkl'], key='sentiment_pkl')
-            submit = st.form_submit_button('Analizar sentimiento', type='primary', use_container_width=True)
-        if submit:
-            if not brand.strip(): st.error('Ingresa la marca principal.')
-            else:
-                if not pkl: openai.api_key = st.secrets['OPENAI_API_KEY']
-                aliases = [a.strip() for a in alias_text.split(';') if a.strip()]
-                with st.spinner('Analizando menciones de la marca...'):
-                    result = asyncio.run(run_sentiment_only_async(df, tc, sc, brand.strip(), aliases, pkl))
-                st.dataframe(result.head(20), use_container_width=True)
-                out = io.BytesIO()
-                with pd.ExcelWriter(out, engine='openpyxl') as w: result.to_excel(w, index=False, sheet_name='Sentimiento')
-                output_name = f"sentimiento_{_safe_filename_part(brand)}.xlsx"
-                st.download_button('Descargar Excel de Sentimiento', out.getvalue(), output_name, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', use_container_width=True, type='primary')
-    except Exception as e: st.error(f'Error durante el análisis: {e}')
+        from google.colab import userdata  # type: ignore
+        k = (userdata.get("OPENAI_API_KEY") or "").strip()
+        if k:
+            os.environ["OPENAI_API_KEY"] = k
+            return k
+    except Exception:
+        pass
+    return (os.environ.get("OPENAI_API_KEY") or "").strip()
 
-def main():
-    load_custom_css()
-    if not check_password(): return
 
-    st.markdown("""
-    <div class="app-header">
-        <div class="app-header-icon">◈</div>
-        <div class="app-header-text">
-            <div class="app-header-title">Análisis de Noticias - API</div>
-            <div class="app-header-version">v19.0 · 😼 Realizado por Johnathan Cortés 🕵️‍♂️ </div>
-        </div>
-        <div class="app-header-badge">IA</div>
-    </div>""", unsafe_allow_html=True)
+def _bytes_de_archivo(file_obj):
+    if file_obj is None:
+        return None
+    if isinstance(file_obj, (bytes, bytearray)):
+        return bytes(file_obj)
+    if hasattr(file_obj, "read"):
+        data = file_obj.read()
+        try:
+            file_obj.seek(0)
+        except Exception:
+            pass
+        return data
+    if isinstance(file_obj, dict):
+        path = file_obj.get("path") or file_obj.get("name")
+        return Path(path).read_bytes() if path else None
+    path = getattr(file_obj, "name", None) or str(file_obj)
+    return Path(path).read_bytes()
 
-    _msg_modelo = advertencia_modelo_clasificacion()
-    if _msg_modelo:
-        st.warning(_msg_modelo)
-    else:
-        st.caption(
-            f"Modelo de clasificación (hardcoded): `{MODELO_CLASIF_DEFAULT}`. "
-            "OPENAI_CLASIF_MODEL se ignora. Embeddings: text-embedding-3-small."
+
+def _leer_xlsx(file_obj):
+    data = _bytes_de_archivo(file_obj)
+    if not data:
+        raise gr.Error("Suba un Excel .xlsx")
+    return pd.read_excel(io.BytesIO(data))
+
+
+def _col(df, candidatos, fallback=0):
+    return df.columns[_default_text_column_index(list(df.columns), candidatos, fallback)]
+
+
+class _PBar:
+    def progress(self, frac, text=""):
+        print(f"{int((frac or 0) * 100)}% {text}".strip(), flush=True)
+
+
+def correr_clasificacion(xlsx, marca, aliases_txt, pkl_tema, pkl_tono, api_key_opcional, usar_llm):
+    key = (api_key_opcional or "").strip() or _leer_openai_key()
+    if usar_llm and not key:
+        raise gr.Error(
+            "Falta OPENAI_API_KEY. En Colab: Secrets → OPENAI_API_KEY "
+            "(no hace falta pegarla). Fallback: variable de entorno."
         )
+    if key:
+        openai.api_key = key
+        os.environ["OPENAI_API_KEY"] = key
 
-    tab1, tab2, tab3, tab4 = st.tabs(["Análisis Completo", "Análisis Rápido", "Excel Personalizado", "Sentimiento"])
+    st.session_state["tokens_input"] = 0
+    st.session_state["tokens_output"] = 0
+    st.session_state["tokens_embedding"] = 0
+    refrescar_modelo_clasificacion()
 
-    with tab1:
-        if not st.session_state.get("processing_complete", False):
-            col_cfg1, col_cfg2 = st.columns([4, 1])
-            with col_cfg1:
-                st.markdown(
-                    '<span class="config-badge">⚙ Configuración: Google Sheets (Regiones / Internet)</span>',
-                    unsafe_allow_html=True
-                )
-            with col_cfg2:
-                if st.button("↻ Refrescar config", use_container_width=True):
-                    refresh_config_cache()
-                    st.success("Config recargada")
+    df = _leer_xlsx(xlsx)
+    tc = _col(df, ["Título", "Titulo", "Titular", "Headline"], 0)
+    sc = _col(
+        df,
+        ["Resumen - Aclaración", "Resumen - Aclaracion", "Resumen", "CuerpoEs",
+         "Cuerpo", "Descripción", "Descripcion"],
+        1 if len(df.columns) > 1 else 0,
+    )
+    cc = None
+    for c in df.columns:
+        if _normalizar_mencion(c) in {"cuerpo completo", "cuerpo", "cuerpocompleto"}:
+            cc = c
+            break
+    marca = (marca or "").strip()
+    if not marca:
+        raise gr.Error("Indique la marca principal.")
+    aliases = [a.strip() for a in str(aliases_txt or "").split(";") if a.strip()]
+    cuerpos = df[cc].fillna("").tolist() if cc else None
 
-            st.markdown('<div class="sec-label">Configuración</div>', unsafe_allow_html=True)
-            cl, cr = st.columns([3, 2])
-            with cl:
-                bn  = st.text_input("Marca principal", placeholder="Ej: Bancolombia", key="bn")
-                bat = st.text_input("Alias (separados por ;)", placeholder="Ej: Grupo Bancolombia;Ban", key="ba")
-            with cr:
-                mode = st.radio(
-                    "Modo de análisis",
-                    ["API de OpenAI", "Híbrido (PKL + API)", "Solo Modelos PKL"],
-                    index=0, key="mode"
-                )
+    tema_buf = tono_buf = None
+    raw_tema = _bytes_de_archivo(pkl_tema)
+    if raw_tema:
+        tema_buf = io.BytesIO(raw_tema)
+    raw_tono = _bytes_de_archivo(pkl_tono)
+    if raw_tono:
+        tono_buf = io.BytesIO(raw_tono)
 
-            tpkl, epkl = None, None
-            if "PKL" in mode:
-                st.markdown('<div class="sec-label">Modelos PKL</div>', unsafe_allow_html=True)
-                p1, p2 = st.columns(2)
-                tpkl = p1.file_uploader(
-                    "Modelo de Sentimiento (.pkl)", type=["pkl"], key="tpkl",
-                    help="Pipeline sklearn para clasificar tono: -1/0/1 o Negativo/Neutro/Positivo"
-                )
-                epkl = p2.file_uploader(
-                    "Modelo de Temas (.pkl)", type=["pkl"], key="epkl",
-                    help="Pipeline sklearn para clasificar temas. El Tema asignado será siempre una clase de este pkl."
-                )
+    out = clasificar_noticias_core(
+        df[tc].fillna("").tolist(),
+        df[sc].fillna("").tolist(),
+        marca,
+        aliases,
+        cuerpos=cuerpos,
+        pkl_tono=tono_buf,
+        pkl_tema=tema_buf,
+        usar_llm=bool(usar_llm),
+        pbar=_PBar(),
+    )
+    extra = [c for c in ("Contexto analizado", "Tono IA", "Tema", "Subtema", "Grupo noticia") if c in out.columns]
+    merged = df.copy()
+    for c in extra:
+        merged[c] = out[c].tolist()
+    dest = Path("/tmp") / f"grill_clasificacion_{_safe_filename_part(marca)}.xlsx"
+    with pd.ExcelWriter(dest, engine="openpyxl") as w:
+        merged.to_excel(w, index=False, sheet_name="Clasificacion")
+    aviso = (
+        f"Modelo `{MODELO_CLASIF_DEFAULT}`. "
+        + (advertencia_modelo_clasificacion() or "")
+        + f" Filas: {len(merged)}."
+    )
+    return merged.head(12), str(dest), aviso
 
-            with st.form("main_form"):
-                st.markdown('<div class="sec-label">Archivo de entrada</div>', unsafe_allow_html=True)
-                st.markdown("""
-                <div class="upload-zone" style="grid-template-columns:1fr">
-                    <div class="upload-zone-card">
-                        <div class="upload-zone-icon uz-dossier">📋</div>
-                        <div class="upload-zone-text">
-                            <div class="upload-zone-title">Dossier</div>
-                            <div class="upload-zone-desc">Sube las noticias en el nuevo formato .xlsx a analizar</div>
-                        </div>
-                    </div>
-                </div>""", unsafe_allow_html=True)
-                f1 = st.file_uploader("Dossier", type=["xlsx"], label_visibility="collapsed", key="f1")
 
-                st.markdown(
-                    f'<div class="cluster-info">'
-                    f'<b>Parámetros base</b> · Sub={UMBRAL_SUBTEMA} · Tema={UMBRAL_TEMA} · Máx={NUM_TEMAS_MAX} '
-                    f'· FusInter={UMBRAL_FUSION_INTERGRUPO} · FusSem={UMBRAL_FUSION_SUBTEMAS} '
-                    f'· Dedup={UMBRAL_DEDUP_LABEL} · MinSub={UMBRAL_MIN_PERTENENCIA_SUBTEMA} '
-                    f'· MinTema={UMBRAL_MIN_PERTENENCIA_TEMA} · MaxGrupo={MAX_GRUPO_ETIQUETA} · '
-                    f'<b>Coherencia={UMBRAL_COHERENCIA_ETIQUETA}</b> · '
-                    f'<b>SimMin={SIM_MINIMA_AGRUPACION_SUBTEMA}</b> (adaptativos según n)'
-                    f'</div>',
-                    unsafe_allow_html=True
-                )
+CSS = """
+.gradio-container {background:#0d0d0d !important; color:#f4f4f4 !important;}
+#grill-title h1 {color:#ff6b00 !important; letter-spacing:.04em;}
+"""
 
-                if st.form_submit_button("▶ Iniciar análisis", use_container_width=True, type="primary"):
-                    if not all([f1, bn.strip()]):
-                        st.error("Completa todos los campos.")
-                    else:
-                        al = [a.strip() for a in bat.split(";") if a.strip()]
-                        cur_mode = st.session_state.get("mode", "API de OpenAI")
-                        cur_tpkl = st.session_state.get("tpkl")
-                        cur_epkl = st.session_state.get("epkl")
-                        asyncio.run(run_full_process_async(f1, bn, al, cur_tpkl, cur_epkl, cur_mode,
-                                                         xlsx_bytes=None, cliente="", voceros="",
-                                                         enable_scraping=False))
-                        st.rerun()
-        else:
-            total = st.session_state.total_rows
-            uniq  = st.session_state.unique_rows
-            dups  = st.session_state.duplicates
-            dur   = st.session_state.process_duration
-            cost  = st.session_state.get("process_cost", "$0.00")
-            st.markdown(
-                '<div class="success-banner"><div class="success-icon">✓</div>'
-                '<div><div class="success-title">Análisis completado</div>'
-                '<div class="success-sub">Informe listo para descargar</div></div></div>',
-                unsafe_allow_html=True
-            )
-
-            medios_sin_mapear = st.session_state.get("medios_sin_mapear")
-            if medios_sin_mapear:
-                st.warning(
-                    "⚠️ Los siguientes medios no tienen región asignada en el Sheets de "
-                    f"'Regiones' (quedaron como N/A): {', '.join(medios_sin_mapear)}. "
-                    "Agrégalos en el Google Sheets para que se mapeen automáticamente la próxima vez."
-                )
-
-            st.markdown(f"""
-            <div class="metrics-grid">
-              <div class="metric-card m-total"><div class="metric-val" style="color:var(--text)">{total}</div><div class="metric-lbl">Total</div></div>
-              <div class="metric-card m-unique"><div class="metric-val" style="color:var(--green)">{uniq}</div><div class="metric-lbl">Únicas</div></div>
-              <div class="metric-card m-dup"><div class="metric-val" style="color:var(--amber)">{dups}</div><div class="metric-lbl">Duplicados</div></div>
-              <div class="metric-card m-time"><div class="metric-val" style="color:var(--blue)">{dur}</div><div class="metric-lbl">Tiempo</div></div>
-              <div class="metric-card m-cost"><div class="metric-val" style="color:var(--accent)">{cost}</div><div class="metric-lbl">Costo</div></div>
-            </div>""", unsafe_allow_html=True)
-            if 'cache_stats' in st.session_state: st.caption(f"📊 {st.session_state['cache_stats']}")
-            c1, c2 = st.columns(2)
-            c1.download_button(
-                "⬇ Descargar informe",
-                data=st.session_state.output_data,
-                file_name=st.session_state.output_filename,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-                type="primary"
-            )
-            if c2.button("Nuevo análisis", use_container_width=True):
-                pwd = st.session_state.get("password_correct")
-                st.session_state.clear()
-                st.session_state.password_correct = pwd
-                st.rerun()
-
-    with tab2:
-        render_quick_tab()
-
-    with tab3:
-        render_custom_excel_tab()
-
-    with tab4:
-        render_sentiment_tab()
-
-    st.markdown(
-        '<div class="footer">v18.2 · Análisis de Noticias con IA · Johnathan Cortés ©</div>',
-        unsafe_allow_html=True
+with gr.Blocks(
+    title="Grill-API · Colab",
+    css=CSS,
+    theme=gr.themes.Base(primary_hue="orange", neutral_hue="slate").set(
+        body_background_fill="#0d0d0d",
+        body_text_color="#f4f4f4",
+        button_primary_background_fill="#ff6b00",
+        button_primary_text_color="#0d0d0d",
+    ),
+) as demo:
+    gr.Markdown(
+        "# Grill-API\nClasificación de noticias (Colombia): **contexto · tono · tema · subtema**",
+        elem_id="grill-title",
+    )
+    gr.Markdown(
+        f"Standalone (sin otros archivos). Heurística + lotes LLM. "
+        f"Modelo **{MODELO_CLASIF_DEFAULT}**. Clave: Colab Secrets `OPENAI_API_KEY`."
+    )
+    with gr.Row():
+        xlsx = gr.File(label="Dossier .xlsx", file_types=[".xlsx"])
+        pkl_tema = gr.File(label="PKL de temas (opcional)", file_types=[".pkl"])
+        pkl_tono = gr.File(label="PKL de tono (opcional)", file_types=[".pkl"])
+    with gr.Row():
+        marca = gr.Textbox(label="Marca principal", placeholder="Ej. Fenavi")
+        aliases = gr.Textbox(label="Alias (separados por ;)", placeholder="Ej. Federación Nacional de Avicultores")
+    api_key_opcional = gr.Textbox(
+        label="OPENAI_API_KEY (opcional — déjelo vacío si ya está en Secrets / env)",
+        type="password",
+        placeholder="",
+    )
+    usar_llm = gr.Checkbox(value=True, label="Usar API OpenAI (desmarque para heurística local, sin tono IA)")
+    btn = gr.Button("Clasificar", variant="primary")
+    preview = gr.Dataframe(label="Vista previa")
+    descarga = gr.File(label="Descargar xlsx")
+    status = gr.Markdown()
+    btn.click(
+        fn=correr_clasificacion,
+        inputs=[xlsx, marca, aliases, pkl_tema, pkl_tono, api_key_opcional, usar_llm],
+        outputs=[preview, descarga, status],
     )
 
 if __name__ == "__main__":
-    main()
+    try:
+        from google.colab import output as _colab_output  # type: ignore  # noqa: F401
+        in_colab = True
+    except Exception:
+        in_colab = False
+    demo.queue().launch(share=in_colab, debug=False, inline=in_colab)
