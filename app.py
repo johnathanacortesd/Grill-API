@@ -513,9 +513,36 @@ def get_embedding_cache():
 # ======================================
 CONFIG_CACHE_TTL = 300  # segundos
 
+def _url_csv_google(url: str) -> str:
+    """Acepta el enlace 'Compartir' de Google Sheets (.../edit#gid=N) y lo convierte
+    a la URL de export CSV. Si ya es un export/publish, lo deja igual."""
+    s = (url or "").strip()
+    if not s:
+        return s
+    m = re.search(r'/spreadsheets/d/([A-Za-z0-9_-]+)', s)
+    if not m:
+        return s
+    key = m.group(1)
+    if 'export?format=csv' in s or 'output=csv' in s:
+        return s
+    gm = re.search(r'gid=(\d+)', s)
+    gid = gm.group(1) if gm else '0'
+    return f'https://docs.google.com/spreadsheets/d/{key}/export?format=csv&gid={gid}'
+
 @st.cache_data(ttl=CONFIG_CACHE_TTL, show_spinner=False)
 def _fetch_map_from_csv(csv_url: str) -> dict:
-    df = pd.read_csv(csv_url, header=None, dtype=str)
+    """Descarga el CSV (con requests, para poder reportar el status HTTP real)
+    y construye el mapa {clave: valor} con las columnas 1 y 2."""
+    try:
+        r = requests.get(csv_url, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
+    except Exception as e:
+        raise RuntimeError(f"{e} - URL: {csv_url[:110]}") from e
+    if r.status_code != 200:
+        raise RuntimeError(
+            f"HTTP {r.status_code}. La hoja debe estar publicada (Archivo > Compartir > "
+            f"Publicar en la web > CSV). URL: {csv_url[:110]}"
+        )
+    df = pd.read_csv(io.StringIO(r.text), header=None, dtype=str)
     df = df.dropna(how="all")
     mapping = pd.Series(
         df.iloc[:, 1].values,
@@ -525,8 +552,8 @@ def _fetch_map_from_csv(csv_url: str) -> dict:
     return mapping
 
 def load_config_from_sheets():
-    regiones_url = st.secrets.get("REGIONES_CSV_URL")
-    internet_url = st.secrets.get("INTERNET_CSV_URL")
+    regiones_url = _url_csv_google(st.secrets.get("REGIONES_CSV_URL"))
+    internet_url = _url_csv_google(st.secrets.get("INTERNET_CSV_URL"))
 
     if not regiones_url or not internet_url:
         st.error(
@@ -537,12 +564,17 @@ def load_config_from_sheets():
 
     try:
         region_map = _fetch_map_from_csv(regiones_url)
+    except Exception as e:
+        st.error(f"❌ No se pudo leer la configuración de REGIONES (medios → Región): {e}")
+        st.stop()
+    try:
         internet_map = _fetch_map_from_csv(internet_url)
     except Exception as e:
-        st.error(f"❌ No se pudo leer la configuración desde Google Sheets: {e}")
+        st.error(f"❌ No se pudo leer la configuración de INTERNET (medios online → Medio): {e}")
         st.stop()
 
     return region_map, internet_map
+
 
 def refresh_config_cache():
     _fetch_map_from_csv.clear()
