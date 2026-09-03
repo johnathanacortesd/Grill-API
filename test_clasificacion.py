@@ -722,7 +722,10 @@ class TestCotaLLMYVelocidad(unittest.TestCase):
             def progress(self, frac, text=""):
                 progress.append(str(text))
 
-        env = {"OPENAI_CLASIF_MODEL": "gpt-5-nano-2025-08-07"}
+        env = {
+            "OPENAI_CLASIF_MODEL": "gpt-5-nano-2025-08-07",
+            "GRILL_PULIR_SUBTEMAS": "1",
+        }
         with patch.dict(__import__("os").environ, env, clear=False), \
              patch.object(app, "get_embeddings_batch", return_value=[None] * n), \
              patch.object(app, "_candidato_subtema_ok", return_value=False), \
@@ -841,6 +844,83 @@ class TestContextoTonoFuente(unittest.TestCase):
         self.assertIn("clasificar_noticias_core", src)
         self.assertIn("gpt-4.1-nano-2025-04-14", src)
         compile(src, "Grill_API_Colab.txt", "exec")
+
+    def test_colab_tema_claro_y_upload_obvio(self):
+        from pathlib import Path
+        src = Path(__file__).resolve().parent.joinpath("Grill_API_Colab.txt").read_text(encoding="utf-8")
+        self.assertIn("1. Sube el Excel (.xlsx) aquí", src)
+        self.assertNotIn("#0d0d0d", src)
+        self.assertNotIn("body_background_fill=\"#0d0d0d\"", src)
+        self.assertTrue(
+            "Soft" in src or "light" in src.lower() or "#f5f5f5" in src or "#ffffff" in src,
+            "Colab debe usar tema claro",
+        )
+
+
+class TestVelocidadCorpusGrande(unittest.TestCase):
+    """400 filas no pueden hacer n×n SequenceMatcher ni ChatCompletion de subtema/tema."""
+
+    def test_grafo_equivalencia_bloqueado_menos_5000_pares(self):
+        n = 400
+        titulos = [f"Zeta{i} anuncia hecho puntual {i} en Cali" for i in range(n)]
+        resumenes = [f"Resumen corto del hecho {i} en la jornada regional." for i in range(n)]
+        app.construir_grafo_equivalencia(titulos, resumenes, marca="ZetaCorp")
+        self.assertLess(app._PARES_GRAFO_REVISADOS, 5000, app._PARES_GRAFO_REVISADOS)
+        self.assertLess(app._PARES_GRAFO_REVISADOS, n * 20)
+
+    def test_consistencia_400_titulos_menos_2s(self):
+        import time as _time
+        pd = __import__("pandas")
+        n = 400
+        titulos = [f"Zeta{i} anuncia hecho puntual {i} en Cali" for i in range(n)]
+        resumenes = [f"Resumen corto del hecho {i} en la jornada regional." for i in range(n)]
+        df = pd.DataFrame({
+            "Título": titulos,
+            "Resumen - Aclaracion": resumenes,
+            "Tono IA": ["Neutro"] * n,
+            "Tema": ["Hecho puntual"] * n,
+            "Subtema": [f"Hecho puntual {i}" for i in range(n)],
+        })
+        t0 = _time.perf_counter()
+        with patch.object(app, "get_embeddings_batch", return_value=[None] * n):
+            out = app.aplicar_consistencia_grupos(
+                df, "Título", "Resumen - Aclaracion", marca="ZetaCorp",
+            )
+        elapsed = _time.perf_counter() - t0
+        self.assertEqual(len(out), n)
+        self.assertLess(elapsed, 2.0, elapsed)
+        self.assertLess(app._PARES_GRAFO_REVISADOS, 5000, app._PARES_GRAFO_REVISADOS)
+        self.assertTrue(all(str(g).startswith("G") for g in out["Grupo noticia"]))
+
+    def test_clasificar_core_default_cero_chatcompletions(self):
+        n = 80
+        titulos = [
+            f"Zeta{i} inaugura laboratorio de biotecnología marina en Cartagena"
+            for i in range(n)
+        ]
+        resumenes = [
+            f"La empresa Zeta{i} abre un laboratorio de biotecnología marina en Cartagena."
+            for i in range(n)
+        ]
+        calls = {"n": 0}
+
+        def boom(*_a, **_k):
+            calls["n"] += 1
+            raise AssertionError("ChatCompletion no debe llamarse con flags por defecto")
+
+        with patch.object(app, "get_embeddings_batch", return_value=[None] * n), \
+             patch.object(app.openai.ChatCompletion, "create", side_effect=boom), \
+             patch.dict(__import__("os").environ, {
+                 "GRILL_PULIR_SUBTEMAS": "0",
+                 "GRILL_PULIR_TEMAS": "0",
+                 "GRILL_PULIR_TONO": "0",
+             }, clear=False):
+            df = app.clasificar_noticias_core(titulos, resumenes, "ZetaCorp", usar_llm=True)
+        self.assertEqual(calls["n"], 0)
+        self.assertEqual(len(df), n)
+        self.assertIn("Grupo noticia", df.columns)
+        self.assertIn("Subtema", df.columns)
+        self.assertTrue(all(not app._es_etiqueta_generica(s) for s in df["Subtema"].tolist()[:5]))
 
 
 if __name__ == "__main__":
