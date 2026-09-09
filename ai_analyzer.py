@@ -342,28 +342,76 @@ def _fallback_from_title(title: str) -> str:
         clean_words.pop()
     return " ".join(clean_words).capitalize() if clean_words else "Hecho Informativo"
 
+def _distinctive_subset(words: Set[str], doc_freq: Counter, total_docs: int) -> Set[str]:
+    """Filtra palabras que se repiten en gran parte del lote (nombre de marca,
+    ciudad sede, evento recurrente) para que NO cuenten como señal de que dos
+    noticias hablan del mismo hecho puntual. Sin esto, dos notas sobre hechos
+    distintos que solo comparten la marca/ciudad/evento terminan fusionadas
+    bajo el mismo subtema (sobre-agrupación)."""
+    if total_docs <= 0 or not words:
+        return set(words)
+    cap = max(3, round(total_docs * 0.07))
+    return {w for w in words if doc_freq.get(w, 0) <= cap}
+
+
 def cluster_similar_rows(rows: List[dict], km: dict, brand_regexes: List[str]) -> Dict[int, int]:
     n = len(rows)
     cluster_map = {}
     clusters_rep = {}
     current_cluster = 0
-    
-    active_indices = [i for i in range(n) if not rows[i].get("is_duplicate")]
-    sorted_indices = sorted(
-        active_indices,
-        key=lambda idx: normalize_text_for_matching(str(rows[idx].get(km.get("titulo", "Título"), "")))
-    )
 
-    for i in sorted_indices:
+    active_indices = [i for i in range(n) if not rows[i].get("is_duplicate")]
+
+    # --- Paso 1: pre-cómputo de features + frecuencia de palabras en el lote ---
+    # Se calcula ANTES de agrupar, porque saber qué tan común es una palabra en
+    # todo el lote (no solo en un par de titulares) es lo que permite distinguir
+    # "SIAB", "Quindío", "terremoto" (distintivas de un hecho) de "cartagena",
+    # "universidad", "women", "tech" (se repiten en decenas de notas del cliente
+    # y no dicen nada sobre si dos notas son el mismo hecho).
+    features: Dict[int, dict] = {}
+    title_doc_freq = Counter()
+    ctx_doc_freq = Counter()
+    for i in active_indices:
         t_raw = str(rows[i].get(km.get("titulo", "Título"), ""))
         r_raw = str(rows[i].get("Resumen - Aclaracion") or rows[i].get("resumen corto") or "")
-        
+        ctx_raw = str(rows[i].get("Contexto analizado") or "").strip()
+        if not ctx_raw or ctx_raw == "-":
+            ctx_raw = r_raw
+
         t_norm = normalize_text_for_matching(t_raw)
         c_words = get_content_words_set(t_norm)
         lead_words = get_lead_content_words(t_norm, n_words=3)
         anchor = extract_event_anchor(t_raw)
         r_norm = normalize_text_for_matching(r_raw[:350])
-        
+        ctx_norm = normalize_text_for_matching(ctx_raw[:600])
+        ctx_words = get_content_words_set(ctx_norm)
+
+        features[i] = {
+            "title_norm": t_norm,
+            "content_words": c_words,
+            "lead_words": lead_words,
+            "anchor": anchor,
+            "body_norm": r_norm,
+            "ctx_norm": ctx_norm,
+            "ctx_words": ctx_words,
+        }
+        for w in c_words:
+            title_doc_freq[w] += 1
+        for w in ctx_words:
+            ctx_doc_freq[w] += 1
+
+    total_docs = len(active_indices)
+    sorted_indices = sorted(active_indices, key=lambda idx: features[idx]["title_norm"])
+
+    for i in sorted_indices:
+        f = features[i]
+        t_norm, c_words, lead_words, anchor, r_norm = (
+            f["title_norm"], f["content_words"], f["lead_words"], f["anchor"], f["body_norm"]
+        )
+        ctx_norm, ctx_words = f["ctx_norm"], f["ctx_words"]
+        distinctive_c_words = _distinctive_subset(c_words, title_doc_freq, total_docs)
+        distinctive_ctx_words = _distinctive_subset(ctx_words, ctx_doc_freq, total_docs)
+
         assigned = False
         for cid, rep in clusters_rep.items():
             rep_t = rep["title_norm"]
@@ -371,7 +419,9 @@ def cluster_similar_rows(rows: List[dict], km: dict, brand_regexes: List[str]) -
             rep_lead = rep["lead_words"]
             rep_anchor = rep["anchor"]
             rep_r = rep["body_norm"]
-            
+            rep_ctx_norm = rep["ctx_norm"]
+            rep_ctx_words = rep["ctx_words"]
+
             if anchor and rep_anchor and anchor == rep_anchor:
                 cluster_map[i] = cid
                 assigned = True
@@ -403,8 +453,12 @@ def cluster_similar_rows(rows: List[dict], km: dict, brand_regexes: List[str]) -
                     cluster_map[i] = cid
                     assigned = True
                     break
-            
-            overlap = c_words & rep_words
+
+            # Solapamiento de palabras del titular, EXCLUYENDO las que se repiten
+            # demasiado en el lote (ver _distinctive_subset). Antes esto fusionaba
+            # notas distintas que solo compartían el nombre de un evento/ciudad.
+            rep_distinctive = _distinctive_subset(rep_words, title_doc_freq, total_docs)
+            overlap = distinctive_c_words & rep_distinctive
             if len(overlap) >= 4 or (len(overlap) >= 3 and any(re.search(rx, " ".join(overlap)) for rx in brand_regexes)):
                 cluster_map[i] = cid
                 assigned = True
@@ -421,42 +475,114 @@ def cluster_similar_rows(rows: List[dict], km: dict, brand_regexes: List[str]) -
                     cluster_map[i] = cid
                     assigned = True
                     break
-                    
+
+            # --- Señal nueva: mismo hecho, titulares muy distintos ---
+            # "Contexto analizado" ya viene filtrado a lo que involucra a la
+            # marca, así que si dos notas comparten allí suficiente texto (aunque
+            # el titular de cada medio sea distinto), es el mismo hecho.
+            if ctx_norm and rep_ctx_norm and len(ctx_norm) > 40 and len(rep_ctx_norm) > 40:
+                if fuzz.token_set_ratio(ctx_norm, rep_ctx_norm) >= 63:
+                    cluster_map[i] = cid
+                    assigned = True
+                    break
+
+            rep_ctx_distinctive = _distinctive_subset(rep_ctx_words, ctx_doc_freq, total_docs)
+            ctx_overlap = distinctive_ctx_words & rep_ctx_distinctive
+            if len(ctx_overlap) >= 3 and len(distinctive_ctx_words) >= 3 and len(rep_ctx_distinctive) >= 3:
+                cluster_map[i] = cid
+                assigned = True
+                break
+
         if not assigned:
             cluster_map[i] = current_cluster
-            clusters_rep[current_cluster] = {
-                "title_norm": t_norm,
-                "content_words": c_words,
-                "lead_words": lead_words,
-                "anchor": anchor,
-                "body_norm": r_norm
-            }
+            clusters_rep[current_cluster] = dict(f)
             current_cluster += 1
-            
+
     return cluster_map
 
-def canonicalize_subtopics(cluster_results: Dict[int, Tuple[str, str, str]]) -> Dict[int, Tuple[str, str, str]]:
-    subtemas_list = [sub for _, _, sub in cluster_results.values() if sub]
-    counts = Counter(subtemas_list)
-    unique_subs = list(counts.keys())
-    
-    mapping = {}
-    for i in range(len(unique_subs)):
-        s1 = unique_subs[i]
-        norm1 = normalize_text_for_matching(s1)
-        for j in range(i + 1, len(unique_subs)):
-            s2 = unique_subs[j]
-            norm2 = normalize_text_for_matching(s2)
-            if norm1 == norm2 or fuzz.token_set_ratio(norm1, norm2) >= 70 or fuzz.token_sort_ratio(norm1, norm2) >= 70:
-                chosen = s1 if counts[s1] >= counts[s2] else s2
-                mapping[s1] = chosen
-                mapping[s2] = chosen
+class _DSU:
+    """Union-Find simple para fusionar clústers de forma transitiva y
+    determinista (A~B y B~C implica A~B~C, sin importar el orden de
+    comparación — el código anterior sobrescribía el mapeo par a par y podía
+    dejar una fusión a medias según el orden de iteración)."""
+
+    def __init__(self, items):
+        self.parent = {x: x for x in items}
+
+    def find(self, x):
+        while self.parent[x] != x:
+            self.parent[x] = self.parent[self.parent[x]]
+            x = self.parent[x]
+        return x
+
+    def union(self, a, b):
+        ra, rb = self.find(a), self.find(b)
+        if ra != rb:
+            self.parent[rb] = ra
+
+
+def canonicalize_subtopics(
+    cluster_results: Dict[int, Tuple[str, str, str]],
+    cluster_contexts: Optional[Dict[int, str]] = None,
+) -> Dict[int, Tuple[str, str, str]]:
+    """Unifica subtemas equivalentes entre clústers y alinea el tema dentro de
+    cada grupo resultante.
+
+    Dos clústers se fusionan si:
+    1) el TEXTO del subtema que devolvió el LLM es muy parecido (como antes), o
+    2) el CONTEXTO de sus notas representativas ('Contexto analizado') es muy
+       parecido — esto cubre el caso real de la misma noticia republicada con
+       titulares distintos, donde cada clúster llamó al LLM por separado y el
+       LLM redactó el subtema con palabras distintas para el mismo hecho.
+    """
+    cids = list(cluster_results.keys())
+    dsu = _DSU(cids)
+    cluster_contexts = cluster_contexts or {}
+
+    norm_subs = {cid: normalize_text_for_matching(cluster_results[cid][2] or "") for cid in cids}
+    norm_ctx = {cid: normalize_text_for_matching((cluster_contexts.get(cid) or "")[:600]) for cid in cids}
+
+    for i in range(len(cids)):
+        for j in range(i + 1, len(cids)):
+            cid1, cid2 = cids[i], cids[j]
+            if dsu.find(cid1) == dsu.find(cid2):
+                continue
+            n1, n2 = norm_subs[cid1], norm_subs[cid2]
+            same_subtema_text = bool(n1) and bool(n2) and (
+                n1 == n2 or fuzz.token_set_ratio(n1, n2) >= 70 or fuzz.token_sort_ratio(n1, n2) >= 70
+            )
+            c1, c2 = norm_ctx[cid1], norm_ctx[cid2]
+            same_fact_context = (
+                len(c1) > 40 and len(c2) > 40 and fuzz.token_set_ratio(c1, c2) >= 63
+            )
+            if same_subtema_text or same_fact_context:
+                dsu.union(cid1, cid2)
+
+    groups: Dict[int, List[int]] = {}
+    for cid in cids:
+        groups.setdefault(dsu.find(cid), []).append(cid)
 
     final_results = {}
-    for cid, (tono, tema, sub) in cluster_results.items():
-        canonical_sub = mapping.get(sub, sub)
-        final_results[cid] = (tono, tema, canonical_sub)
-        
+    for _, members in groups.items():
+        sub_counts = Counter(cluster_results[m][2] for m in members if cluster_results[m][2])
+        tema_counts = Counter(cluster_results[m][1] for m in members if cluster_results[m][1])
+        if sub_counts:
+            max_count = max(sub_counts.values())
+            # Empate: se prefiere el subtema más específico (más palabras), y
+            # como último criterio el orden alfabético, para que el resultado
+            # sea determinista entre corridas.
+            best_sub = min(
+                (s for s, c in sub_counts.items() if c == max_count),
+                key=lambda s: (-len(s.split()), s),
+            )
+        else:
+            best_sub = ""
+        best_tema = tema_counts.most_common(1)[0][0] if tema_counts else ""
+
+        for m in members:
+            tono, _, _ = cluster_results[m]
+            final_results[m] = (tono, best_tema or cluster_results[m][1], best_sub or cluster_results[m][2])
+
     return final_results
 
 def _labels_too_close(a: str, b: str) -> bool:
@@ -716,7 +842,11 @@ def enrich_rows_with_ai(
                 pct = 77 + int((completed / total_clusters) * 16)
                 progress_callback(pct, f"Analizando con IA… {completed}/{total_clusters} procesados")
 
-    cluster_results = canonicalize_subtopics(cluster_results)
+    cluster_contexts = {
+        cid: rows[row_idx].get("Contexto analizado", "")
+        for cid, row_idx in cluster_to_sample_idx.items()
+    }
+    cluster_results = canonicalize_subtopics(cluster_results, cluster_contexts)
 
     for i, row in enumerate(rows):
         if row.get("is_duplicate"):
