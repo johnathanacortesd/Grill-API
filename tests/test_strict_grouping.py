@@ -1,5 +1,6 @@
 # ======================================
-# Agrupación estricta por mismo hecho + fidelidad de subtema
+# Agrupación recall-biased (mismo hecho) + un subtema por clúster
+# Bias: preferir agrupar noticias similares (FP) a perder el mismo subtema.
 # ======================================
 import json
 import os
@@ -136,6 +137,22 @@ class MustClusterRepublicationsTests(unittest.TestCase):
         _cmap, same = _clustered(rows)
         self.assertTrue(same)
 
+    def test_paraphrased_title_and_body_same_fact(self):
+        rows = [
+            _row(
+                "Inauguran campus de la Autónoma en el norte de Cali",
+                "La Universidad Autónoma de Occidente inauguró este lunes su nueva sede "
+                "en el norte de Cali para ampliar cobertura educativa. El rector destacó la inversión.",
+            ),
+            _row(
+                "Nueva sede de la UAO comienza a operar en Cali norte",
+                "Este lunes quedó inaugurada la sede norte de la Universidad Autónoma de Occidente. "
+                "Busca ampliar la cobertura educativa en Cali. El rector destacó la inversión.",
+            ),
+        ]
+        _cmap, same = _clustered(rows)
+        self.assertTrue(same)
+
 
 class CanonizationNoCrossFactTests(unittest.TestCase):
     def test_does_not_rewrite_subtema_from_similar_brand_context(self):
@@ -170,6 +187,14 @@ class CanonizationNoCrossFactTests(unittest.TestCase):
         self.assertEqual(out[0][2], out[1][2])
         self.assertEqual(out[0][2], "Apertura de sede norte")
 
+    def test_unifies_near_synonym_subtema_strings(self):
+        results = {
+            0: ("Neutro", "Infraestructura", "Apertura de sede norte"),
+            1: ("Neutro", "Infraestructura", "Apertura de campus norte"),
+        }
+        out = canonicalize_subtopics(results, {0: "x" * 80, 1: "y" * 80})
+        self.assertEqual(out[0][2], out[1][2])
+
 
 class FactContextAndFidelityTests(unittest.TestCase):
     def test_build_fact_context_is_title_plus_body(self):
@@ -196,6 +221,16 @@ class FactContextAndFidelityTests(unittest.TestCase):
                 "Apertura de sede norte",
                 "Apertura de la nueva sede norte en Cali",
                 "La universidad inauguró una sede para ampliar cobertura educativa.",
+                BRAND,
+            )
+        )
+
+    def test_soft_fidelity_keeps_synonym_llm_phrase(self):
+        self.assertTrue(
+            subtema_has_fact_fidelity(
+                "Inauguración de campus norte",
+                "UAO inaugura nueva sede en el norte de Cali",
+                "La Universidad Autónoma de Occidente inauguró este lunes su nueva sede en el norte de Cali.",
                 BRAND,
             )
         )
@@ -255,6 +290,7 @@ class FactContextAndFidelityTests(unittest.TestCase):
         self.assertIn("BLOQUE B", user.upper())
         self.assertIn("Contexto del hecho", user)
         self.assertIn(fact, user)
+        self.assertIn("republica", user.lower())
         self.assertIn("BLOQUE A", calls[0]["messages"][0]["content"].upper())
 
     def test_llm_garbage_subtema_is_repaired_from_group_title(self):
@@ -279,6 +315,28 @@ class FactContextAndFidelityTests(unittest.TestCase):
         self.assertTrue(subtema_has_fact_fidelity(subtema, title, body, BRAND))
         self.assertNotIn("tributar", subtema.lower())
         self.assertNotIn("reforma", subtema.lower())
+
+    def test_reasonable_llm_subtema_is_not_replaced_by_title(self):
+        regexes = _regexes()
+        title = "UAO inaugura nueva sede en el norte de Cali"
+        body = "La Universidad Autónoma de Occidente inauguró este lunes su nueva sede en el norte de Cali."
+        client, _calls = self._fake_client(
+            {"tono": "Positivo", "tema": "Infraestructura", "subtema": "Inauguración de campus norte"}
+        )
+        _tono, _tema, subtema = _call_openai_cluster(
+            client,
+            "gpt-test",
+            BRAND,
+            ALIASES,
+            regexes,
+            "La UAO inauguró una sede.",
+            title,
+            request_tone=True,
+            request_theme=True,
+            fact_ctx=build_fact_context(title, body),
+        )
+        self.assertEqual(subtema, "Inauguración de campus norte")
+        self.assertNotIn("uao inaugura", subtema.lower())
 
 
 class EnrichRowsUsesOwnFactContextTests(unittest.TestCase):
@@ -344,6 +402,33 @@ class EnrichRowsUsesOwnFactContextTests(unittest.TestCase):
                 out = enrich_rows_with_ai(rows, KEY_MAP, BRAND, ALIASES, "sk-test")
         self.assertEqual(mock_llm.call_count, 1)
         self.assertEqual(out[0]["Subtema_IA"], out[1]["Subtema_IA"])
+        self.assertEqual(out[0]["Subtema_IA"], "Apertura de sede norte")
+
+    def test_does_not_rewrite_cluster_subtema_from_each_row_title(self):
+        body = (
+            "La Universidad Autónoma de Occidente inauguró este lunes su nueva sede "
+            "en el norte de Cali para ampliar cobertura educativa. El rector destacó la inversión."
+        )
+        rows = [
+            _row("Inauguración de la sede norte de la UAO en Cali", body),
+            _row(
+                "La UAO abre su sede norte para ampliar cobertura en Cali",
+                body + " El rector destacó la inversión realizada.",
+            ),
+        ]
+        with patch("ai_analyzer.OpenAI"):
+            with patch("ai_analyzer._call_openai_cluster") as mock_llm:
+                mock_llm.return_value = (
+                    "Positivo",
+                    "Infraestructura",
+                    "Inauguración de campus norte",
+                )
+                out = enrich_rows_with_ai(rows, KEY_MAP, BRAND, ALIASES, "sk-test")
+        self.assertEqual(mock_llm.call_count, 1)
+        self.assertEqual(out[0]["Subtema_IA"], out[1]["Subtema_IA"])
+        self.assertEqual(out[0]["Subtema_IA"], "Inauguración de campus norte")
+        self.assertFalse(out[0]["Subtema_IA"].lower().startswith("la uao"))
+        self.assertFalse(out[1]["Subtema_IA"].lower().startswith("la uao"))
 
 
 if __name__ == "__main__":
