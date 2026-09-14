@@ -6,7 +6,7 @@ import re
 import json
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Dict, Tuple, Optional, Callable, Set
+from typing import List, Dict, Tuple, Optional, Callable, Set, Sequence, Union
 from collections import Counter
 import pandas as pd
 from openai import OpenAI
@@ -34,6 +34,153 @@ INSTITUTIONAL_PREFIXES = [
     "gobernacion", "ministerio", "centro", "complejo", "organizacion", "sociedad",
     "asociacion", "proyecto", "urbanizacion"
 ]
+
+SUBTEMA_MIN_WORDS = 3
+SUBTEMA_MAX_WORDS = 7
+TRAGEDY_GUARD_MAX_CHARS = 35
+TEMA_TITLE_MAX_CHARS = 160
+ALIAS_SPLIT_RE = re.compile(r"[,;\n]")
+
+# 21 cubos cerrados (SPEC_TONO_TEMA). Nunca se emite "Otros".
+DEFAULT_CUBOS = [
+    "Educación Superior",
+    "Estudiantes",
+    "Sector Salud",
+    "Gestión Institucional",
+    "Gestión Tributaria",
+    "Hitos y Aniversarios",
+    "Gestión de Emergencias",
+    "Infraestructura",
+    "Seguridad Ciudadana",
+    "Relaciones Gremiales",
+    "Investigación y Ciencia",
+    "Cultura y Deporte",
+    "Medio Ambiente",
+    "Economía y Empresa",
+    "Gobierno y Política",
+    "Responsabilidad Social",
+    "Tecnología e Innovación",
+    "Laboral y Empleo",
+    "Legal y Regulatorio",
+    "Comunidad y Territorio",
+    "Comunicaciones y Medios",
+]
+
+FORBIDDEN_TEMA_NORMS = {
+    "otros", "otro", "general", "varios", "miscelanea", "sin clasificar",
+    "sin tema", "actualidad", "cobertura", "",
+}
+
+CUBO_KEYWORDS = {
+    "Educación Superior": (
+        "universidad", "pregrado", "posgrado", "academ", "carrera", "facultad",
+        "rector", "beca", "docente", "matricul", "educacion superior",
+    ),
+    "Estudiantes": (
+        "estudiante", "egresad", "alumno", "bienestar universitario",
+    ),
+    "Sector Salud": (
+        "salud", "hospital", "clinica", "medico", "medicina", "paciente",
+        "quirurg", "enfermedad", "eps", "achc",
+    ),
+    "Gestión Tributaria": (
+        "aduan", "dian", "fiscal", "tributar", "impuesto", "arancel",
+    ),
+    "Hitos y Aniversarios": (
+        "aniversario", "celebracion", "decadas", "homenaje", "reconocimiento",
+    ),
+    "Gestión de Emergencias": (
+        "rescate", "bombero", "emergencia", "siniestro", "accidente", "desastre",
+        "sismo", "terremoto", "inundacion",
+    ),
+    "Infraestructura": (
+        "obra", "construccion", "via", "infraestructura", "puente", "sede",
+        "campus", "edificio",
+    ),
+    "Seguridad Ciudadana": (
+        "seguridad", "policia", "captura", "hurto", "delito", "fiscalia", "crimen",
+    ),
+    "Relaciones Gremiales": (
+        "convenio", "acuerdo", "alianza", "gremio", "liderazgo",
+    ),
+    "Investigación y Ciencia": (
+        "investigacion", "ciencia", "laboratorio", "cientific", "patente",
+    ),
+    "Cultura y Deporte": (
+        "cultura", "deporte", "torneo", "campeon", "festival", "concierto",
+    ),
+    "Medio Ambiente": (
+        "ambiente", "sostenib", "clima", "contamin", "recicl", "bosque",
+    ),
+    "Economía y Empresa": (
+        "economia", "empresa", "mercado", "inversion", "pib",
+    ),
+    "Gobierno y Política": (
+        "gobierno", "congreso", "alcalde", "ministro", "eleccion", "politica",
+    ),
+    "Responsabilidad Social": (
+        "responsabilidad social", "rsc", "donacion", "voluntari",
+        "comunidad vulnerable",
+    ),
+    "Tecnología e Innovación": (
+        "tecnolog", "innovacion", "digital", "software", "inteligencia artificial",
+    ),
+    "Laboral y Empleo": (
+        "laboral", "sindical", "desempleo", "nomina", "contrato de trabajo",
+    ),
+    "Legal y Regulatorio": (
+        "demanda", "fallo", "tutela", "superintendencia", "regulacion", "norma",
+    ),
+    "Comunidad y Territorio": (
+        "comunidad", "barrio", "territorio", "region", "municipio",
+    ),
+    "Comunicaciones y Medios": (
+        "entrevista", "rueda de prensa", "comunicado", "periodist", "medios",
+    ),
+    "Gestión Institucional": (
+        "institucion", "directivo", "gobernanza", "rectoria", "junta",
+    ),
+}
+
+SPOKESPERSON_ROLES = (
+    "rector", "rectora", "vicerrector", "vicerrectora", "presidente", "presidenta",
+    "director", "directora", "gerente", "vocero", "vocera", "portavoz",
+    "decano", "decana", "canciller", "secretario general", "secretaria general",
+)
+
+CONTRIBUTION_VERBS = (
+    "aporta", "aportan", "aporto", "dona", "donan", "dono",
+    "apoya", "apoyan", "apoyo", "respalda", "respaldan", "respaldo",
+    "celebra", "celebran", "celebro", "inaugura", "inauguran", "inauguro",
+    "lanza", "lanzan", "lanzo", "firma", "firman", "firmo",
+    "impulsa", "impulsan", "impulso", "entrega", "entregan", "entrego",
+    "ofrece", "ofrecen", "ofrecio", "otorga", "otorgan", "otorgo",
+    "lidera", "lideran", "lidero", "financia", "financian", "financio",
+    "abre", "abren", "abrio", "acompana", "acompanan", "acompanamos",
+    "felicita", "felicitan", "felicito", "pone en marcha", "pusieron en marcha",
+    "abren espacio", "rinde homenaje",
+)
+
+TRAGIC_MARKERS = (
+    "fallec", "muert", "deceso", "victima", "tragedia", "sismo", "terremoto",
+    "inundacion", "accidente", "obituario", "desastre", "catastrofe", "herido",
+    "fatal", "luto",
+)
+
+DIRECTED_CRITICISM_MARKERS = (
+    "denuncia", "queja", "demanda", "sancion", "investigacion por", "corrupcion",
+    "negligen", "irregularidad", "fraude", "escandalo", "plagio",
+    "cobros excesivos", "falla en el servicio", "mala practica", "senalan a",
+    "acusan a", "responsabilizan",
+)
+
+LOCATIVE_MARKERS = (
+    "en la sede", "en su sede", "cerca de la sede", "frente a la sede",
+    "en el campus", "en las instalaciones", "en la sucursal", "predios de",
+    "sede de", "sedes de", "ubicad", "en las inmediaciones",
+)
+
+ENTITY_MASK_TOKEN = "[ENTIDAD]"
 
 def clean_text_strictly_no_links(text: str) -> str:
     """Elimina URLs (http, https, www), diccionarios y la palabra 'Link'."""
@@ -92,7 +239,129 @@ def extract_event_anchor(title_raw: str) -> str:
         return normalize_text_for_matching(parts[0])
     return ""
 
+def parse_alias_list(aliases: Optional[Union[str, Sequence[str]]] = None) -> List[str]:
+    """Parte alias por coma, punto y coma o salto de línea en cualquier sitio de parseo."""
+    if aliases is None:
+        return []
+    if isinstance(aliases, str):
+        parts = ALIAS_SPLIT_RE.split(aliases)
+        return [p.strip() for p in parts if p.strip()]
+    out: List[str] = []
+    seen = set()
+    for item in aliases:
+        for part in ALIAS_SPLIT_RE.split(str(item)):
+            cleaned = part.strip()
+            if cleaned and cleaned not in seen:
+                seen.add(cleaned)
+                out.append(cleaned)
+    return out
+
+
+def _norm_label(text: str) -> str:
+    return unidecode((text or "").strip().lower())
+
+
+def split_text_units(text: str) -> List[str]:
+    """Parte un campo (título o cuerpo) en unidades oracionales. Nunca mezcla campos."""
+    if not text:
+        return []
+    chunks = [p.strip() for p in re.split(r"(?<=[.!?\n])\s+", str(text)) if p.strip()]
+    units: List[str] = []
+    for chunk in chunks:
+        pieces = [p.strip() for p in re.split(r"\s*\|\s*", chunk) if p.strip()]
+        units.extend(pieces or [chunk])
+    return units
+
+
+def mask_similar_entities(text: str, brand_regexes: List[str]) -> str:
+    """Enmascara otras entidades institucionales parecidas antes de buscar la marca."""
+    if not text:
+        return ""
+    prefix_alt = "|".join(re.escape(p) for p in INSTITUTIONAL_PREFIXES)
+    # No cruzar conjunciones (Universidad X y Universidad Y) ni absorber la marca.
+    pattern = (
+        rf"\b(?:{prefix_alt})"
+        rf"(?:\s+(?:de(?:l|\s+la)?))?"
+        rf"(?:\s+(?!y\b|e\b|o\b)[A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9][\w.\-]*){{1,4}}"
+    )
+
+    def _repl(match: re.Match) -> str:
+        span = match.group(0)
+        span_norm = unidecode(span.lower())
+        if brand_regexes and any(re.search(rx, span_norm) for rx in brand_regexes):
+            return span
+        return ENTITY_MASK_TOKEN
+
+    return re.sub(pattern, _repl, text, flags=re.IGNORECASE)
+
+
+def sentence_mentions_brand(
+    sentence: str,
+    brand_regexes: List[str],
+    brand: str = "",
+    aliases: Optional[Sequence[str]] = None,
+) -> bool:
+    if not sentence:
+        return False
+    s_norm = unidecode(sentence.lower())
+    if brand_regexes and any(re.search(rx, s_norm) for rx in brand_regexes):
+        return True
+    targets = parse_alias_list(aliases)
+    if brand:
+        targets = [brand] + targets
+    for tgt in targets:
+        tgt_norm = unidecode(tgt.lower().strip())
+        if tgt_norm and re.search(rf"\b{re.escape(tgt_norm)}\b", s_norm):
+            return True
+        if tgt_norm:
+            role_alt = "|".join(re.escape(r) for r in SPOKESPERSON_ROLES)
+            if re.search(
+                rf"\b(?:{role_alt})\b(?:\s+\w+){{0,4}}\s+(?:de\s+(?:la\s+)?)?{re.escape(tgt_norm)}\b",
+                s_norm,
+            ):
+                return True
+    return False
+
+
+def _brand_units_from_field(
+    field_text: str,
+    brand_regexes: List[str],
+    brand: str,
+    aliases: List[str],
+) -> List[str]:
+    """Oraciones de UN campo que nombran marca/alias/voceros, tras enmascarar entidades ajenas."""
+    clean = clean_text_strictly_no_links(field_text)
+    if not clean:
+        return []
+    matched: List[str] = []
+    for unit in split_text_units(clean):
+        masked = mask_similar_entities(unit, brand_regexes)
+        if sentence_mentions_brand(masked, brand_regexes, brand, aliases):
+            if unit not in matched:
+                matched.append(unit)
+    if matched:
+        return matched
+
+    # Último recurso: ventana DENTRO del mismo campo (nunca concatenar con el otro).
+    field_norm = unidecode(clean.lower())
+    for rx in brand_regexes or []:
+        for m in re.finditer(rx, field_norm):
+            start = max(0, m.start() - 120)
+            end = min(len(clean), m.end() + 150)
+            snippet = clean_text_strictly_no_links(clean[start:end])
+            masked_snip = mask_similar_entities(snippet, brand_regexes)
+            if snippet and sentence_mentions_brand(masked_snip, brand_regexes, brand, aliases):
+                if snippet not in matched:
+                    matched.append(snippet)
+            if len(matched) >= 2:
+                return matched
+        if matched:
+            return matched
+    return matched
+
+
 def generate_brand_variants(brand: str, aliases: List[str]) -> List[str]:
+    aliases = parse_alias_list(aliases)
     raw_inputs = [brand] + [a for a in aliases if a.strip()]
     variants_set = set()
 
@@ -147,67 +416,38 @@ def generate_brand_variants(brand: str, aliases: List[str]) -> List[str]:
             
     return compiled_regexes
 
-def extract_brand_context(resumen: str, titulo: str, brand_regexes: List[str]) -> str:
-    """Extrae las oraciones del Resumen y Título sin links ni etiquetas."""
+def extract_brand_context(
+    resumen: str,
+    titulo: str,
+    brand_regexes: List[str],
+    brand: str = "",
+    aliases: Optional[Sequence[str]] = None,
+) -> str:
+    """Evidencia de marca: oraciones de título y cuerpo por separado que nombran la marca.
+
+    Nunca concatena título+cuerpo antes de buscar. Sin mención → cadena vacía
+    (el tono debe ser Neutro y no se pide tono al LLM).
+    """
+    alias_list = parse_alias_list(aliases)
     t_clean = clean_text_strictly_no_links(titulo)
     r_clean = clean_text_strictly_no_links(resumen)
-    
-    r_norm = unidecode(r_clean.lower())
-    t_norm = unidecode(t_clean.lower())
-    
-    matched_sentences = []
-    
-    if r_clean:
-        sentences = [s.strip() for s in re.split(r'(?<=[.!?\n])\s+', r_clean) if s.strip()]
-        for idx, s in enumerate(sentences):
-            s_clean_sub = clean_text_strictly_no_links(s)
-            if not s_clean_sub:
-                continue
-            s_norm = unidecode(s_clean_sub.lower())
-            if any(re.search(rx, s_norm) for rx in brand_regexes):
-                block = s_clean_sub
-                if len(s_clean_sub.split()) < 10 and idx + 1 < len(sentences):
-                    next_s = clean_text_strictly_no_links(sentences[idx + 1])
-                    if next_s:
-                        block = f"{s_clean_sub} {next_s}"
-                if block not in matched_sentences:
-                    matched_sentences.append(block)
 
-        if not matched_sentences:
-            for rx in brand_regexes:
-                for m in re.finditer(rx, r_norm):
-                    start = max(0, m.start() - 120)
-                    end = min(len(r_clean), m.end() + 150)
-                    snippet = clean_text_strictly_no_links(r_clean[start:end])
-                    if snippet and snippet not in matched_sentences:
-                        matched_sentences.append(f"...{snippet}..." if start > 0 else snippet)
-                    if len(matched_sentences) >= 2:
-                        break
-                if matched_sentences:
-                    break
+    title_units = _brand_units_from_field(t_clean, brand_regexes, brand, alias_list)
+    body_units = _brand_units_from_field(r_clean, brand_regexes, brand, alias_list)
 
-    title_matches = any(re.search(rx, t_norm) for rx in brand_regexes)
+    matched: List[str] = []
+    for unit in title_units + body_units:
+        if unit not in matched:
+            matched.append(unit)
 
-    if matched_sentences:
-        resumen_context = " ".join(matched_sentences).strip()
-        if title_matches and t_clean and t_clean.lower() not in resumen_context.lower():
-            res = f"{t_clean}. {resumen_context}"
-        else:
-            res = resumen_context
-        return clean_text_strictly_no_links(res)[:800]
+    if not matched:
+        return ""
 
-    if title_matches:
-        if r_clean:
-            res = f"{t_clean}. {r_clean[:380]}"
-        else:
-            res = t_clean
-        return clean_text_strictly_no_links(res)[:800]
+    return clean_text_strictly_no_links(" ".join(matched))[:800]
 
-    if t_clean and r_clean:
-        res = f"{t_clean}. {r_clean[:400]}"
-    else:
-        res = t_clean or r_clean[:500]
-    return clean_text_strictly_no_links(res)[:800]
+
+def has_brand_evidence(ctx: str) -> bool:
+    return bool(ctx) and str(ctx).strip() not in ("", "-", "nan", "none")
 
 def check_exact_byline_rule(text: str, brand: str, aliases: List[str]) -> bool:
     """
@@ -224,8 +464,9 @@ def check_exact_byline_rule(text: str, brand: str, aliases: List[str]) -> bool:
         
     t_norm = unidecode(str(text).lower())
     
-    # Términos de búsqueda (marca y todos los alias)
-    targets = [unidecode(brand.lower().strip())] + [unidecode(a.lower().strip()) for a in aliases if a.strip()]
+    # Términos de búsqueda (marca y todos los alias, partidos por coma/;/salto)
+    alias_list = parse_alias_list(aliases)
+    targets = [unidecode(brand.lower().strip())] + [unidecode(a.lower().strip()) for a in alias_list if a.strip()]
     
     for tgt in targets:
         if not tgt:
@@ -257,8 +498,8 @@ def clean_subtema(text: str, brand: str, title_fallback: str) -> str:
     clean = re.sub(r'[,.;:!?¿¡"\'\(\)\[\]\{\}\-_/\\|]', ' ', str(text))
     words = [w for w in clean.split() if w]
     
-    if len(words) > 6:
-        words = words[:6]
+    if len(words) > SUBTEMA_MAX_WORDS:
+        words = words[:SUBTEMA_MAX_WORDS]
         
     while words and words[-1].lower() in FORBIDDEN_TRAILING_WORDS:
         words.pop()
@@ -337,10 +578,42 @@ def _fallback_from_title(title: str) -> str:
         return "Hecho Informativo"
     t = re.sub(r"^(?:imagenes|video|en fotos)\s*\|\s*", "", title, flags=re.IGNORECASE).strip()
     words = re.sub(r'[,.;:!?¿¡"\'\(\)\[\]\{\}\-_/\\|]', ' ', t).split()
-    clean_words = words[:6]
+    clean_words = words[:SUBTEMA_MAX_WORDS]
     while clean_words and clean_words[-1].lower() in FORBIDDEN_TRAILING_WORDS:
         clean_words.pop()
     return " ".join(clean_words).capitalize() if clean_words else "Hecho Informativo"
+
+
+def validate_or_repair_subtema(
+    text: str,
+    brand: str,
+    title_fallback: str,
+    ctx: str = "",
+) -> str:
+    """Validador duro de 3–7 palabras; repara con título/contexto si hace falta."""
+    cleaned = clean_subtema(text or "", brand, title_fallback)
+    n = len(cleaned.split()) if cleaned else 0
+    if SUBTEMA_MIN_WORDS <= n <= SUBTEMA_MAX_WORDS:
+        return cleaned
+    if n > SUBTEMA_MAX_WORDS:
+        words = cleaned.split()[:SUBTEMA_MAX_WORDS]
+        while words and words[-1].lower() in FORBIDDEN_TRAILING_WORDS:
+            words.pop()
+        cleaned = " ".join(words).capitalize() if words else cleaned
+        n = len(cleaned.split())
+        if SUBTEMA_MIN_WORDS <= n <= SUBTEMA_MAX_WORDS:
+            return cleaned
+    if n < SUBTEMA_MIN_WORDS:
+        for source in (title_fallback, ctx):
+            alt = clean_subtema(str(source or ""), brand, title_fallback)
+            alt_n = len(alt.split()) if alt else 0
+            if SUBTEMA_MIN_WORDS <= alt_n <= SUBTEMA_MAX_WORDS:
+                return alt
+        if cleaned:
+            pad = "hecho puntual"
+            merged = f"{cleaned} {pad}".strip()
+            return clean_subtema(merged, brand, title_fallback)
+    return cleaned or _fallback_from_title(title_fallback)
 
 def _distinctive_subset(words: Set[str], doc_freq: Counter, total_docs: int) -> Set[str]:
     """Filtra palabras que se repiten en gran parte del lote (nombre de marca,
@@ -605,14 +878,155 @@ def ensure_subtema_distinct_from_tema(
     ctx: str,
 ) -> str:
     """Si el subtema colisiona con un tema PKL, reusa el mismo limpiado específico (no recorta calidad a título)."""
-    cleaned = clean_subtema(subtema or "", brand, title)
-    if cleaned and not _labels_too_close(tema, cleaned) and len(cleaned.split()) >= 2:
+    cleaned = validate_or_repair_subtema(subtema or "", brand, title, ctx)
+    if cleaned and not _labels_too_close(tema, cleaned) and len(cleaned.split()) >= SUBTEMA_MIN_WORDS:
         return cleaned
     for candidate in (ctx, title):
-        alt = clean_subtema(str(candidate or ""), brand, title)
-        if alt and not _labels_too_close(tema, alt) and len(alt.split()) >= 2:
+        alt = validate_or_repair_subtema(str(candidate or ""), brand, title, ctx)
+        if alt and not _labels_too_close(tema, alt) and len(alt.split()) >= SUBTEMA_MIN_WORDS:
             return alt
     return cleaned or subtema or _fallback_from_title(title)
+
+
+def snap_to_cubo(label: str) -> Optional[str]:
+    """Ajusta una etiqueta libre a la lista cerrada de 21 cubos. 'Otros' no es cubo."""
+    n = _norm_label(label)
+    if n in FORBIDDEN_TEMA_NORMS:
+        return None
+    for cubo in DEFAULT_CUBOS:
+        if _norm_label(cubo) == n:
+            return cubo
+    best = None
+    best_score = 0
+    for cubo in DEFAULT_CUBOS:
+        cn = _norm_label(cubo)
+        score = fuzz.ratio(n, cn)
+        if n and cn and (n in cn or cn in n) and min(len(n), len(cn)) >= 8:
+            score = max(score, 86)
+        if score > best_score:
+            best_score = score
+            best = cubo
+    if best is not None and best_score >= 80:
+        return best
+    return None
+
+
+def lexical_assign_tema(subtema: str, title: str) -> str:
+    """Tema sin PKL: reglas léxicas sobre el subtema; el título solo si tiene ≤160 caracteres."""
+    blob = unidecode((subtema or "").lower())
+    if title and len(title) <= TEMA_TITLE_MAX_CHARS:
+        blob = f"{blob} {unidecode(title.lower())}".strip()
+    if not blob.strip():
+        return "Gestión Institucional"
+
+    scores = []
+    for cubo in DEFAULT_CUBOS:
+        hits = sum(1 for kw in CUBO_KEYWORDS.get(cubo, ()) if kw in blob)
+        if hits:
+            scores.append((hits, 0 if cubo == "Gestión Institucional" else 1, cubo))
+    if not scores:
+        return "Gestión Institucional"
+    scores.sort(key=lambda x: (-x[0], -x[1], x[2]))
+    return scores[0][2]
+
+
+def assign_closed_tema(
+    llm_tema: Optional[str],
+    subtema: str,
+    title: str,
+    ctx: str = "",
+) -> str:
+    """Nunca emite 'Otros'. Prefiere cubo del LLM si es válido; si no, léxico."""
+    snapped = snap_to_cubo(llm_tema or "")
+    if snapped:
+        return snapped
+    lexical = lexical_assign_tema(subtema, title)
+    if lexical:
+        return lexical
+    ctx_guess = lexical_assign_tema(subtema, ctx[:TEMA_TITLE_MAX_CHARS] if ctx else "")
+    return ctx_guess or "Gestión Institucional"
+
+
+def _brand_is_contribution_subject(ctx: str, brand_regexes: List[str]) -> bool:
+    if not ctx:
+        return False
+    for sent in split_text_units(ctx):
+        s_norm = unidecode(sent.lower())
+        brand_pos = None
+        for rx in brand_regexes or []:
+            m = re.search(rx, s_norm)
+            if m and (brand_pos is None or m.start() < brand_pos):
+                brand_pos = m.start()
+        if brand_pos is None:
+            continue
+        for verb in CONTRIBUTION_VERBS:
+            v = unidecode(verb.lower())
+            idx = s_norm.find(v)
+            if idx >= 0 and brand_pos < idx:
+                return True
+    return False
+
+
+def _has_directed_criticism(ctx: str) -> bool:
+    c_low = unidecode((ctx or "").lower())
+    return any(m in c_low for m in DIRECTED_CRITICISM_MARKERS)
+
+
+def _is_tragic_context(ctx: str) -> bool:
+    c_low = unidecode((ctx or "").lower())
+    return any(m in c_low for m in TRAGIC_MARKERS)
+
+
+def _is_locative_only(ctx: str) -> bool:
+    c_low = unidecode((ctx or "").lower())
+    if not any(m in c_low for m in LOCATIVE_MARKERS):
+        return False
+    if _has_directed_criticism(ctx):
+        return False
+    if any(unidecode(v.lower()) in c_low for v in CONTRIBUTION_VERBS):
+        return False
+    agency = (
+        "anuncio", "anuncia", "inaugur", "denunci", "sancion", "firmo", "firma",
+        "lanzo", "lanza", "investiga",
+    )
+    if any(a in c_low for a in agency):
+        return False
+    return True
+
+
+def apply_tone_guards(
+    tono: str,
+    brand_ctx: str,
+    brand: str = "",
+    aliases: Optional[Sequence[str]] = None,
+    brand_regexes: Optional[List[str]] = None,
+) -> str:
+    """Guardas deterministas posteriores al LLM (SPEC_TONO_TEMA §2)."""
+    if not has_brand_evidence(brand_ctx):
+        return "Neutro"
+
+    regexes = brand_regexes or generate_brand_variants(brand, parse_alias_list(aliases))
+    current = tono if tono in ("Positivo", "Negativo", "Neutro") else "Neutro"
+
+    if current == "Negativo":
+        snippet = (brand_ctx or "").strip()
+        if (
+            len(snippet) <= TRAGEDY_GUARD_MAX_CHARS
+            and _is_tragic_context(snippet)
+            and not _has_directed_criticism(snippet)
+        ):
+            current = "Neutro"
+
+    if _is_locative_only(brand_ctx) and not _has_directed_criticism(brand_ctx):
+        current = "Neutro"
+
+    if current == "Neutro" and _brand_is_contribution_subject(brand_ctx, regexes):
+        current = "Positivo"
+
+    if check_positive_institutional_override(brand_ctx):
+        current = "Positivo"
+
+    return current
 
 
 def _call_openai_cluster(
@@ -627,38 +1041,43 @@ def _call_openai_cluster(
     request_theme: bool = True,
     pkl_theme: Optional[str] = None,
 ) -> Tuple[str, str, str]:
+    aliases = parse_alias_list(aliases)
     # REGLA EXACTA DE AUTORÍA/EGRESADOS (SI ESTÁN LAS PALABRAS NO SE ANALIZA CON IA)
     search_scope = f"{title_ref} {ctx}"
     if check_exact_byline_rule(search_scope, brand, aliases):
         return "Neutro", "Estudiantes", "Redacción de artículo"
 
+    ask_tone = bool(request_tone) and has_brand_evidence(ctx)
+    cubos_list = "; ".join(DEFAULT_CUBOS)
+
     json_fields = []
-    steps = []
-    n = 1
-    if request_tone:
-        steps.append(
-            f'{n}. "tono": Impacto reputacional en el cliente ("{brand}"): "Positivo", "Negativo" o "Neutro".\n'
-            '   REGLA DE ORO: Si el cliente expresa o recibe ACOMPAÑAMIENTO, RESPALDO, APOYO, FELICITACIONES, CELEBRACIÓN o ALIANZA, el tono es estrictamente "Positivo".'
+    blocks = []
+    if ask_tone:
+        blocks.append(
+            "BLOQUE A — TONO (únicamente evidencia de marca)\n"
+            f'Decide "tono" SOLO con oraciones que nombran a "{brand}", sus alias o voceros. '
+            'Valores: "Positivo", "Negativo" o "Neutro".\n'
+            "PROHIBIDO usar el sentimiento del artículo completo, tragedias ajenas o hechos de otras entidades.\n"
+            "Negativo exige crítica dirigida a la marca. Mención de sede/ubicación sin juicio → Neutro.\n"
+            "Positivo: la marca es sujeto de aportes, respaldo, donación, alianza o inauguración."
         )
         json_fields.append('"tono": "..."')
-        n += 1
-    if request_theme:
-        steps.append(
-            f'{n}. "tema": DOMINIO GENERAL (Nivel Macro, 1 a 3 palabras. Ej: "Educación Superior", "Gestión Tributaria", "Sector Salud"). PROHIBIDO "Otros".'
-        )
-        json_fields.append('"tema": "..."')
-        n += 1
-
-    subtema_rule = (
-        f'{n}. "subtema": HECHO ESPECÍFICO (frase nominal coherente en español colombiano, '
-        "preferible 4 a 6 palabras. Sin comas ni puntos. "
-        'PROHIBIDO usar "Mención", collage de keywords o recortar el titular).'
+    blocks.append(
+        "BLOQUE B — SUBTEMA (únicamente el hecho específico)\n"
+        'Decide "subtema": frase nominal coherente en español colombiano, OBLIGATORIO 3 a 7 palabras. '
+        "Sin comas ni puntos. PROHIBIDO usar Mención, collage de keywords o recortar el titular.\n"
+        "El subtema describe el hecho, no el tono ni el cubo temático."
     )
-    steps.append(subtema_rule)
     json_fields.append('"subtema": "..."')
+    if request_theme:
+        json_fields.append('"tema": "..."')
+        blocks.append(
+            "TEMA (lista cerrada de cubos; PROHIBIDO \"Otros\"): elige exactamente uno de: "
+            f"{cubos_list}."
+        )
 
     if request_theme:
-        differ_rule = 'REGLA OBLIGATORIA: "tema" y "subtema" DEBEN SER DIFERENTES.'
+        differ_rule = 'REGLA OBLIGATORIA: "tema" y "subtema" DEBEN SER DIFERENTES. tema ∈ cubos cerrados.'
     elif pkl_theme:
         differ_rule = (
             f'TEMA YA CLASIFICADO POR EL MODELO DEL CLIENTE: "{pkl_theme}". '
@@ -669,40 +1088,50 @@ def _call_openai_cluster(
         differ_rule = "El subtema debe describir el hecho concreto, no un dominio general."
 
     tone_examples = ""
-    if request_tone:
+    if ask_tone:
         tone_examples = """
-EJEMPLOS DE TONO OBLIGATORIO:
+EJEMPLOS DE TONO ASPECTUAL (solo marca):
 - Caso 1: "Sismo en la región: Acompañamos desde la Universidad Autónoma de Occidente a las familias afectadas..."
-  -> Tono: "Positivo" (solidaridad y acompañamiento institucional de la marca).
+  -> Tono: "Positivo" (la marca es sujeto de acompañamiento; la tragedia ajena no contagia).
 - Caso 2: "Designación ministerial: La Universidad Autónoma de Occidente celebra y respalda el nombramiento..."
-  -> Tono: "Positivo" (respaldo y felicitación institucional de la marca).
+  -> Tono: "Positivo" (respaldo institucional de la marca).
 - Caso 3: "UAO y DIAN abren espacio de asesoría gratuita en trámites aduaneros..."
-  -> Tono: "Positivo" (alianza y beneficio para la comunidad).
-- Caso 4: "Denuncian quejas por cobros excesivos o fallas en el servicio..."
-  -> Tono: "Negativo" (afectación directa).
-- Caso 5: "Boletín general de cifras donde la entidad aporta un dato técnico..."
+  -> Tono: "Positivo" (alianza y beneficio).
+- Caso 4: "Denuncian quejas por cobros excesivos en la UAO..."
+  -> Tono: "Negativo" (crítica dirigida a la marca).
+- Caso 5: "El sismo se sintió en la UAO." / "frente a la sede de la UAO"
+  -> Tono: "Neutro" (tragedia corta sin crítica, o mención de sede).
+- Caso 6: "Boletín general de cifras donde la entidad aporta un dato técnico..."
   -> Tono: "Neutro" (informativo sin juicio de valor).
 """
 
-    prompt = f"""Analiza esta noticia para el cliente: "{brand}" (Alias: {', '.join(aliases) if aliases else 'Ninguno'}).
+    alias_txt = ", ".join(aliases) if aliases else "Ninguno"
+    prompt = f"""Analiza esta noticia para el cliente: "{brand}" (Alias: {alias_txt}).
 
 Titular de referencia: "{title_ref}"
-Contexto analizado:
+Evidencia de marca (BLOQUE A; vacía = no hay mención):
 \"\"\"{ctx}\"\"\"
 {tone_examples}
-Instrucciones:
-{chr(10).join(steps)}
+Instrucciones (bloques independientes; no mezclar evidencia):
+{chr(10).join(blocks)}
 
 {differ_rule}
 
 Responde estrictamente en JSON:
 {{{", ".join(json_fields)}}}"""
 
+    system_prompt = (
+        "Auditor reputacional senior. El tono es ASPECTUAL: mide el impacto sobre la marca, "
+        "alias o voceros, NUNCA el sentimiento del artículo completo. "
+        "El BLOQUE A decide únicamente el tono. El BLOQUE B decide únicamente el subtema. "
+        "No mezclar evidencia entre bloques. Sin mención de marca el tono es Neutro."
+    )
+
     try:
         resp = client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": "Auditor senior de medios. Clasifica el tono institucional y los hechos con alta precisión."},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt}
             ],
             response_format={"type": "json_object"},
@@ -711,33 +1140,40 @@ Responde estrictamente en JSON:
         )
         data = json.loads(resp.choices[0].message.content)
 
-        if request_tone:
+        if ask_tone:
             tono_raw = str(data.get("tono", "Neutro")).strip().capitalize()
             tono = tono_raw if tono_raw in ["Positivo", "Negativo", "Neutro"] else "Neutro"
-            if check_positive_institutional_override(ctx):
-                tono = "Positivo"
         else:
             tono = "Neutro"
 
-        subtema = clean_subtema(data.get("subtema", ""), brand, title_ref)
+        tono = apply_tone_guards(tono, ctx, brand, aliases, brand_regexes)
+
+        subtema = validate_or_repair_subtema(
+            data.get("subtema", ""), brand, title_ref, ctx
+        )
 
         if request_theme:
-            tema = clean_tema(data.get("tema", ""))
+            tema = assign_closed_tema(data.get("tema", ""), subtema, title_ref, ctx)
             tema = ensure_different_tema_subtema(tema, subtema, ctx)
+            tema = assign_closed_tema(tema, subtema, title_ref, ctx)
         else:
             tema = (pkl_theme or "").strip() or "Gestión Institucional"
             subtema = ensure_subtema_distinct_from_tema(tema, subtema, brand, title_ref, ctx)
+            subtema = validate_or_repair_subtema(subtema, brand, title_ref, ctx)
 
         return tono, tema, subtema
     except Exception as e:
         logger.error(f"Error en llamada OpenAI: {e}")
-        sub_fb = _fallback_from_title(title_ref)
+        sub_fb = validate_or_repair_subtema("", brand, title_ref, ctx)
         if request_theme:
-            tema_fb = ensure_different_tema_subtema("Gestión Institucional", sub_fb, ctx)
+            tema_fb = assign_closed_tema("", sub_fb, title_ref, ctx)
+            tema_fb = ensure_different_tema_subtema(tema_fb, sub_fb, ctx)
+            tema_fb = assign_closed_tema(tema_fb, sub_fb, title_ref, ctx)
         else:
             tema_fb = (pkl_theme or "").strip() or "Gestión Institucional"
             sub_fb = ensure_subtema_distinct_from_tema(tema_fb, sub_fb, brand, title_ref, ctx)
-        tono_fb = "Positivo" if check_positive_institutional_override(ctx) else "Neutro"
+            sub_fb = validate_or_repair_subtema(sub_fb, brand, title_ref, ctx)
+        tono_fb = apply_tone_guards("Neutro", ctx, brand, aliases, brand_regexes)
         return tono_fb, tema_fb, sub_fb
 
 def enrich_rows_with_ai(
@@ -756,6 +1192,7 @@ def enrich_rows_with_ai(
     client = OpenAI(api_key=api_key)
     plan = classification_plan(True, tone_model, theme_model)
 
+    aliases = parse_alias_list(aliases)
     brand_regexes = generate_brand_variants(brand, aliases)
     
     if progress_callback:
@@ -770,7 +1207,9 @@ def enrich_rows_with_ai(
             ctx = extract_brand_context(
                 str(resumen_val),
                 str(titulo_val),
-                brand_regexes
+                brand_regexes,
+                brand=brand,
+                aliases=aliases,
             )
             row["Contexto analizado"] = ctx
 
@@ -872,12 +1311,25 @@ def enrich_rows_with_ai(
 
         if theme_model is None:
             tema = ensure_different_tema_subtema(tema, subtema, row.get("Contexto analizado", ""))
+            tema = assign_closed_tema(
+                tema,
+                subtema,
+                str(row.get(km.get("titulo", "Título"), "")),
+                row.get("Contexto analizado", ""),
+            )
         else:
             subtema = ensure_subtema_distinct_from_tema(
                 tema, subtema, brand,
                 str(row.get(km.get("titulo", "Título"), "")),
                 row.get("Contexto analizado", ""),
             )
+
+        subtema = validate_or_repair_subtema(
+            subtema,
+            brand,
+            str(row.get(km.get("titulo", "Título"), "")),
+            row.get("Contexto analizado", ""),
+        )
 
         row["Tono_IA"] = tono
         row["Tema_IA"] = tema
