@@ -228,6 +228,7 @@ class DualPromptTests(unittest.TestCase):
             client, "gpt-test", brand, aliases, regexes, ctx,
             "Titular de referencia de aporte",
             request_tone=True, request_theme=True,
+            fact_ctx="Titular de referencia de aporte. La UAO aporta donaciones humanitarias institucionales.",
         )
         self.assertEqual(len(calls), 1)
         system = calls[0]["messages"][0]["content"]
@@ -237,6 +238,8 @@ class DualPromptTests(unittest.TestCase):
         self.assertIn("BLOQUE B", system.upper())
         self.assertIn("BLOQUE A", user.upper())
         self.assertIn("BLOQUE B", user.upper())
+        self.assertIn("Contexto del hecho", user)
+        self.assertIn("aporta donaciones humanitarias", user)
         self.assertEqual(tono, "Positivo")
         self.assertNotEqual(tema.lower(), "otros")
         self.assertIn(tema, DEFAULT_CUBOS)
