@@ -11,6 +11,7 @@ import pandas as pd
 
 from pipeline import process_dossier
 from pkl_classifier import PklClassifierError, load_sklearn_estimator
+from usage_notify import send_usage_notification
 
 logger = logging.getLogger("limpieza_grill")
 if not logging.getLogger().handlers:
@@ -398,6 +399,19 @@ def run_cleaning_process(df_file, file_meta=None, ai_config=None):
         "duplicates": result["duplicates"],
         "process_duration": result["process_duration"],
     })
+    try:
+        send_usage_notification(
+            st.secrets,
+            brand=(ai_config or {}).get("brand"),
+            dossier_name=file_meta.get("name"),
+            total_rows=result["total_rows"],
+            unique_rows=result["unique_rows"],
+            duplicates=result["duplicates"],
+            duration=result["process_duration"],
+            output_filename=result["output_filename"],
+        )
+    except Exception:
+        logger.exception("Fallo inesperado al notificar uso; el resultado se conserva.")
 
 # ======================================
 # Interfaz de Usuario

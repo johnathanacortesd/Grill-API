@@ -125,14 +125,27 @@ pip install -r requirements.txt
 
 ### 3. Configuración de Secretos
 
-Cree la carpeta `.streamlit` y el archivo `secrets.toml` dentro de la raíz del proyecto para definir la contraseña de acceso local:
+Cree `.streamlit/secrets.toml` a partir del ejemplo del repositorio. **No haga commit de valores reales.**
 
 ```bash
 mkdir -p .streamlit
-cat <<EOF > .streamlit/secrets.toml
-password = "tu_contrasena_local"
-EOF
+cp secrets.toml.example .streamlit/secrets.toml
 ```
+
+Claves usadas por la app:
+
+| Clave | Uso |
+| --- | --- |
+| `APP_PASSWORD` | Contraseña de acceso a la interfaz |
+| `OPENAI_API_KEY` | Análisis de tono/tema/subtema con IA |
+| `REGIONES_CSV_URL` | CSV de mapeo de regiones (Google Sheets) |
+| `INTERNET_CSV_URL` | CSV de mapeo de medios internet |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` | SMTP opcional (Gmail, puerto 587 + STARTTLS) |
+| `USAGE_NOTIFY_EMAIL` | Destinatario de la notificación de uso |
+
+Tras cada limpieza/análisis **exitoso**, si todas las claves `SMTP_*` y `USAGE_NOTIFY_EMAIL` están definidas, se envía un correo con marca/cliente, filas (total/únicos/duplicados), duración y nombre del archivo de salida. Si falta cualquiera, no se envía nada (el pipeline no se interrumpe). Un fallo de SMTP se registra en logs y no llega a la UI.
+
+En Gmail, `SMTP_PASSWORD` debe ser una **contraseña de aplicación**, no la contraseña de la cuenta.
 
 ### 4. Ejecutar la aplicación
 
@@ -160,11 +173,7 @@ Para desplegar esta aplicación en **Streamlit Community Cloud**:
 
 1. Vincule el repositorio `johnathanacortesd/Grill-API`.
 2. Configure el archivo de inicio como `app.py`.
-3. En la sección **Advanced Settings -> Secrets**, agregue la variable de entorno correspondiente a la contraseña:
-
-```toml
-password = "tu_contrasena_de_produccion"
-```
+3. En **Advanced Settings → Secrets**, pegue las claves de `secrets.toml.example` (con valores reales solo en Cloud, nunca en git): `APP_PASSWORD`, `OPENAI_API_KEY`, `REGIONES_CSV_URL`, `INTERNET_CSV_URL`. Para el correo opcional de uso, agregue también `SMTP_*` y `USAGE_NOTIFY_EMAIL` (Gmail App Password en `SMTP_PASSWORD`).
 
 ---
 
