@@ -519,7 +519,7 @@ def main():
                         st.stop()
                     
                     aliases_parsed = [
-                        a.strip() for a in re.split(r"[,;]", alias_input) if a.strip()
+                        a.strip() for a in re.split(r"[,;\n]", alias_input) if a.strip()
                     ]
                     tone_bytes = f_tono.getvalue() if f_tono else None
                     theme_bytes = f_tema.getvalue() if f_tema else None

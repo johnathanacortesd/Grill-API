@@ -199,7 +199,8 @@ def fill_classification_context(
         titulo_val = row.get(titulo_key) or row.get("Título") or ""
         if brand_regexes:
             row["Contexto analizado"] = extract_brand_context(
-                str(resumen_val), str(titulo_val), brand_regexes
+                str(resumen_val), str(titulo_val), brand_regexes,
+                brand=brand, aliases=aliases,
             )
         else:
             row["Contexto analizado"] = _title_resumen_text(titulo_val, resumen_val)
