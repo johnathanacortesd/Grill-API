@@ -632,34 +632,57 @@ def validate_or_repair_subtema(
             return title_fb
     return cleaned or _fallback_from_title(title_fallback)
 
-# Strict same-fact clustering. Bias: two clusters for one fact (false negative)
-# is better than one cluster for two facts (false positive).
-# KEEP / tightened: near-identical titles; event-anchor equality PLUS extra
-# distinctive overlap; high body similarity.
-# REMOVED: 2-word lead-only match; title token_set >= 70 standalone;
-# context token_set >= 63 standalone; context overlap of only 3 distinctive words;
-# event-anchor equality without extra overlap. Brand evidence is not a fact signal.
-CLUSTER_TITLE_CONTAINMENT_MIN_LEN = 20
-CLUSTER_TITLE_PREFIX_LEN = 28
-CLUSTER_TITLE_RATIO = 90
-CLUSTER_TITLE_PARTIAL_RATIO = 94
-CLUSTER_TITLE_PARTIAL_AND_RATIO = 82
-CLUSTER_TITLE_TOKEN_SET = 92
-CLUSTER_TITLE_TOKEN_SORT = 88
-CLUSTER_BODY_MIN_LEN = 50
-CLUSTER_BODY_TOKEN_SET = 90
-CLUSTER_BODY_RATIO = 82
-CLUSTER_BODY_DISTINCTIVE_OVERLAP = 4
-CLUSTER_ANCHOR_EXTRA_OVERLAP = 2
+# Recall-biased same-fact clustering (user override of #17).
+# Bias: false positives preferred over missing the same subtema on similar
+# news / republications / paraphrases. Middle ground vs pre-#17: useful
+# title/body signals are back at moderate thresholds, but brand evidence
+# (Contexto analizado) is NEVER a merge signal by itself.
+# Soft guard: conflicting action families (inaugura sede vs firma convenio)
+# stay apart unless body similarity is already very high.
+# Still not a merge reason: 2-word lead-only; event-anchor equality with
+# no extra overlap.
+CLUSTER_TITLE_CONTAINMENT_MIN_LEN = 18
+CLUSTER_TITLE_PREFIX_LEN = 22
+CLUSTER_TITLE_RATIO = 86
+CLUSTER_TITLE_PARTIAL_RATIO = 90
+CLUSTER_TITLE_PARTIAL_AND_RATIO = 76
+# Title token_set/sort republication band (~75–85), not only ≥92.
+CLUSTER_TITLE_TOKEN_SET = 74
+CLUSTER_TITLE_TOKEN_SORT = 80
+CLUSTER_BODY_MIN_LEN = 40
+CLUSTER_BODY_TOKEN_SET = 78
+CLUSTER_BODY_RATIO = 68
+CLUSTER_BODY_DISTINCTIVE_OVERLAP = 3
+CLUSTER_BODY_SOFT_TOKEN_SET = 72
+CLUSTER_BODY_SOFT_OVERLAP = 4
+CLUSTER_FACT_TOKEN_SET = 76
+CLUSTER_FACT_OVERLAP = 4
+CLUSTER_FACT_SOFT_TOKEN_SET = 68
+CLUSTER_FACT_SOFT_OVERLAP = 6
+CLUSTER_ANCHOR_EXTRA_OVERLAP = 1
 CLUSTER_LEAD_EXTRA_OVERLAP = 1
-CLUSTER_LEAD_SORT_MIN = 80
-CLUSTER_TITLE_DISTINCTIVE_OVERLAP = 5
-CLUSTER_TITLE_DISTINCTIVE_SORT = 85
+CLUSTER_LEAD_SORT_MIN = 70
+CLUSTER_TITLE_DISTINCTIVE_OVERLAP = 3
+CLUSTER_TITLE_DISTINCTIVE_SORT = 72
+CLUSTER_CONFLICT_OVERRIDE_BODY = 88
 CLUSTER_GENERIC_TOKENS = {
     "universidad", "instituto", "institucion", "clinica", "hospital", "fundacion",
     "colegio", "empresa", "grupo", "ciudad", "region",
 }
-CANON_SUBTEMA_NEAR_IDENTICAL = 90
+# Canonize leftover synonym subtemas around 80–85, not ≥90.
+CANON_SUBTEMA_NEAR_IDENTICAL = 82
+CANON_SUBTEMA_SORT = 80
+CANON_FACT_TOKEN_SET = 80
+CANON_FACT_MIN_LEN = 40
+# "abre"/"abrir" count as opening actions only as whole tokens.
+_ACTION_OPEN_WORDS = frozenset({"abre", "abrir", "abrio", "abren", "abierta", "abierto"})
+_ACTION_FAMILY_STEMS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    ("open", ("inaugur", "apertura", "apertur", "estren")),
+    ("sign", ("firma", "firmo", "convenio", "acuerdo", "alianza")),
+    ("protest", ("protest", "moviliz", "marcha")),
+    ("cut", ("denuncia", "denuncio", "recort", "sancion")),
+    ("scholarship", ("beca",)),
+)
 
 
 def _distinctive_subset(words: Set[str], doc_freq: Counter, total_docs: int) -> Set[str]:
@@ -674,19 +697,69 @@ def _distinctive_subset(words: Set[str], doc_freq: Counter, total_docs: int) -> 
     return {w for w in words if doc_freq.get(w, 0) <= cap}
 
 
-def _is_generic_cluster_token(token: str, brand_regexes: List[str]) -> bool:
+def _brand_token_fragments(brand_regexes: List[str]) -> Set[str]:
+    """Piezas léxicas de la marca (uao, autonoma, occidente) que no son hecho."""
+    frags: Set[str] = set()
+    for rx in brand_regexes or []:
+        for w in re.findall(r"[a-z0-9]{3,}", str(rx).replace("\\", "").lower()):
+            if w not in {"the", "del"}:
+                frags.add(w)
+    return frags
+
+
+def _is_generic_cluster_token(
+    token: str,
+    brand_regexes: List[str],
+    brand_frags: Optional[Set[str]] = None,
+) -> bool:
     if not token or token in CLUSTER_GENERIC_TOKENS or token in STOPWORDS_ES:
+        return True
+    if brand_frags and token in brand_frags:
         return True
     if brand_regexes and any(re.search(rx, token) for rx in brand_regexes):
         return True
     return False
 
 
-def _fact_overlap(a: Set[str], b: Set[str], brand_regexes: List[str]) -> Set[str]:
+def _fact_overlap(
+    a: Set[str],
+    b: Set[str],
+    brand_regexes: List[str],
+    brand_frags: Optional[Set[str]] = None,
+) -> Set[str]:
     return {
         w for w in (a & b)
-        if len(w) > 3 and not _is_generic_cluster_token(w, brand_regexes)
+        if len(w) > 3 and not _is_generic_cluster_token(w, brand_regexes, brand_frags)
     }
+
+
+def _action_families_in(text_norm: str) -> Set[str]:
+    words = (text_norm or "").split()
+    found: Set[str] = set()
+    for family, stems in _ACTION_FAMILY_STEMS:
+        for w in words:
+            if any(w.startswith(s) or (len(w) >= 4 and s.startswith(w)) for s in stems):
+                found.add(family)
+                break
+    if any(w in _ACTION_OPEN_WORDS for w in words):
+        found.add("open")
+    return found
+
+
+def _conflicting_actions(a_norm: str, b_norm: str) -> bool:
+    """True si los titulares nombran acciones claramente distintas (inaugura vs firma)."""
+    fa, fb = _action_families_in(a_norm), _action_families_in(b_norm)
+    return bool(fa) and bool(fb) and fa.isdisjoint(fb)
+
+
+def _soft_stem_hit(word: str, fact_words: Set[str]) -> bool:
+    """Acepta sinónimos/flexionados por prefijo (inauguracion ~ inaugura, campu ~ campus)."""
+    if word in fact_words:
+        return True
+    if len(word) < 5:
+        return False
+    prefix = word[:5]
+    return any(len(f) >= 5 and f[:5] == prefix for f in fact_words)
 
 
 def subtema_has_fact_fidelity(
@@ -695,7 +768,12 @@ def subtema_has_fact_fidelity(
     body: str = "",
     brand: str = "",
 ) -> bool:
-    """Palabras distintivas del subtema deben aparecer en el titular o el cuerpo del grupo."""
+    """Fidelidad suave contra el hecho del GRUPO (título+cuerpo del representante).
+
+    Basta un solapamiento distintivo fuerte (token exacto o prefijo), no la
+    mayoría. Solo rechaza invenciones ajenas (p. ej. reforma tributaria sobre
+    una inauguración). No se usa por fila para reescribir un subtema de clúster.
+    """
     sub_words = get_content_words_set(normalize_text_for_matching(subtema or ""))
     fact_words = get_content_words_set(
         normalize_text_for_matching(f"{title or ''} {body or ''}")
@@ -704,8 +782,9 @@ def subtema_has_fact_fidelity(
     distinctive = {w for w in sub_words if len(w) > 3 and w not in brand_words}
     if not distinctive:
         return False
-    need = max(1, (len(distinctive) + 1) // 2)
-    return len(distinctive & fact_words) >= need
+    if distinctive & fact_words:
+        return True
+    return any(_soft_stem_hit(w, fact_words) for w in distinctive)
 
 
 def _titles_are_near_identical(t_norm: str, rep_t: str) -> bool:
@@ -729,10 +808,9 @@ def _titles_are_near_identical(t_norm: str, rep_t: str) -> bool:
         and fuzz.ratio(t_norm, rep_t) >= CLUSTER_TITLE_PARTIAL_AND_RATIO
     ):
         return True
-    if (
-        fuzz.token_set_ratio(t_norm, rep_t) >= CLUSTER_TITLE_TOKEN_SET
-        and fuzz.token_sort_ratio(t_norm, rep_t) >= CLUSTER_TITLE_TOKEN_SORT
-    ):
+    if fuzz.token_set_ratio(t_norm, rep_t) >= CLUSTER_TITLE_TOKEN_SET:
+        return True
+    if fuzz.token_sort_ratio(t_norm, rep_t) >= CLUSTER_TITLE_TOKEN_SORT:
         return True
     return False
 
@@ -744,6 +822,7 @@ def cluster_similar_rows(rows: List[dict], km: dict, brand_regexes: List[str]) -
     current_cluster = 0
 
     active_indices = [i for i in range(n) if not rows[i].get("is_duplicate")]
+    brand_frags = _brand_token_fragments(brand_regexes)
 
     # Features from title + body (the article fact). Brand evidence is not used
     # as a merge reason: after SPEC_TONO_TEMA it only contains marca snippets.
@@ -797,15 +876,47 @@ def cluster_similar_rows(rows: List[dict], km: dict, brand_regexes: List[str]) -
             rep_r = rep["body_norm"]
             rep_body_words = rep["body_words"]
             rep_distinctive = _distinctive_subset(rep_words, title_doc_freq, total_docs)
-            title_overlap = _fact_overlap(distinctive_c_words, rep_distinctive, brand_regexes)
+            title_overlap = _fact_overlap(
+                distinctive_c_words, rep_distinctive, brand_regexes, brand_frags
+            )
 
             if _titles_are_near_identical(t_norm, rep_t):
                 cluster_map[i] = cid
                 assigned = True
                 break
 
-            # 3-word lead only with extra distinctive overlap and high title sort.
-            # 2-word lead-only match is intentionally not a merge reason.
+            body_set = 0
+            body_ratio = 0
+            body_overlap: Set[str] = set()
+            bodies_long = bool(
+                r_norm and rep_r
+                and len(r_norm) >= CLUSTER_BODY_MIN_LEN
+                and len(rep_r) >= CLUSTER_BODY_MIN_LEN
+            )
+            if bodies_long:
+                body_set = fuzz.token_set_ratio(r_norm, rep_r)
+                body_ratio = fuzz.ratio(r_norm, rep_r)
+                body_overlap = _fact_overlap(
+                    distinctive_body,
+                    _distinctive_subset(rep_body_words, body_doc_freq, total_docs),
+                    brand_regexes,
+                    brand_frags,
+                )
+
+            # Soft preference: different actions stay apart unless the body
+            # is already a near-republication. Never block real reprints.
+            if _conflicting_actions(t_norm, rep_t):
+                if (
+                    bodies_long
+                    and body_set >= CLUSTER_CONFLICT_OVERRIDE_BODY
+                    and len(body_overlap) >= CLUSTER_BODY_DISTINCTIVE_OVERLAP
+                ):
+                    cluster_map[i] = cid
+                    assigned = True
+                    break
+                continue
+
+            # 3-word lead + modest extra overlap. 2-word lead-only is not a signal.
             if (
                 len(lead_words) >= 3
                 and len(rep_lead) >= 3
@@ -835,16 +946,51 @@ def cluster_similar_rows(rows: List[dict], km: dict, brand_regexes: List[str]) -
                 assigned = True
                 break
 
-            if r_norm and rep_r and len(r_norm) >= CLUSTER_BODY_MIN_LEN and len(rep_r) >= CLUSTER_BODY_MIN_LEN:
-                body_overlap = _fact_overlap(
-                    distinctive_body,
-                    _distinctive_subset(rep_body_words, body_doc_freq, total_docs),
-                    brand_regexes,
-                )
+            # Soft merge: high title similarity without near-identical wording.
+            if t_norm and rep_t:
+                title_set = fuzz.token_set_ratio(t_norm, rep_t)
+                title_sort = fuzz.token_sort_ratio(t_norm, rep_t)
+                if (
+                    title_set >= CLUSTER_TITLE_TOKEN_SET
+                    or title_sort >= CLUSTER_TITLE_TOKEN_SORT
+                ):
+                    cluster_map[i] = cid
+                    assigned = True
+                    break
+
+            if bodies_long:
                 if (
                     len(body_overlap) >= CLUSTER_BODY_DISTINCTIVE_OVERLAP
-                    and fuzz.token_set_ratio(r_norm, rep_r) >= CLUSTER_BODY_TOKEN_SET
-                    and fuzz.ratio(r_norm, rep_r) >= CLUSTER_BODY_RATIO
+                    and body_set >= CLUSTER_BODY_TOKEN_SET
+                    and body_ratio >= CLUSTER_BODY_RATIO
+                ):
+                    cluster_map[i] = cid
+                    assigned = True
+                    break
+                if (
+                    len(body_overlap) >= CLUSTER_BODY_SOFT_OVERLAP
+                    and body_set >= CLUSTER_BODY_SOFT_TOKEN_SET
+                ):
+                    cluster_map[i] = cid
+                    assigned = True
+                    break
+
+                fact_a = f"{t_norm} {r_norm}".strip()
+                fact_b = f"{rep_t} {rep_r}".strip()
+                fact_overlap = _fact_overlap(
+                    distinctive_c_words | distinctive_body,
+                    rep_distinctive
+                    | _distinctive_subset(rep_body_words, body_doc_freq, total_docs),
+                    brand_regexes,
+                    brand_frags,
+                )
+                fact_set = fuzz.token_set_ratio(fact_a, fact_b)
+                if (
+                    fact_set >= CLUSTER_FACT_TOKEN_SET
+                    and len(fact_overlap) >= CLUSTER_FACT_OVERLAP
+                ) or (
+                    fact_set >= CLUSTER_FACT_SOFT_TOKEN_SET
+                    and len(fact_overlap) >= CLUSTER_FACT_SOFT_OVERLAP
                 ):
                     cluster_map[i] = cid
                     assigned = True
@@ -882,17 +1028,21 @@ def canonicalize_subtopics(
     cluster_results: Dict[int, Tuple[str, str, str]],
     cluster_contexts: Optional[Dict[int, str]] = None,
 ) -> Dict[int, Tuple[str, str, str]]:
-    """Alinea el texto de subtema solo cuando las cadenas ya son casi idénticas.
+    """Unifica subtemas sinónimos y clústers residuales del mismo hecho.
 
-    No une clústers por similitud laxa de evidencia de marca / contexto.
-    Cada clúster conserva su (tono, tema, subtema) cuando los hechos difieren.
-    `cluster_contexts` se acepta por compatibilidad y no dispara fusiones.
+    Une cuando el texto del subtema es igual o cercano (token_set/sort ~80–85),
+    o cuando los contextos de HECHO (título+cuerpo del representante) son muy
+    similares. La evidencia de marca sola no es señal de fusión.
     """
     cids = list(cluster_results.keys())
     dsu = _DSU(cids)
-    # cluster_contexts is accepted for call-site compatibility and is not a merge signal.
+    cluster_contexts = cluster_contexts or {}
 
     norm_subs = {cid: normalize_text_for_matching(cluster_results[cid][2] or "") for cid in cids}
+    norm_ctx = {
+        cid: normalize_text_for_matching((cluster_contexts.get(cid) or "")[:600])
+        for cid in cids
+    }
 
     for i in range(len(cids)):
         for j in range(i + 1, len(cids)):
@@ -900,13 +1050,19 @@ def canonicalize_subtopics(
             if dsu.find(cid1) == dsu.find(cid2):
                 continue
             n1, n2 = norm_subs[cid1], norm_subs[cid2]
-            if not n1 or not n2:
-                continue
-            same_subtema_text = n1 == n2 or (
-                fuzz.token_set_ratio(n1, n2) >= CANON_SUBTEMA_NEAR_IDENTICAL
-                and fuzz.token_sort_ratio(n1, n2) >= CANON_SUBTEMA_NEAR_IDENTICAL
+            same_subtema_text = bool(n1) and bool(n2) and (
+                n1 == n2
+                or fuzz.token_set_ratio(n1, n2) >= CANON_SUBTEMA_NEAR_IDENTICAL
+                or fuzz.token_sort_ratio(n1, n2) >= CANON_SUBTEMA_SORT
             )
-            if same_subtema_text:
+            c1, c2 = norm_ctx[cid1], norm_ctx[cid2]
+            same_fact_context = (
+                len(c1) >= CANON_FACT_MIN_LEN
+                and len(c2) >= CANON_FACT_MIN_LEN
+                and fuzz.token_set_ratio(c1, c2) >= CANON_FACT_TOKEN_SET
+                and not _conflicting_actions(c1, c2)
+            )
+            if same_subtema_text or same_fact_context:
                 dsu.union(cid1, cid2)
 
     groups: Dict[int, List[int]] = {}
@@ -1146,9 +1302,11 @@ def _call_openai_cluster(
         "BLOQUE B — SUBTEMA (únicamente el hecho específico)\n"
         'Decide "subtema" SOLO con el contexto del hecho (título + cuerpo), no con la evidencia de marca. '
         "Frase nominal coherente en español colombiano, OBLIGATORIO 3 a 7 palabras. "
+        "Debe ser una etiqueta reutilizable del hecho: la misma redacción sirve para "
+        "republicaciones y paráfrasis del mismo evento en distintos medios. "
         "Sin comas ni puntos. PROHIBIDO usar Mención, collage de keywords o recortar el titular. "
         "El subtema describe el hecho, no el tono ni el cubo temático. "
-        "Las palabras distintivas del subtema deben aparecer en el titular o el cuerpo."
+        "No inventes un hecho ajeno al contexto; los sinónimos del mismo evento sí son válidos."
     )
     json_fields.append('"subtema": "..."')
     if request_theme:
@@ -1382,25 +1540,22 @@ def enrich_rows_with_ai(
             if pkl_theme:
                 tema = pkl_theme
                 sample_idx = cluster_to_sample_idx[cid]
-                subtema = ensure_subtema_distinct_from_tema(
-                    tema,
-                    subtema,
-                    brand,
-                    cluster_titles.get(cid) or str(rows[sample_idx].get(km.get("titulo", "Título"), "")),
-                    cluster_fact_ctx.get(cid, ""),
+                group_title = cluster_titles.get(cid) or str(
+                    rows[sample_idx].get(km.get("titulo", "Título"), "")
                 )
-                if not subtema_has_fact_fidelity(
-                    subtema,
-                    cluster_titles.get(cid, ""),
-                    cluster_fact_ctx.get(cid, ""),
-                    brand,
-                ):
+                group_fact = cluster_fact_ctx.get(cid, "")
+                subtema = ensure_subtema_distinct_from_tema(
+                    tema, subtema, brand, group_title, group_fact
+                )
+                # Soft group fidelity only: keep a reasonable LLM phrase.
+                if not subtema_has_fact_fidelity(subtema, group_title, group_fact, brand):
                     subtema = validate_or_repair_subtema(
-                        cluster_titles.get(cid, ""),
-                        brand,
-                        cluster_titles.get(cid, ""),
-                        cluster_fact_ctx.get(cid, ""),
+                        subtema, brand, group_title, group_fact
                     )
+                    if not subtema_has_fact_fidelity(subtema, group_title, group_fact, brand):
+                        subtema = validate_or_repair_subtema(
+                            group_title, brand, group_title, group_fact
+                        )
             cluster_results[cid] = (tono, tema, subtema)
             completed += 1
             if progress_callback and (completed % 15 == 0 or completed == total_clusters):
@@ -1410,17 +1565,22 @@ def enrich_rows_with_ai(
     for cid, (tono, tema, subtema) in list(cluster_results.items()):
         group_title = cluster_titles.get(cid, "")
         group_fact = cluster_fact_ctx.get(cid, "")
-        if not subtema_has_fact_fidelity(subtema, group_title, group_fact, brand):
+        if (
+            subtema != "Redacción de artículo"
+            and not subtema_has_fact_fidelity(subtema, group_title, group_fact, brand)
+        ):
+            # Only reject clearly alien inventions vs the group fact, not synonyms.
             repaired = validate_or_repair_subtema(
-                _fallback_from_title(group_title), brand, group_title, group_fact
+                subtema, brand, group_title, group_fact
             )
+            if not subtema_has_fact_fidelity(repaired, group_title, group_fact, brand):
+                repaired = validate_or_repair_subtema(
+                    _fallback_from_title(group_title), brand, group_title, group_fact
+                )
             cluster_results[cid] = (tono, tema, repaired)
 
-    cluster_contexts = {
-        cid: rows[row_idx].get("Contexto analizado", "")
-        for cid, row_idx in cluster_to_sample_idx.items()
-    }
-    cluster_results = canonicalize_subtopics(cluster_results, cluster_contexts)
+    # Fact context (title+body), never brand evidence, for leftover-cluster unify.
+    cluster_results = canonicalize_subtopics(cluster_results, cluster_fact_ctx)
 
     for i, row in enumerate(rows):
         if row.get("is_duplicate"):
@@ -1442,9 +1602,8 @@ def enrich_rows_with_ai(
             or row.get("Resumen")
             or ""
         )
-        row_fact = build_fact_context(row_title, row_body)
 
-        # CHEQUEO DIRECTO POR FILA: ejes sin PKL siguen la regla de autoría; el subtema no se pierde.
+        # Byline is the only per-row label override (prior #15/#16 behavior).
         row_full_text = f"{row_title} {row.get('Contexto analizado', '')} {row_body}"
         if check_exact_byline_rule(row_full_text, brand, aliases):
             if tone_model is None:
@@ -1453,33 +1612,13 @@ def enrich_rows_with_ai(
                 tema = "Estudiantes"
             subtema = "Redacción de artículo"
 
-        if theme_model is None:
-            tema = ensure_different_tema_subtema(tema, subtema, row_fact)
-            tema = assign_closed_tema(
-                tema,
-                subtema,
-                row_title,
-                row_fact,
-            )
-        else:
-            subtema = ensure_subtema_distinct_from_tema(
-                tema, subtema, brand, row_title, row_fact,
-            )
-
-        if subtema != "Redacción de artículo" and not subtema_has_fact_fidelity(
-            subtema, row_title, row_body, brand
-        ):
-            # Repair from this group's / row's title, never from another cluster.
-            subtema = validate_or_repair_subtema(
-                _fallback_from_title(row_title), brand, row_title, row_fact
-            )
-        else:
-            subtema = validate_or_repair_subtema(
-                subtema,
-                brand,
-                row_title,
-                row_fact,
-            )
+        # Tema can snap to the closed cubo from the cluster label; do not
+        # rebuild Subtema_IA from this medium's title.
+        if theme_model is None and subtema != "Redacción de artículo":
+            group_fact = cluster_fact_ctx.get(cid, "") if cid is not None else ""
+            group_title = cluster_titles.get(cid, "") if cid is not None else row_title
+            tema = ensure_different_tema_subtema(tema, subtema, group_fact)
+            tema = assign_closed_tema(tema, subtema, group_title or row_title, group_fact)
 
         row["Tono_IA"] = tono
         row["Tema_IA"] = tema
