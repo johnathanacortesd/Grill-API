@@ -34,7 +34,11 @@ from sucre_analyzer import (
     merge_analysis,
     recover_verbatim,
 )
-from sucre_pipeline import build_sample_xlsx, process_sucre_dossier
+from sucre_pipeline import (
+    build_sample_xlsx,
+    process_sucre_dossier,
+    sucre_output_columns_for_export,
+)
 
 
 LUCY_BODY = (
@@ -417,6 +421,33 @@ class LlmMergeTests(unittest.TestCase):
         self.assertEqual(out[COL_EXTERNOS], "")
 
 
+class SucreExportColumnOrderTests(unittest.TestCase):
+    def test_without_ai_keeps_base_then_actor_columns(self):
+        cols = sucre_output_columns_for_export(include_ai=False)
+        self.assertEqual(cols, list(BASE_OUTPUT_COLUMNS) + list(SUCRE_OUTPUT_COLUMNS))
+        self.assertNotIn("Tono_IA", cols)
+        self.assertNotIn("Contexto analizado", cols)
+        self.assertNotIn("revalorización", cols)
+        self.assertNotIn("resumen corto", cols)
+
+    def test_with_ai_inserts_tono_tema_subtema_after_audiencia_actors_then_contexto(self):
+        cols = sucre_output_columns_for_export(include_ai=True)
+        expected = [
+            "ID Noticia", "Fecha", "Hora", "Medio", "Tipo de Medio",
+            "Sección - Programa", "Región", "Título", "Autor - Conductor",
+            "Nro. Pagina", "Dimensión", "Duración - Nro. Caracteres",
+            "CPE", "Tier", "Audiencia",
+            "Tono_IA", "Tema_IA", "Subtema_IA",
+            "Link Nota", "Resumen - Aclaracion", "Link (Streaming - Imagen)", "Menciones - Empresa",
+            "ID duplicada",
+        ] + list(SUCRE_OUTPUT_COLUMNS) + ["Contexto analizado"]
+        self.assertEqual(cols, expected)
+        audiencia_idx = cols.index("Audiencia")
+        self.assertEqual(cols[audiencia_idx + 1:audiencia_idx + 4], ["Tono_IA", "Tema_IA", "Subtema_IA"])
+        self.assertEqual(cols[-5:-1], list(SUCRE_OUTPUT_COLUMNS))
+        self.assertEqual(cols[-1], "Contexto analizado")
+
+
 class PipelineXlsxTests(unittest.TestCase):
     def test_sample_processing_keeps_grill_columns_and_adds_sucre(self):
         result = process_sucre_dossier(
@@ -438,10 +469,13 @@ class PipelineXlsxTests(unittest.TestCase):
             self.assertIn(col, headers)
         for col in SUCRE_OUTPUT_COLUMNS:
             self.assertIn(col, headers)
+        self.assertEqual(headers[:len(BASE_OUTPUT_COLUMNS)], list(BASE_OUTPUT_COLUMNS))
+        self.assertEqual(headers[-4:], list(SUCRE_OUTPUT_COLUMNS))
         self.assertNotIn("revalorización", headers)
         self.assertNotIn("resumen corto", headers)
         self.assertNotIn("Tono", headers)
         self.assertNotIn("Tono_IA", headers)
+        self.assertNotIn("Contexto analizado", headers)
 
         rows = list(ws.iter_rows(min_row=2, values_only=True))
         by_header = [{headers[i]: row[i] for i in range(len(headers))} for row in rows]
@@ -527,8 +561,15 @@ class PipelineXlsxTests(unittest.TestCase):
         self.assertNotIn("revalorización", df.columns)
         self.assertNotIn("resumen corto", df.columns)
         cols = list(df.columns)
-        ai_block = ["Tono_IA", "Tema_IA", "Subtema_IA", "Contexto analizado"]
-        self.assertEqual(cols[len(BASE_OUTPUT_COLUMNS):len(BASE_OUTPUT_COLUMNS) + 4], ai_block)
+        audiencia_idx = cols.index("Audiencia")
+        self.assertEqual(cols[audiencia_idx + 1:audiencia_idx + 4], ["Tono_IA", "Tema_IA", "Subtema_IA"])
+        self.assertEqual(cols[audiencia_idx + 4], "Link Nota")
+        self.assertEqual(cols[-1], "Contexto analizado")
+        self.assertEqual(cols[-5:-1], list(SUCRE_OUTPUT_COLUMNS))
+        self.assertNotEqual(
+            cols[len(BASE_OUTPUT_COLUMNS):len(BASE_OUTPUT_COLUMNS) + 4],
+            ["Tono_IA", "Tema_IA", "Subtema_IA", "Contexto analizado"],
+        )
         for col in SUCRE_OUTPUT_COLUMNS:
             self.assertIn(col, df.columns)
         lucy = df[df["Título"].astype(str).str.contains("becas", case=False, na=False)].iloc[0]

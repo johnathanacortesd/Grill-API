@@ -1,8 +1,8 @@
 # ======================================
 # Prueba de punta a punta del port: dossier XLSX real -> pipeline.process_dossier
 # Sin API: el modelo va simulado (analyzer_tono_tema.llamar_llm).
-# Verifica el contrato que el cliente ya usa: limpieza intacta, columnas de
-# analisis al final (Contexto analizado último), guarda del tono y uniformidad
+# Verifica el contrato que el cliente ya usa: limpieza intacta, Tono/Tema/Subtema
+# después de Audiencia y Contexto analizado último, guarda del tono y uniformidad
 # de etiquetas por grupo.
 # ======================================
 import io
@@ -165,13 +165,22 @@ class TestPortPuntaAPunta(unittest.TestCase):
 
     # --- contrato de salida -------------------------------------------------
     def test_columnas_de_analisis_quedan_al_final(self):
+        from pipeline import output_columns_for_export
+
         self.assertNotIn('revalorización', self.cab)
         self.assertNotIn('resumen corto', self.cab)
+        self.assertEqual(list(self.cab), output_columns_for_export(include_ai=True))
+        audiencia_idx = list(self.cab).index('Audiencia')
         self.assertEqual(
+            list(self.cab[audiencia_idx + 1:audiencia_idx + 4]),
+            ['Tono_IA', 'Tema_IA', 'Subtema_IA'],
+        )
+        self.assertEqual(self.cab[audiencia_idx + 4], 'Link Nota')
+        self.assertEqual(self.cab[-1], 'Contexto analizado')
+        self.assertNotEqual(
             list(self.cab[-4:]),
             ['Tono_IA', 'Tema_IA', 'Subtema_IA', 'Contexto analizado'],
         )
-        self.assertEqual(self.cab[-1], 'Contexto analizado')
 
     def test_resumen_aclaracion_termina_en_un_punto(self):
         for f in self.filas:

@@ -51,14 +51,27 @@ BASE_OUTPUT_COLUMNS = [
     "Link Nota", "Resumen - Aclaracion", "Link (Streaming - Imagen)", "Menciones - Empresa",
     "ID duplicada",
 ]
-AI_OUTPUT_COLUMNS = ["Tono_IA", "Tema_IA", "Subtema_IA", "Contexto analizado"]
+# Tono/Tema/Subtema se insertan después de Audiencia; Contexto analizado va al final.
+AI_COLUMNS_AFTER_AUDIENCIA = ["Tono_IA", "Tema_IA", "Subtema_IA"]
+CONTEXTO_ANALIZADO_COL = "Contexto analizado"
 
 
 def output_columns_for_export(include_ai: bool = False) -> List[str]:
-    """Columnas del xlsx de salida. Con IA/PKL: Tono/Tema/Subtema y Contexto analizado al final."""
+    """Columnas del xlsx de salida.
+
+    Con IA/PKL: inserta Tono_IA, Tema_IA, Subtema_IA después de Audiencia y deja
+    Contexto analizado como última columna. Sin IA: solo BASE_OUTPUT_COLUMNS.
+    """
     cols = list(BASE_OUTPUT_COLUMNS)
-    if include_ai:
-        cols.extend(c for c in AI_OUTPUT_COLUMNS if c not in cols)
+    if not include_ai:
+        return cols
+    audiencia_idx = cols.index("Audiencia")
+    for offset, col in enumerate(AI_COLUMNS_AFTER_AUDIENCIA):
+        if col not in cols:
+            cols.insert(audiencia_idx + 1 + offset, col)
+    if CONTEXTO_ANALIZADO_COL in cols:
+        cols = [c for c in cols if c != CONTEXTO_ANALIZADO_COL]
+    cols.append(CONTEXTO_ANALIZADO_COL)
     return cols
 
 
