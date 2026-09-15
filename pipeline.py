@@ -20,7 +20,7 @@ from openpyxl import load_workbook
 from openpyxl.utils.cell import column_index_from_string, coordinate_from_string, range_boundaries
 from unidecode import unidecode
 
-from ai_analyzer import enrich_rows_with_ai
+from analyzer_tono_tema import enrich_rows_with_ai, ultimo_resumen
 from pkl_classifier import (
     apply_pkl_classifiers,
     fill_classification_context,
@@ -791,6 +791,16 @@ def _write_xlsx_rows(ws, rows, km, n, step, progress, fmt_link, fmt_plain_hlink,
 # ======================================
 # Modelos PKL opcionales
 # ======================================
+def _contar_tonos(rows) -> dict:
+    from collections import Counter
+    c = Counter()
+    for r in rows or []:
+        if r.get("is_duplicate"):
+            continue
+        c[r.get("Tono_IA") or "?"] += 1
+    return dict(c)
+
+
 def _load_optional_pkl_models(ai_config: Optional[dict]):
     if not ai_config:
         return None, None
@@ -843,9 +853,10 @@ def process_dossier(
     has_ai = bool(ai_config and ai_config.get("enabled"))
     tone_model, theme_model = _load_optional_pkl_models(ai_config)
     has_pkl = tone_model is not None or theme_model is not None
+    analisis = {}
 
     if has_ai:
-        emit_progress(progress, 70, "Iniciando análisis reputacional con IA…")
+        emit_progress(progress, 70, "Iniciando análisis de Tono, Tema y Sub-tema…")
         rows = enrich_rows_with_ai(
             rows=rows,
             km=KEY_MAP,
@@ -856,7 +867,9 @@ def process_dossier(
             progress_callback=progress,
             tone_model=tone_model,
             theme_model=theme_model,
+            extra=ai_config,
         )
+        analisis = ultimo_resumen()
     elif has_pkl:
         emit_progress(progress, 70, "Preparando textos para clasificadores PKL…")
         rows = fill_classification_context(
@@ -893,6 +906,7 @@ def process_dossier(
         emit_progress(progress, overall, msg)
 
     output_data = generate_output_excel(rows, KEY_MAP, progress=export_progress, columns_to_use=cols_to_export)
+    _conteo_tonos = _contar_tonos(rows)
     del rows, rows_expanded
     gc.collect()
     duration = time.time() - t0
@@ -910,7 +924,7 @@ def process_dossier(
     timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M')
     final_filename = f"{filename_prefix}_{timestamp}.xlsx"
 
-    return {
+    result = {
         "output_data": output_data,
         "output_filename": final_filename,
         "total_rows": total_rows,
@@ -918,4 +932,25 @@ def process_dossier(
         "duplicates": total_rows - unique_rows,
         "process_duration": f"{duration:.2f}s",
         "medios_sin_mapear": medios_sin_region,
+        "analisis": analisis,
+        "_filas": _conteo_tonos,
     }
+
+    # Auditoria de uso por correo (SMTP). Nunca interrumpe la corrida.
+    if ai_config:
+        try:
+            from auditoria_mail import enviar_auditoria_desde_resultado
+            enviar_auditoria_desde_resultado(result, ai_config)
+        except Exception:
+            logger.exception("Fallo al enviar la auditoria por correo (no interrumpe).")
+
+    # Guardado del historial por cliente (best-effort, nunca interrumpe).
+    if ai_config and ai_config.get("brand"):
+        try:
+            from historial_cliente import guardar_resultado
+            guardar_resultado(ai_config["brand"], result["output_data"], result,
+                              extra=ai_config)
+        except Exception:
+            logger.exception("Fallo al guardar el historial del cliente (no interrumpe).")
+
+    return result
