@@ -6,6 +6,7 @@ import os
 import sys
 import unittest
 
+import pandas as pd
 from openpyxl import load_workbook
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -19,6 +20,7 @@ from pipeline import (  # noqa: E402
     corregir_texto,
     generate_output_excel,
     output_columns_for_export,
+    process_dossier,
     terminar_en_punto,
 )
 
@@ -85,6 +87,28 @@ class ResumenAclaracionFormatTests(unittest.TestCase):
         self.assertTrue(str(value).endswith("."))
         self.assertFalse(str(value).endswith("..."))
         wb.close()
+
+    def test_resumen_corto_input_is_read_but_not_exported(self):
+        df = pd.DataFrame(
+            {
+                "NoticiaId": [1],
+                "Fecha": ["01/01/2026"],
+                "Tipo de Medio": ["internet"],
+                "Título": ["Nota de prueba"],
+                "resumen corto": ["La universidad entrega aulas en la sede norte"],
+                "Empresa rel.": ["Marca Demo"],
+            }
+        )
+        buf = io.BytesIO()
+        df.to_excel(buf, index=False, engine="openpyxl")
+        result = process_dossier(buf.getvalue(), region_map={}, internet_map={}, ai_config=None)
+        out = pd.read_excel(io.BytesIO(result["output_data"]))
+        self.assertNotIn("resumen corto", out.columns)
+        self.assertNotIn("revalorización", out.columns)
+        resumen = str(out.loc[0, "Resumen - Aclaracion"])
+        self.assertIn("universidad entrega aulas", resumen)
+        self.assertTrue(resumen.endswith("."))
+        self.assertFalse(resumen.endswith("..."))
 
 
 if __name__ == "__main__":
