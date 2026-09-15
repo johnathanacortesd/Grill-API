@@ -438,10 +438,13 @@ class PipelineXlsxTests(unittest.TestCase):
             self.assertIn(col, headers)
         for col in SUCRE_OUTPUT_COLUMNS:
             self.assertIn(col, headers)
+        self.assertEqual(headers[:len(BASE_OUTPUT_COLUMNS)], list(BASE_OUTPUT_COLUMNS))
+        self.assertEqual(headers[-4:], list(SUCRE_OUTPUT_COLUMNS))
         self.assertNotIn("revalorización", headers)
         self.assertNotIn("resumen corto", headers)
         self.assertNotIn("Tono", headers)
         self.assertNotIn("Tono_IA", headers)
+        self.assertNotIn("Contexto analizado", headers)
 
         rows = list(ws.iter_rows(min_row=2, values_only=True))
         by_header = [{headers[i]: row[i] for i in range(len(headers))} for row in rows]
@@ -527,8 +530,15 @@ class PipelineXlsxTests(unittest.TestCase):
         self.assertNotIn("revalorización", df.columns)
         self.assertNotIn("resumen corto", df.columns)
         cols = list(df.columns)
-        ai_block = ["Tono_IA", "Tema_IA", "Subtema_IA", "Contexto analizado"]
-        self.assertEqual(cols[len(BASE_OUTPUT_COLUMNS):len(BASE_OUTPUT_COLUMNS) + 4], ai_block)
+        audiencia_idx = cols.index("Audiencia")
+        self.assertEqual(cols[audiencia_idx + 1:audiencia_idx + 4], ["Tono_IA", "Tema_IA", "Subtema_IA"])
+        self.assertEqual(cols[audiencia_idx + 4], "Link Nota")
+        self.assertEqual(cols[-1], "Contexto analizado")
+        self.assertEqual(cols[-5:-1], list(SUCRE_OUTPUT_COLUMNS))
+        self.assertNotEqual(
+            cols[len(BASE_OUTPUT_COLUMNS):len(BASE_OUTPUT_COLUMNS) + 4],
+            ["Tono_IA", "Tema_IA", "Subtema_IA", "Contexto analizado"],
+        )
         for col in SUCRE_OUTPUT_COLUMNS:
             self.assertIn(col, df.columns)
         lucy = df[df["Título"].astype(str).str.contains("becas", case=False, na=False)].iloc[0]

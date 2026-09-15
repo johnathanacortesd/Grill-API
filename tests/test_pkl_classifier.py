@@ -300,7 +300,11 @@ class PipelineNoPklVsPklTests(unittest.TestCase):
         self.assertIn("Tono_IA", df.columns)
         self.assertIn("Tema_IA", df.columns)
         self.assertIn("Subtema_IA", df.columns)
-        self.assertEqual(list(df.columns)[-4:], ["Tono_IA", "Tema_IA", "Subtema_IA", "Contexto analizado"])
+        cols = list(df.columns)
+        audiencia_idx = cols.index("Audiencia")
+        self.assertEqual(cols[audiencia_idx + 1:audiencia_idx + 4], ["Tono_IA", "Tema_IA", "Subtema_IA"])
+        self.assertEqual(cols[-1], "Contexto analizado")
+        self.assertNotEqual(cols[-4:], ["Tono_IA", "Tema_IA", "Subtema_IA", "Contexto analizado"])
         self.assertNotIn("revalorización", df.columns)
         self.assertNotIn("resumen corto", df.columns)
         unique = df[df["Tono_IA"] != "Duplicada"]

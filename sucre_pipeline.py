@@ -13,6 +13,7 @@ import pandas as pd
 from unidecode import unidecode
 
 from pipeline import (
+    CONTEXTO_ANALIZADO_COL,
     KEY_MAP,
     _load_optional_pkl_models,
     detectar_duplicados_avanzado,
@@ -159,6 +160,11 @@ def process_sucre_dossier(
     for col in SUCRE_ACTOR_COLUMNS:
         if col not in cols_to_export:
             cols_to_export.append(col)
+
+    # Sucre appends actor columns after the Grill list; Contexto stays last.
+    if CONTEXTO_ANALIZADO_COL in cols_to_export:
+        cols_to_export = [c for c in cols_to_export if c != CONTEXTO_ANALIZADO_COL]
+        cols_to_export.append(CONTEXTO_ANALIZADO_COL)
 
     emit_progress(progress, 94, "✓ Estructuración finalizada. Generando archivo Excel…")
 
