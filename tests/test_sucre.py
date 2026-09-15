@@ -34,7 +34,11 @@ from sucre_analyzer import (
     merge_analysis,
     recover_verbatim,
 )
-from sucre_pipeline import build_sample_xlsx, process_sucre_dossier
+from sucre_pipeline import (
+    build_sample_xlsx,
+    process_sucre_dossier,
+    sucre_output_columns_for_export,
+)
 
 
 LUCY_BODY = (
@@ -415,6 +419,33 @@ class LlmMergeTests(unittest.TestCase):
         out = enforce_people_only(raw, "Nota", "La Presidencia de la República mencionó a Sucre.")
         self.assertEqual(out[COL_PROPIOS], "")
         self.assertEqual(out[COL_EXTERNOS], "")
+
+
+class SucreExportColumnOrderTests(unittest.TestCase):
+    def test_without_ai_keeps_base_then_actor_columns(self):
+        cols = sucre_output_columns_for_export(include_ai=False)
+        self.assertEqual(cols, list(BASE_OUTPUT_COLUMNS) + list(SUCRE_OUTPUT_COLUMNS))
+        self.assertNotIn("Tono_IA", cols)
+        self.assertNotIn("Contexto analizado", cols)
+        self.assertNotIn("revalorización", cols)
+        self.assertNotIn("resumen corto", cols)
+
+    def test_with_ai_inserts_tono_tema_subtema_after_audiencia_actors_then_contexto(self):
+        cols = sucre_output_columns_for_export(include_ai=True)
+        expected = [
+            "ID Noticia", "Fecha", "Hora", "Medio", "Tipo de Medio",
+            "Sección - Programa", "Región", "Título", "Autor - Conductor",
+            "Nro. Pagina", "Dimensión", "Duración - Nro. Caracteres",
+            "CPE", "Tier", "Audiencia",
+            "Tono_IA", "Tema_IA", "Subtema_IA",
+            "Link Nota", "Resumen - Aclaracion", "Link (Streaming - Imagen)", "Menciones - Empresa",
+            "ID duplicada",
+        ] + list(SUCRE_OUTPUT_COLUMNS) + ["Contexto analizado"]
+        self.assertEqual(cols, expected)
+        audiencia_idx = cols.index("Audiencia")
+        self.assertEqual(cols[audiencia_idx + 1:audiencia_idx + 4], ["Tono_IA", "Tema_IA", "Subtema_IA"])
+        self.assertEqual(cols[-5:-1], list(SUCRE_OUTPUT_COLUMNS))
+        self.assertEqual(cols[-1], "Contexto analizado")
 
 
 class PipelineXlsxTests(unittest.TestCase):

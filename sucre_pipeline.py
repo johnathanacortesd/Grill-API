@@ -39,6 +39,18 @@ logger = logging.getLogger("sucre_pipeline")
 ProgressCb = Optional[Callable[[int, str], None]]
 
 
+def sucre_output_columns_for_export(include_ai: bool = False) -> List[str]:
+    """Grill export order + columnas de actores Sucre; Contexto analizado al final."""
+    cols = output_columns_for_export(include_ai=include_ai)
+    for col in SUCRE_ACTOR_COLUMNS:
+        if col not in cols:
+            cols.append(col)
+    if CONTEXTO_ANALIZADO_COL in cols:
+        cols = [c for c in cols if c != CONTEXTO_ANALIZADO_COL]
+        cols.append(CONTEXTO_ANALIZADO_COL)
+    return cols
+
+
 class SucreInputError(ValueError):
     """El xlsx no trajo filas utilizables."""
 
@@ -155,16 +167,7 @@ def process_sucre_dossier(
         progress_callback=progress,
     )
 
-    cols_to_export = output_columns_for_export(include_ai=has_ai or has_pkl)
-
-    for col in SUCRE_ACTOR_COLUMNS:
-        if col not in cols_to_export:
-            cols_to_export.append(col)
-
-    # Sucre appends actor columns after the Grill list; Contexto stays last.
-    if CONTEXTO_ANALIZADO_COL in cols_to_export:
-        cols_to_export = [c for c in cols_to_export if c != CONTEXTO_ANALIZADO_COL]
-        cols_to_export.append(CONTEXTO_ANALIZADO_COL)
+    cols_to_export = sucre_output_columns_for_export(include_ai=has_ai or has_pkl)
 
     emit_progress(progress, 94, "✓ Estructuración finalizada. Generando archivo Excel…")
 
