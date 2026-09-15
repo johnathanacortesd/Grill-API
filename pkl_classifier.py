@@ -199,8 +199,7 @@ def fill_classification_context(
         titulo_val = row.get(titulo_key) or row.get("Título") or ""
         if brand_regexes:
             row["Contexto analizado"] = extract_brand_context(
-                str(resumen_val), str(titulo_val), brand_regexes,
-                brand=brand, aliases=aliases,
+                str(resumen_val), str(titulo_val), brand_regexes
             )
         else:
             row["Contexto analizado"] = _title_resumen_text(titulo_val, resumen_val)
@@ -244,7 +243,15 @@ def apply_pkl_classifiers(
 
     if unify_similar:
         regexes = generate_brand_variants(brand, list(aliases or [])) if brand else []
-        cluster_map = cluster_similar_rows(rows, km, regexes)
+        cluster_map = cluster_similar_rows(
+            rows,
+            km,
+            regexes,
+            brand=brand,
+            aliases=list(aliases or []),
+            progress_callback=progress_callback,
+            progress_pct=88,
+        )
     else:
         cluster_map = {i: i for i in active}
 

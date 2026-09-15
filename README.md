@@ -44,7 +44,7 @@ El pipeline crea un identificador `Grupo noticia` para republicaciones y noticia
 
 Los subtemas se limpian y limitan a un máximo de seis palabras, como frases nominales completas, sin collages de keywords, verbos conjugados ni etiquetas genéricas. Las filas marcadas como duplicadas conservan su relación mediante `ID duplicada`; las filas equivalentes no eliminadas conservan toda su clasificación y el nuevo `Grupo noticia`.
 
-`Marca principal` es el eje obligatorio del análisis. El motor busca el nombre completo, sus alias y coincidencias distintivas relacionadas en `Título` y `Resumen - Aclaración`. El tono es **aspectual** (SPEC_TONO_TEMA.md): mide el impacto reputacional sobre esa marca, alias o voceros, no el sentimiento del artículo entero. Título y cuerpo se parten por oración por separado; sin mención el tono es Neutro y no se pide tono al LLM. El tema y el subtema describen el hecho relacionado con ella. Sin PKL, el tema sale de una lista cerrada de 21 cubos (nunca «Otros»). Una etiqueta que sea solamente el nombre de la marca, una versión incompleta del nombre o una frase genérica se rechaza y se regenera.
+`Marca principal` es el eje obligatorio del análisis. El motor busca el nombre completo, sus alias y coincidencias distintivas relacionadas en `Título` y `Resumen - Aclaración`. El tono mide exclusivamente el impacto reputacional sobre esa marca; el tema y el subtema describen el hecho relacionado con ella. Una etiqueta que sea solamente el nombre de la marca, una versión incompleta del nombre o una frase genérica se rechaza y se regenera.
 
 Las validaciones no contienen nombres ni reglas especiales para clientes concretos. El mecanismo es reutilizable: separa los tokens de cualquier `Marca principal`, identifica el tipo de acontecimiento y conserva las palabras que describen su objeto. Por ejemplo, puede formar etiquetas como `Lanzamiento de carrera deportiva`, `Convenio de formación profesional` o `Investigación por fallas operativas`, según el contenido de cada noticia.
 
@@ -125,27 +125,14 @@ pip install -r requirements.txt
 
 ### 3. Configuración de Secretos
 
-Cree `.streamlit/secrets.toml` a partir del ejemplo del repositorio. **No haga commit de valores reales.**
+Cree la carpeta `.streamlit` y el archivo `secrets.toml` dentro de la raíz del proyecto para definir la contraseña de acceso local:
 
 ```bash
 mkdir -p .streamlit
-cp secrets.toml.example .streamlit/secrets.toml
+cat <<EOF > .streamlit/secrets.toml
+password = "tu_contrasena_local"
+EOF
 ```
-
-Claves usadas por la app:
-
-| Clave | Uso |
-| --- | --- |
-| `APP_PASSWORD` | Contraseña de acceso a la interfaz |
-| `OPENAI_API_KEY` | Análisis de tono/tema/subtema con IA |
-| `REGIONES_CSV_URL` | CSV de mapeo de regiones (Google Sheets) |
-| `INTERNET_CSV_URL` | CSV de mapeo de medios internet |
-| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` | SMTP opcional (Gmail, puerto 587 + STARTTLS) |
-| `USAGE_NOTIFY_EMAIL` | Destinatario de la notificación de uso |
-
-Tras cada limpieza/análisis **exitoso**, si todas las claves `SMTP_*` y `USAGE_NOTIFY_EMAIL` están definidas, se envía un correo con marca/cliente, filas (total/únicos/duplicados), duración y nombre del archivo de salida. Si falta cualquiera, no se envía nada (el pipeline no se interrumpe). Un fallo de SMTP se registra en logs y no llega a la UI.
-
-En Gmail, `SMTP_PASSWORD` debe ser una **contraseña de aplicación**, no la contraseña de la cuenta.
 
 ### 4. Ejecutar la aplicación
 
@@ -173,7 +160,11 @@ Para desplegar esta aplicación en **Streamlit Community Cloud**:
 
 1. Vincule el repositorio `johnathanacortesd/Grill-API`.
 2. Configure el archivo de inicio como `app.py`.
-3. En **Advanced Settings → Secrets**, pegue las claves de `secrets.toml.example` (con valores reales solo en Cloud, nunca en git): `APP_PASSWORD`, `OPENAI_API_KEY`, `REGIONES_CSV_URL`, `INTERNET_CSV_URL`. Para el correo opcional de uso, agregue también `SMTP_*` y `USAGE_NOTIFY_EMAIL` (Gmail App Password en `SMTP_PASSWORD`).
+3. En la sección **Advanced Settings -> Secrets**, agregue la variable de entorno correspondiente a la contraseña:
+
+```toml
+password = "tu_contrasena_de_produccion"
+```
 
 ---
 

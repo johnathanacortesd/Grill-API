@@ -1,148 +1,115 @@
-# SPEC_TONO_TEMA — Tono aspectual, tema (cubos) y subtema
+# SPEC — Motor de Tono, Tema y Sub-tema en API-3-Grill
 
-Versión 1.0 · Grill-API (`ai_analyzer.py`)
-
-Este documento es la fuente de verdad para clasificar **tono**, **tema** y **subtema**. El tono mide el impacto reputacional **sobre la marca, sus alias y voceros**. No es el sentimiento del artículo entero.
+Este archivo es el contrato del repo. Cualquier persona o agente que toque el análisis debe leerlo
+**antes** de editar. Si algo no está aquí, se pregunta; no se infiere.
 
 ---
 
-## 1. Principio aspectual del tono
+## 1. Objetivo
 
-El tono es **aspectual**: se decide solo con oraciones que nombran a la marca, un alias o un vocero (rector, director, vocero, etc.).
+Reemplazar **solo** el análisis de Tono, Tema y Sub-tema por el motor de `analyzer_tono_tema.py`,
+usando OpenAI `gpt-4.1-nano-2025-04-14` con la key de `st.secrets["OPENAI_API_KEY"]`.
+La limpieza, la normalización, la expansión de menciones, la deduplicación y el formato de salida
+quedan **iguales**: son las mismas de Grill-API.
 
-| Situación | Tono |
+## 2. Mapa del repo
+
+| Archivo | Rol |
 |---|---|
-| No hay mención de marca/alias/vocero | **Neutro**; no se pide tono al LLM |
-| Crítica, queja, denuncia o sanción **dirigida** a la marca | **Negativo** |
-| La marca es **sujeto** de un verbo de aporte (dona, respalda, inaugura, lanza, acompaña, …) | **Positivo** (solo se sube Neutro→Positivo; ver §2) |
-| Tragedia, sismo o accidente **sin** crítica dirigida | **Neutro** |
-| La marca aparece solo como sede, campus o ubicación | **Neutro** |
-| Autoría / egresados (regla de byline) | **Neutro**, tema Estudiantes, subtema `Redacción de artículo` |
+| `app.py` | Interfaz Streamlit. Tema claro/oscuro, `APP_PASSWORD`, panel de progreso, descarga. |
+| `pipeline.py` | **Limpieza y estructuración (NO TOCAR)** + el hook al motor (`process_dossier`). |
+| `analyzer_tono_tema.py` | **Motor nuevo** de Tono/Tema/Sub-tema. |
+| `catalogo_tono_tema.py` | **Rúbrica del motor**: `CRITERIOS_TONO`, `TONOS`, `REGLAS_SUBTEMA`, `EJEMPLOS`, `CUBO_PROHIBIDO`, `MIN_PAL`/`MAX_PAL`, taxonomías fijas. Fuente de verdad del criterio. |
+| `ai_analyzer.py` | Legado. Solo se usan `extract_brand_context`, `generate_brand_variants`, `ensure_subtema_distinct_from_tema`. Su `enrich_rows_with_ai` ya **no se ejecuta**. |
+| `pkl_classifier.py` | Clasificadores PKL del cliente (opcionales) que sobreescriben tono y/o tema. |
+| `tests/` | 45 pruebas sin API (modelo simulado). |
 
-El LLM **no** debe contagiar el tono con el clima del titular ni con hechos de otras entidades.
+**Punto de contacto único:** `pipeline.process_dossier` llama
+`analyzer_tono_tema.enrich_rows_with_ai(...)` con `extra=ai_config`, y el resumen de auditoría sale
+por `analyzer_tono_tema.ultimo_resumen()` en `resultado["analisis"]`.
 
----
+## 3. Invariantes (no negociables)
 
-## 2. Evidencia de marca vs contexto de hecho
+- Las 4 columnas de análisis —`Contexto analizado`, `Tono_IA`, `Tema_IA`, `Subtema_IA`— se insertan
+  **después de `revalorización` y antes de `resumen corto`** (`BASE_OUTPUT_COLUMNS`).
+- Las filas duplicadas conservan `Tono_IA = "Duplicada"` y `Tema_IA = Subtema_IA = "-"`.
+- Firma de `enrich_rows_with_ai` y de `process_dossier`: no cambian (los llamadores no se tocan).
+- El motor **no** debe depender del paquete `openai` para arrancar: hace HTTP con `requests`.
+- Sin refactors, sin renombres, sin archivos nuevos fuera de esta lista.
 
-### 2.1 Partición por campo
+## 4. Las cinco piezas del motor (quitar una = volver al prompt suelto)
 
-Título y cuerpo se parten **por oración por separado**. Está prohibido concatenar título+cuerpo **antes** de buscar la marca (esa concatenación era la hipótesis de contagio).
+1. **Agrupación previa** — `construir_grupos`: se etiqueta por grupo de notas equivalentes, nunca
+   fila por fila (rapidfuzz sobre titulares + 5-gramas del cuerpo).
+2. **Sub-tema primero, después el tono** — `prompt_lote` + `etiquar_grupos`; los sub-temas ya usados
+   viajan en cada lote como **CANDIDATOS** y `canonizar_subtemas` unifica variantes.
+3. **Validador duro + reparación** — `validar` (3-7 palabras, sin verbo conjugado inicial, sin
+   preposición final, sin rótulos vacíos, sin `:` `;` `|`) y `prompt_reparacion` en ciclo contra el
+   propio modelo.
+4. **Tema por reglas sobre lista cerrada** — `derivar_reglas` + `asignar_temas`; el modelo solo elige
+   dentro de la lista o propone un cubo nuevo específico (`prompt_cubos`).
+5. **Nunca "Otros"** — `CUBO_PROHIBIDO`, `cubo_valido`, `_cubo_mas_cercano`.
 
-1. Limpiar cada campo (sin URLs).
-2. Partir en unidades (`.`, `!`, `?`, salto de línea, `|`).
-3. **Enmascarar** otras entidades institucionales parecidas (`Universidad X`, `Clínica Y`, …) que **no** sean la marca.
-4. Conservar solo unidades que, ya enmascaradas, nombran marca, alias o vocero.
-5. Unir esas unidades: ese texto es `Contexto analizado` (evidencia de marca).
-6. Si no queda ninguna unidad → evidencia vacía → tono Neutro y se omite el BLOQUE A.
+Estabilizadores porque el modelo es pequeño (sesgo sistemático, no ruido):
 
-El **subtema** describe el hecho específico. El **tema** (sin PKL) se asigna con la lista cerrada de cubos y reglas léxicas sobre el subtema; el título solo entra si tiene **≤ 160 caracteres**.
+- **Votación de tono** — `_voto_mayoria` (N veces por grupo, empate → Neutro).
+- **Guarda determinista** — `aplicar_guarda_tono`: sin señalamiento **dirigido** (el blanco a ≤35
+  caracteres del verbo de crítica) no hay Negativo. El tema trágico no hace negativo al cliente.
 
-### 2.2 Alias
+## 5. Modelo y credenciales
 
-En todos los sitios de parseo los alias se parten con:
+- `model` = `gpt-4.1-nano-2025-04-14` (`MODELO_DEFECTO`), `base_url` = `https://api.openai.com/v1`.
+- **Key**: `st.secrets["OPENAI_API_KEY"]` (Streamlit Cloud → Settings → Secrets; local:
+  `.streamlit/secrets.toml`).
+- Secrets necesarios: `APP_PASSWORD`, `REGIONES_CSV_URL`, `INTERNET_CSV_URL`, `OPENAI_API_KEY`.
+- Si falta `OPENAI_API_KEY` y la IA está activada, la app **avisa**; no cae en silencio a heurística.
+- Criterio de tono y lista de Temas se eligen en la interfaz (`criterio`, `taxonomia`); la lista de
+  Temas se puede generar del archivo y **descargar en JSON** para reutilizarla el mes siguiente del
+  mismo cliente (si cambia, el cruce en Power BI se rompe).
 
-```python
-re.split(r'[,;\n]', ...)
+## 6. Criterios de aceptación
+
+```bash
+python -m unittest discover -s tests          # 45 pruebas, todas OK, sin API
+python -m compileall -q app.py pipeline.py analyzer_tono_tema.py catalogo_tono_tema.py
 ```
 
----
+Además, tras CUALQUIER edición de bloques portados de otra app:
 
-## 3. Guardas deterministas posteriores al LLM (§2 operativo)
+- **Símbolos globales indefinidos** (`py_compile` NO los detecta): recorrer `symtable.symtable(...)`
+  y listar los globales referenciados que no sean definición, import ni builtin.
+- **Definiciones de nivel superior** contra la versión anterior
+  (`git show HEAD:<archivo>`): que no haya desaparecido ninguna (reescribir `main()` de punta a punta
+  borra funciones que quedaban debajo y el archivo igual compila).
+- Arranque real: `streamlit run app.py` y comprobar que la página responde sin traceback.
 
-Se aplican **después** de la respuesta del modelo, sobre la evidencia de marca:
+## 7. Prohibiciones
 
-1. **Sin mención** → Neutro.
-2. **Byline / egresados** (antes del LLM): Neutro + Estudiantes + `Redacción de artículo`.
-3. **Negativo trágico corto**: si el tono LLM es Negativo, el snippet tiene **≤ 35 caracteres**, hay marca de tragedia y **no** hay crítica dirigida → Neutro.
-4. **Sede/ubicación**: mención locativa sin agencia ni crítica → Neutro.
-5. **Verbos de aporte**: si el tono quedó Neutro y la marca es sujeto de un verbo de contribución → **Positivo** (Neutro→Positivo únicamente).
-6. **Override institucional útil** (`check_positive_institutional_override`): acompañamiento, respaldo, felicitación, alianza explícitos → Positivo.
+- No tocar la limpieza, la deduplicación ni el orden de columnas del export.
+- No entregar cubos genéricos ni "Otros".
+- No agregar dependencias (el motor necesita `requests` y `numpy`; ya están declaradas).
+- No declarar éxito sin pegar el output real de los comandos de la sección 6.
 
-Con PKL de tono, la etiqueta del modelo del cliente **sigue ganando** después de estas guardas. Con PKL de tema, el cubo del cliente **no se sustituye**.
+## 8. Definición de hecho
 
----
+XLSX de salida con la estructura de Grill-API intacta, las 4 columnas de análisis en su posición,
+etiquetas uniformes por grupo y el output literal de la sección 6.
 
-## 4. Dual prompt (`_call_openai_cluster`)
+## 9. Convivencia de motores (importante)
 
-El system prompt refuerza: tono aspectual; **BLOQUE A** decide solo el tono; **BLOQUE B** decide solo el subtema; no mezclar evidencia.
+Este repo tiene **dos motores de análisis**, y el port solo cambia el de Grill:
 
-- **BLOQUE A — TONO**: únicamente evidencia de marca. Se omite si no hay mención (`request_tone` efectivo = false).
-- **BLOQUE B — SUBTEMA**: hecho específico, 3 a 7 palabras, frase nominal. No es el cubo ni el tono.
-
-Si se pide tema (no hay PKL de tema), el cubo debe salir de la lista cerrada. **PROHIBIDO "Otros"**.
-
----
-
-## 5. Subtema
-
-- Validador duro: **3 a 7 palabras**.
-- Se reutilizan `clean_subtema` (recorte, stopwords finales, veto de “Mención de…”) y `canonicalize_subtopics` (unificación entre clústers).
-- Si el LLM entrega menos de 3 o más de 7 palabras, `validate_or_repair_subtema` repara con título/contexto.
-- El subtema no puede ser solo el nombre de la marca.
-
----
-
-## 6. Tema — 21 cubos por defecto (sin PKL)
-
-Lista cerrada. Nunca se emite `Otros`, `Otro`, `General`, `Varios`, `Sin clasificar` ni `Actualidad`. Si el LLM propone un cubo válido, se conserva; si no, reglas léxicas sobre el subtema (y el título solo si ≤ 160 caracteres). Por defecto: **Gestión Institucional**.
-
-Con PKL de tema se mantiene el override actual del cliente.
-
-### Cubos (21)
-
-1. Educación Superior
-2. Estudiantes
-3. Sector Salud
-4. Gestión Institucional
-5. Gestión Tributaria
-6. Hitos y Aniversarios
-7. Gestión de Emergencias
-8. Infraestructura
-9. Seguridad Ciudadana
-10. Relaciones Gremiales
-11. Investigación y Ciencia
-12. Cultura y Deporte
-13. Medio Ambiente
-14. Economía y Empresa
-15. Gobierno y Política
-16. Responsabilidad Social
-17. Tecnología e Innovación
-18. Laboral y Empleo
-19. Legal y Regulatorio
-20. Comunidad y Territorio
-21. Comunicaciones y Medios
-
----
-
-## 7. Invariantes de pipeline (no romper)
-
-Se conservan:
-
-- `cluster_similar_rows` / agrupación por hecho
-- `canonicalize_subtopics`
-- ruta PKL (`classification_plan`, override de tono/tema, subtema nunca por PKL)
-- regla de byline / egresados
-- `enrich_rows_with_ai`
-- APIs de `pipeline.py` y `app.py`
-
----
-
-## 8. Casos dorados
-
-Ver `tests/casos_dorados.json`. Resumen:
-
-| ID | Esperado | Por qué |
+| Camino | Motor | Agrupador |
 |---|---|---|
-| `positivo_brand_actor` | Positivo | La marca es sujeto de aporte; la tragedia ajena no contagia |
-| `negativo_directed_criticism` | Negativo | Queja/denuncia dirigida a la marca |
-| `neutro_tragedy` | Neutro | Tragedia corta (≤35) sin crítica dirigida |
-| `neutro_no_mention` | Neutro | Cero oraciones con marca; evidencia vacía |
-| `neutro_sede_only` | Neutro | Solo ubicación/sede |
-| `byline` | Neutro + Estudiantes + Redacción de artículo | Autoría / egresado |
+| `app.py` → `pipeline.process_dossier` | `analyzer_tono_tema.py` (nuevo) | `analyzer_tono_tema.construir_grupos` |
+| `app_sucre.py` → `sucre_pipeline.process_sucre_dossier` | `ai_analyzer.enrich_rows_with_ai` (legado) | `ai_analyzer.cluster_similar_rows` |
+| Modelos PKL del cliente | tono/tema por PKL, subtema intacto | `pkl_classifier` (+ `ai_analyzer`) |
 
----
+`ai_analyzer.py` **no se toca**: sigue alimentando `Contexto analizado`, la variante Sucre y el
+camino PKL. Si algún día se unifica el motor, hay que migrar Sucre en el mismo cambio; no antes.
 
-## 9. Hipótesis verificada
+## 10. Estado conocido de las pruebas
 
-El fallback histórico de `extract_brand_context` (concatenar título+cuerpo cuando no había match, y un prompt mixto de tono+hecho) **contagiaba** el tono con el sentimiento del artículo. Esta spec elimina ese fallback y separa los bloques del prompt.
+`python -m unittest discover -s tests` en `main` ya traía **2 fallos** en
+`tests/test_link_export_style.py` (estilo de `Link Nota` / `Streaming`). No provienen de este motor:
+existen igual en `main` y se mantienen idénticos. Todo lo demás (125 pruebas) pasa.

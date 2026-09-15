@@ -1,3 +1,7 @@
-.streamlit/secrets.toml
 __pycache__/
-*.py[cod]
+*.pyc
+.streamlit/secrets.toml
+*.xlsx
+*.pkl
+temas_*.json
+.DS_Store
