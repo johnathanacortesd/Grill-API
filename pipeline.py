@@ -40,16 +40,27 @@ TIPO_MEDIO_MAP = {
     "revista": "Revistas", "revistas": "Revistas",
 }
 
-# Columnas base (sin las 11 manuales obsoletas)
+# Columnas base (sin las 11 manuales obsoletas).
+# No exportar `revalorización` ni `resumen corto`; este último sí puede leerse
+# como fallback de entrada si el dossier fuente lo trae.
 BASE_OUTPUT_COLUMNS = [
     "ID Noticia", "Fecha", "Hora", "Medio", "Tipo de Medio",
     "Sección - Programa", "Región", "Título", "Autor - Conductor",
     "Nro. Pagina", "Dimensión", "Duración - Nro. Caracteres",
     "CPE", "Tier", "Audiencia",
-    "revalorización", "resumen corto",
     "Link Nota", "Resumen - Aclaracion", "Link (Streaming - Imagen)", "Menciones - Empresa",
     "ID duplicada",
 ]
+AI_OUTPUT_COLUMNS = ["Tono_IA", "Tema_IA", "Subtema_IA", "Contexto analizado"]
+
+
+def output_columns_for_export(include_ai: bool = False) -> List[str]:
+    """Columnas del xlsx de salida. Con IA/PKL: Tono/Tema/Subtema y Contexto analizado al final."""
+    cols = list(BASE_OUTPUT_COLUMNS)
+    if include_ai:
+        cols.extend(c for c in AI_OUTPUT_COLUMNS if c not in cols)
+    return cols
+
 
 KEY_MAP = {
     "idnoticia": "ID Noticia",
@@ -77,7 +88,7 @@ KEY_MAP = {
 }
 
 THOUSANDS_COLS = {"Nro. Pagina", "Dimensión", "Duración - Nro. Caracteres", "Tier", "Audiencia"}
-CURRENCY_COLS = {"CPE", "revalorización"}
+CURRENCY_COLS = {"CPE"}
 NUMERIC_COLS = {"ID Noticia", "ID duplicada"} | THOUSANDS_COLS | CURRENCY_COLS
 # Display "Link" as black, non-underlined text while keeping the hyperlink.
 PLAIN_HYPERLINK_COLUMNS = frozenset({"Link Nota", "Link (Streaming - Imagen)"})
@@ -260,6 +271,13 @@ def clean_title_for_output(title):
     return re.sub(r"\s+", " ", str(title)).strip()
 
 
+def terminar_en_punto(text):
+    """Deja el texto con un solo punto final (nunca elipsis '...')."""
+    if not isinstance(text, str) or not text.strip():
+        return text
+    return text.rstrip(".") + "."
+
+
 def corregir_texto(text):
     if not isinstance(text, str) or text.strip() in ("", "nan", "None"):
         return ""
@@ -267,8 +285,8 @@ def corregir_texto(text):
     m = re.search(r"[A-ZÁÉÍÓÚÑ]", text)
     if m:
         text = text[m.start():]
-    if text and not text.endswith("..."):
-        text = text.rstrip(".") + "..."
+    if text:
+        text = terminar_en_punto(text)
     return text
 
 
@@ -530,6 +548,8 @@ def normalize_dossier_dataframe(df, region_map, internet_map, progress: Progress
         cuerpo_series = get_column_robust(df, "Resumen")
     if cuerpo_series.dropna().empty:
         cuerpo_series = get_column_robust(df, "Cuerpo")
+    if cuerpo_series.dropna().empty:
+        cuerpo_series = get_column_robust(df, "resumen corto")
 
     raw_resumen_orig = cuerpo_series
 
@@ -569,12 +589,9 @@ def normalize_dossier_dataframe(df, region_map, internet_map, progress: Progress
     valor_nota_input = get_column_robust(df, "Valor de Nota")
 
     df["CPE"] = np.where(is_av, cpe_input, np.where(is_grafica, valor_nota_input, np.nan))
-    df["revalorización"] = np.where(is_grafica, cpe_input, np.nan)
 
     df["Tier"] = df.get("Tier", pd.Series(dtype=str))
     df["Audiencia"] = df.get("Audiencia", pd.Series(dtype=str))
-
-    df["resumen corto"] = raw_resumen_orig.fillna("").astype(str).str.strip()
 
     emit_progress(progress, 48, "Limpiando cuerpos y enlaces…")
 
@@ -584,7 +601,8 @@ def normalize_dossier_dataframe(df, region_map, internet_map, progress: Progress
         if not isinstance(text, str) or not text.strip():
             return text
         parrafos = [p.strip() for p in text.split("\n") if p.strip()]
-        return "\n\n".join(parrafos) if len(parrafos) > 1 else text
+        joined = "\n\n".join(parrafos) if len(parrafos) > 1 else text
+        return terminar_en_punto(joined)
 
     df["Resumen - Aclaracion"] = cuerpo_cleaned
     grafica_mask = is_grafica.fillna(False)
@@ -680,7 +698,7 @@ def generate_output_excel(rows, km, progress: ProgressCb = None, columns_to_use:
     fmt_plain_id = wb.add_format({"num_format": "0"})
 
     for i, col_name in enumerate(cols):
-        if col_name in ["Título", "Resumen - Aclaracion", "resumen corto", "Contexto analizado"]:
+        if col_name in ["Título", "Resumen - Aclaracion", "Contexto analizado"]:
             ws.set_column(i, i, 55)
         elif col_name in ["Link Nota", "Link (Streaming - Imagen)"]:
             ws.set_column(i, i, 15)
@@ -848,8 +866,6 @@ def process_dossier(
     emit_progress(progress, 62, "Detectando duplicados…")
     rows = detectar_duplicados_avanzado(rows_expanded, KEY_MAP)
 
-    # Orden de columnas: Ubicar Contexto analizado, Tono_IA, Tema_IA, Subtema_IA
-    # DESPUÉS de 'revalorización' y ANTES de 'resumen corto'
     has_ai = bool(ai_config and ai_config.get("enabled"))
     tone_model, theme_model = _load_optional_pkl_models(ai_config)
     has_pkl = tone_model is not None or theme_model is not None
@@ -889,12 +905,7 @@ def process_dossier(
             aliases=(ai_config or {}).get("aliases", []),
         )
 
-    if has_ai or has_pkl:
-        rev_idx = BASE_OUTPUT_COLUMNS.index("revalorización")
-        ai_cols = ["Contexto analizado", "Tono_IA", "Tema_IA", "Subtema_IA"]
-        cols_to_export = BASE_OUTPUT_COLUMNS[:rev_idx + 1] + ai_cols + BASE_OUTPUT_COLUMNS[rev_idx + 1:]
-    else:
-        cols_to_export = list(BASE_OUTPUT_COLUMNS)
+    cols_to_export = output_columns_for_export(include_ai=has_ai or has_pkl)
 
     emit_progress(progress, 94, "✓ Estructuración finalizada. Generando archivo Excel…")
 

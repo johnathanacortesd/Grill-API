@@ -279,6 +279,9 @@ class PipelineNoPklVsPklTests(unittest.TestCase):
         self.assertNotIn("Subtema_IA", df.columns)
         for col in BASE_OUTPUT_COLUMNS:
             self.assertIn(col, df.columns)
+        self.assertNotIn("revalorización", df.columns)
+        self.assertNotIn("resumen corto", df.columns)
+        self.assertNotIn("Contexto analizado", df.columns)
 
     def test_tono_only_pipeline_exports_tone_not_llm_theme(self):
         result = process_dossier(
@@ -297,6 +300,9 @@ class PipelineNoPklVsPklTests(unittest.TestCase):
         self.assertIn("Tono_IA", df.columns)
         self.assertIn("Tema_IA", df.columns)
         self.assertIn("Subtema_IA", df.columns)
+        self.assertEqual(list(df.columns)[-4:], ["Tono_IA", "Tema_IA", "Subtema_IA", "Contexto analizado"])
+        self.assertNotIn("revalorización", df.columns)
+        self.assertNotIn("resumen corto", df.columns)
         unique = df[df["Tono_IA"] != "Duplicada"]
         self.assertTrue(set(unique["Tono_IA"]).issubset({"Positivo", "Negativo", "Neutro"}))
         self.assertTrue((unique["Tema_IA"] == "-").all())

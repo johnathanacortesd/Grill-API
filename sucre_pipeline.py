@@ -13,7 +13,6 @@ import pandas as pd
 from unidecode import unidecode
 
 from pipeline import (
-    BASE_OUTPUT_COLUMNS,
     KEY_MAP,
     _load_optional_pkl_models,
     detectar_duplicados_avanzado,
@@ -23,6 +22,7 @@ from pipeline import (
     generate_output_excel,
     load_dossier_dataframe,
     normalize_dossier_dataframe,
+    output_columns_for_export,
 )
 from sucre_analyzer import (
     BRAND,
@@ -154,12 +154,7 @@ def process_sucre_dossier(
         progress_callback=progress,
     )
 
-    if has_ai or has_pkl:
-        rev_idx = BASE_OUTPUT_COLUMNS.index("revalorización")
-        ai_cols = ["Contexto analizado", "Tono_IA", "Tema_IA", "Subtema_IA"]
-        cols_to_export = BASE_OUTPUT_COLUMNS[:rev_idx + 1] + ai_cols + BASE_OUTPUT_COLUMNS[rev_idx + 1:]
-    else:
-        cols_to_export = list(BASE_OUTPUT_COLUMNS)
+    cols_to_export = output_columns_for_export(include_ai=has_ai or has_pkl)
 
     for col in SUCRE_ACTOR_COLUMNS:
         if col not in cols_to_export:
