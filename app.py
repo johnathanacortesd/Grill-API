@@ -55,6 +55,9 @@ def load_custom_css():
 """ + theme_vars + dark_extra + """
 html,body,[data-testid="stApp"]{
     background:var(--bg)!important;color:var(--text)!important;
+    color-scheme:light;
+    --text-color:var(--text);--background-color:var(--bg);
+    --secondary-background-color:var(--s1);--primary-color:var(--accent);
     font-family:'Google Sans Text','Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
     font-size:14px;-webkit-font-smoothing:antialiased;letter-spacing:0.01em;
 }
@@ -152,7 +155,41 @@ div[data-testid="stAlert"]{border-radius:var(--r2)!important}
 [data-testid="stCheckbox"] p,[data-testid="stToggle"] p{color:var(--text-label)!important}
 [role="radiogroup"] label p,[data-testid="stRadio"] label p{color:var(--text-label)!important;font-size:0.85rem!important;}
 [data-baseweb="select"]>div,[data-baseweb="input"]{background:var(--s1)!important;color:var(--text)!important}
-.stMarkdown,.stCaption{color:var(--text2)}
+.stMarkdown,.stCaption,[data-testid="stMarkdownContainer"],[data-testid="stCaptionContainer"]{color:var(--text2)!important}
+.stMarkdown p,.stCaption p,[data-testid="stMarkdownContainer"] p,[data-testid="stCaptionContainer"] p{color:inherit!important}
+[data-testid="stMarkdownContainer"] code,.stMarkdown code,code{background:var(--s2)!important;color:var(--text)!important}
+[data-testid="stExpander"],[data-testid="stExpander"] details,[data-testid="stExpander"] summary,
+[data-testid="stExpanderDetails"],.streamlit-expanderHeader,.streamlit-expanderContent{
+    background:var(--s1)!important;color:var(--text)!important;border-color:var(--border)!important;
+}
+[data-testid="stExpander"] summary p,[data-testid="stExpander"] summary span,
+[data-testid="stExpander"] [data-testid="stMarkdownContainer"],
+[data-testid="stExpander"] [data-testid="stMarkdownContainer"] p,
+[data-testid="stExpander"] .stMarkdown,[data-testid="stExpander"] .stCaption,
+.streamlit-expanderHeader p,.streamlit-expanderHeader span{
+    color:var(--text)!important;
+}
+[data-testid="stExpander"] svg,[data-testid="stExpanderToggleIcon"] svg{fill:var(--text)!important;color:var(--text)!important}
+div[data-testid="stAlert"],[data-testid="stNotification"],[data-baseweb="notification"]{
+    color:var(--text)!important;background:var(--s1)!important;border-color:var(--border)!important;
+}
+[data-testid="stAlertContentInfo"],[data-testid="stNotificationContentInfo"]{
+    background:#e8f0fe!important;color:#174ea6!important;
+}
+[data-testid="stAlertContentSuccess"],[data-testid="stNotificationContentSuccess"]{
+    background:var(--green-bg)!important;color:var(--green2)!important;
+}
+[data-testid="stAlertContentWarning"],[data-testid="stNotificationContentWarning"]{
+    background:#fff7ed!important;color:#b45309!important;
+}
+[data-testid="stAlertContentError"],[data-testid="stNotificationContentError"]{
+    background:#fef2f2!important;color:#b91c1c!important;
+}
+div[data-testid="stAlert"] [data-testid="stMarkdownContainer"],
+div[data-testid="stAlert"] [data-testid="stMarkdownContainer"] p,
+div[data-testid="stAlert"] p,[data-testid="stNotification"] p{
+    color:inherit!important;
+}
 @media(max-width:768px){
     .metrics-grid{grid-template-columns:repeat(2,1fr)}
     .live-metrics{grid-template-columns:1fr 1fr 1fr}
