@@ -90,58 +90,91 @@ def _texto_hasta_terminal(texto: str, n: int) -> str:
 
 def _contexto_marca(texto: str, titulo: str, brand: str, aliases: Sequence[str],
                     voceros: Optional[Sequence[str]] = None) -> str:
-    """Contexto de la marca para la columna 'Contexto analizado'.
+    """Extrae contexto literal y amplio, sin resumir ni inventar texto.
 
-    Usa el algoritmo por párrafo (no por oración): busca el PRIMER párrafo que
-    menciona la marca, alias o vocero, lo recorta desde el punto final que lo
-    cierra, y si el trozo es corto (<10 palabras) lo extiende hasta un segundo
-    punto final. Cae a titulo+borde del texto si no hay mención clara.
+    Conserva cada párrafo de ``CuerpoEs`` que menciona explícitamente la marca,
+    alias o vocero. Una sola oración suele omitir el verbo que explica la
+    participación (por ejemplo, ``con la colaboración de``) o el objeto del
+    estudio, por eso no se devuelve solo el fragmento posterior a la mención.
     """
-    def _limpiar(s) -> str:
+    def limpiar(s) -> str:
         if not s:
             return ""
-        s = str(s)
-        s = re.sub(r'https?://\S+', '', s)
-        s = re.sub(r'www\.\S+', '', s)
-        s = re.sub(r'^link\s*', '', s, flags=re.I)
-        # conserva los saltos de linea (separan parrafos); normaliza el resto
+        s = ctrl(s)
+        s = re.sub(r'https?://\S+|www\.\S+', '', s)
+        s = re.sub(r'^[ \t]*link[ \t]*', '', s, flags=re.I)
         s = re.sub(r'[ \t]+', ' ', s)
         return s.strip()
 
-    t_clean = _limpiar(titulo)
-    r_clean = _limpiar(texto)
-    rx = _regex_coincidencia(brand, aliases, voceros)
+    cuerpo = limpiar(texto)
+    titulo_limpio = limpiar(titulo)
+    rx = _regex_coincidencia(brand, aliases, voceros or [])
+    if not rx:
+        return titulo_limpio[:6000]
 
-    # separa por párrafos (salto de linea) y dentro de cada uno por oraciones
-    parrafos = [p.strip() for p in re.split(r'\n+', r_clean) if p.strip()]
-    for p in parrafos:
-        if not _mención_normalizada_en(nz(p), rx):
-            continue
-        # localiza la mención en el texto CRUDO para recortar con offset válido
-        pos = _mención_bruta(p, brand, aliases, voceros)
-        if pos is None:
-            continue
-        start = max(0, pos - 200)
-        segmento = p[start:]
-        trozo = _texto_hasta_terminal(segmento, 2)
-        # si el tramo queda corto, amplia hasta el punto que sigue a la marca
-        if len(trozo.split()) < 10 and pos < len(p):
-            trozo = _texto_hasta_terminal(p[pos:], 2) or trozo
-        if trozo and len(trozo.split()) >= 6:
-            return sq(trozo[:700])
+    parrafos = [p.strip() for p in re.split(r'\n+', cuerpo) if p.strip()]
+    relevantes = [p for p in parrafos if _mención_normalizada_en(nz(p), rx)]
+    if relevantes:
+        salida = '\n\n'.join(relevantes)
+        if len(salida) <= 6000:
+            return salida
+        # Si el export pegó todo el artículo en un solo párrafo, conservar las
+        # oraciones con evidencia y sus vecinas inmediatas, literalmente.
+        trozos = []
+        for p in relevantes:
+            oraciones = [x.strip() for x in re.split(r'(?<=[.!?…])\s+', p) if x.strip()]
+            hits = [i for i, o in enumerate(oraciones) if _mención_normalizada_en(nz(o), rx)]
+            indices = sorted({j for i in hits for j in (i - 1, i, i + 1)
+                              if 0 <= j < len(oraciones)})
+            trozos.extend(oraciones[j] for j in indices)
+        return '\n'.join(dict.fromkeys(trozos))[:6000]
 
-    # cae a titulo (si menciona) + borde del cuerpo (primer parrafo no vacio)
-    t_norm = nz(t_clean)
-    if rx and any(re.search(r, t_norm) for r in rx):
-        primer_parrafo = parrafos[0] if parrafos else ''
-        return (t_clean + '. ' + _texto_hasta_terminal(primer_parrafo, 1)).strip()[:700] \
-            if primer_parrafo else t_clean[:700]
+    if _mención_normalizada_en(nz(titulo_limpio), rx):
+        return (titulo_limpio + ('\n\n' + parrafos[0] if parrafos else '')).strip()[:6000]
+    return titulo_limpio[:6000]
 
-    # sin mención: un recorte del titular + primera oración del cuerpo
-    primer_parrafo = parrafos[0] if parrafos else ''
-    base = (t_clean + ' ' + _texto_hasta_terminal(primer_parrafo, 1)) if primer_parrafo else t_clean
-    return sq(base)[:700]
+def _contexto_exacto_marca(texto: str, titulo: str, brand: str,
+                           aliases: Sequence[str], voceros: Sequence[str] = ()) -> str:
+    """Extrae evidencia textual exacta de CuerpoEs, sin resumir ni inventar.
 
+    Prioriza todos los párrafos que contienen la marca, alias o vocero. Si el
+    archivo no conserva saltos de párrafo, devuelve las oraciones que contienen
+    la mención y sus vecinas inmediatas. El resultado conserva literalmente la
+    ortografía, tildes y puntuación del texto fuente.
+    """
+    fuente = str(texto or '')
+    nombres = [str(x).strip() for x in [brand, *(aliases or []), *(voceros or [])]
+               if str(x or '').strip() and len(nz(x)) >= 3]
+    if not fuente or not nombres:
+        return str(titulo or '').strip()[:6000]
+
+    patrones = [re.compile(r'(?<![a-z0-9])' + re.escape(nz(x)) + r'(?![a-z0-9])')
+                for x in nombres]
+
+    def menciona(fragmento: str) -> bool:
+        normal = nz(fragmento)
+        return any(p.search(normal) for p in patrones)
+
+    # CuerpoEs suele separar párrafos con saltos de línea o HTML <br>.
+    parrafos = [p for p in re.split(r'(?:\r?\n|<br\s*/?>)+', fuente,
+                                    flags=re.I) if p.strip()]
+    encontrados = [p.strip() for p in parrafos if menciona(p)]
+    if encontrados:
+        return '\n\n'.join(encontrados)[:6000]
+
+    # Respaldo para cuerpos guardados como un bloque único.
+    partes = [p for p in re.split(r'(?<=[.!?…])\s+', fuente) if p.strip()]
+    ids = [i for i, p in enumerate(partes) if menciona(p)]
+    if ids:
+        seleccion = []
+        for i in ids:
+            for j in (i - 1, i, i + 1):
+                if 0 <= j < len(partes) and partes[j] not in seleccion:
+                    seleccion.append(partes[j])
+        return ' '.join(seleccion)[:6000]
+
+    # No se atribuye tono a la marca si solo aparece en el titular o no aparece.
+    return str(titulo or '').strip()[:6000]
 BASE_URL_DEFECTO = "https://api.openai.com/v1"
 MODELO_DEFECTO = "gpt-4.1-nano-2025-04-14"
 TAM_LOTE_DEFECTO = 10
@@ -205,7 +238,20 @@ sin sobre son su sus tal tambien tan tanto te tiene tienen todo todos tu tus un 
 # 2. Grupo de notas equivalentes (republicaciones y duplicados de contenido)
 # ============================================================================
 def _texto_fila(row: dict, km: dict) -> str:
-    return str(row.get('Resumen - Aclaracion') or row.get('resumen corto') or row.get('Resumen') or '')
+    """Devuelve el texto más completo disponible para juzgar el contexto.
+
+    En los dossiers de Grill el cuerpo suele estar en CuerpoEs y el resumen puede
+    ser un extracto vacío o demasiado corto. Escoger el primer campo disponible
+    hacía que el tono se decidiera por el titular y por el tono general de la
+    nota, no por el párrafo donde aparece la marca.
+    """
+    candidatos = [
+        row.get('CuerpoEs'), row.get('Cuerpo'), row.get('Texto'),
+        row.get('Texto completo'), row.get('Resumen - Aclaracion'),
+        row.get('resumen corto'), row.get('Resumen'),
+        row.get(km.get('resumen', 'Resumen - Aclaracion')),
+    ]
+    return max((str(v) for v in candidatos if v and str(v).strip()), key=len, default='')
 
 
 def _titulo_fila(row: dict, km: dict) -> str:
@@ -229,6 +275,12 @@ def construir_grupos(
     if not idx_validos:
         return [], {}
 
+    # Orden determinista A–Z: facilita inspección, hace estable el representante
+    # del grupo y evita que el orden de llegada cambie la canonización.
+    idx_validos = sorted(
+        idx_validos,
+        key=lambda i: (nz(_titulo_fila(rows[i], km)), i),
+    )
     base = []
     for i in idx_validos:
         tit = _titulo_fila(rows[i], km)
@@ -338,9 +390,13 @@ def construir_grupos(
         reps = Counter(base[k]['titulo'] for k in miembros)
         rep = reps.most_common(1)[0][0] or base[miembros[0]]['texto'][:120]
         cuerpo = max((base[k]['texto'] for k in miembros), key=len)
+        contextos = [str(rows[base[k]['idx']].get('Contexto analizado') or '')
+                     for k in miembros]
+        contexto = '\n\n'.join(dict.fromkeys(x.strip() for x in contextos if x.strip() and x.strip() != '-'))
         alt = [t for t in sorted(set(base[k]['titulo'] for k in miembros)) if t and t != rep][:3]
         grupos.append({'grupo': gid, 'n': len(idxs), 'idxs': idxs, 'titulo': rep,
-                       'titulos_alt': alt, 'texto': cuerpo[:900]})
+                       'titulos_alt': alt, 'texto': cuerpo[:9000],
+                       'contexto': contexto[:9000]})
         for i in idxs:
             mapa[i] = gid
     return grupos, mapa
@@ -420,6 +476,18 @@ def patron(kw: str) -> str:
     return r'(?<![a-z])' + re.escape(nz(kw)) + r'(?![a-z])'
 
 
+GEOGRAFIA_GENERICA = {
+    'colombia', 'colombiano', 'colombiana', 'pais', 'nacional', 'region', 'regional',
+    'barranquilla', 'cartagena', 'bogota', 'medellin', 'cali', 'sincelejo', 'monteria',
+    'valledupar', 'santa marta', 'riohacha', 'soledad', 'atlantico', 'bolivar',
+    'sucre', 'cordoba', 'magdalena', 'cesar', 'guajira', 'antioquia', 'bogotá',
+}
+
+
+def _es_geografia(token: str) -> bool:
+    return nz(token) in {nz(x) for x in GEOGRAFIA_GENERICA}
+
+
 def tema_de(sub_tema: str, titulo: str, tax: dict):
     """Dos pasadas: manda el sub-tema (sintesis limpia); el titulo solo si parece titular corto."""
     for txt in (nz(sub_tema), nz(titulo) if len(str(titulo or '')) <= 160 else ''):
@@ -427,6 +495,8 @@ def tema_de(sub_tema: str, titulo: str, tax: dict):
             continue
         for r in tax['reglas']:
             for k in r['claves']:
+                if _es_geografia(k):
+                    continue
                 if re.search(patron(k), txt):
                     return r['tema'], k
     return None, None
@@ -451,35 +521,44 @@ def cubo_valido(nombre, tax, permitir_nuevos=True):
     return nombre if contenido else None
 
 
-def _cubo_mas_cercano(sub_tema: str, titulo: str, tax: dict) -> str:
-    """Fallback determinista: el cubo con mas tokens de CONTENIDO en comun (por
-    raiz) y, cuando no hay coincidencia lexica, el de mayor similitud de texto
-    (fuzzy). Nunca devuelve 'Otros'."""
-    from rapidfuzz import fuzz
-    objetivo = set()
-    for token in re.findall(r'[a-z0-9ñ]+', nz('%s %s' % (sub_tema, titulo))):
-        if token not in CONECT and token not in FILLER and token not in MARCO and len(token) > 3:
-            objetivo.add(raiz(token) if len(token) > 4 else token)
-    mejor, score = None, -1
-    mejor_fz, best_fz = None, -1.0
-    sub_norm = nz('%s %s' % (sub_tema, titulo))
-    for t in tax['temas']:
-        if nz(t) in CUBO_PROHIBIDO:
+def _cubo_mas_cercano(sub_tema: str, titulo: str, tax: dict) -> Optional[str]:
+    """Devuelve un cubo solo si comparte evidencia léxica suficiente.
+
+    Nunca devuelve arbitrariamente el primer tema de la taxonomía: eso convertía
+    nutrición escolar en cuidado ambiental cuando el modelo no encontraba cubo.
+    """
+    objetivo = {raiz(t) for t in words(sub_tema)
+                if t not in CONECT and t not in FILLER and t not in MARCO and len(t) > 3}
+    candidatos = []
+    for nombre in tax.get('temas', []):
+        if nz(nombre) in CUBO_PROHIBIDO:
             continue
-        claves = set(re.findall(r'[a-z0-9ñ]+', nz(t)))
-        claves = claves | {raiz(c) if len(c) > 4 else c
-                           for c in claves if c not in CONECT and len(c) > 3}
-        s = len(objetivo & claves)
-        if s > score:
-            mejor, score = t, s
-        fz = fuzz.token_set_ratio(sub_norm, nz(t)) / 100.0
-        if fz > best_fz:
-            mejor_fz, best_fz = t, fz
-    if mejor is not None and score > 0:
-        return mejor
-    if mejor_fz and best_fz >= 0.45:
-        return mejor_fz
-    return tax['temas'][0]
+        claves = {raiz(t) for t in words(nombre)
+                  if t not in CONECT and t not in FILLER and t not in MARCO and len(t) > 3}
+        comun = objetivo & claves
+        if comun:
+            candidatos.append((len(comun), len(claves), nombre))
+    return max(candidatos, key=lambda x: (x[0], x[1]))[2] if candidatos else None
+
+
+def _tema_especifico_desde_subtema(sub_tema: str) -> str:
+    """Crea un tema propio cuando ningún cubo existente corresponde.
+
+    Elimina verbos/modificadores de acción y conserva el núcleo del hecho; así
+    ``Fortalecimiento de la nutrición escolar`` produce ``Nutrición escolar``
+    en vez de heredar un tema no relacionado.
+    """
+    excluir = CONECT | {'fortalecimiento', 'fortalecer', 'mejoramiento', 'mejora',
+                         'promocion', 'promoción', 'implementacion', 'implementación',
+                         'ejecucion', 'ejecución', 'atencion', 'atención', 'acciones',
+                         'desarrollo', 'apoyo', 'participacion', 'participación'}
+    originales = [t.strip('.,;:') for t in str(sub_tema or '').split()]
+    tokens = [t for t in originales if nz(t) not in excluir and not _es_geografia(t) and len(nz(t)) > 3]
+    if not tokens:
+        tokens = [t for t in originales if nz(t) not in CONECT and not _es_geografia(t)]
+    tokens = tokens[:3]
+    return ' '.join(tokens).capitalize() if tokens else 'Tema específico'
+
 
 
 # ============================================================================
@@ -528,7 +607,8 @@ def prompt_lote(grupos_lote: Sequence[dict], candidatos: Sequence[str]) -> str:
         if g.get('titulos_alt'):
             b.append('OTROS TITULARES DEL MISMO GRUPO: %s'
                      % ' // '.join(sq(t)[:120] for t in g['titulos_alt']))
-        b.append('TEXTO: %s' % sq(g['texto'])[:900])
+        b.append('CONTEXTO LITERAL DE LA MARCA (fuente principal para el tono): %s'
+                 % sq(g.get('contexto') or g.get('texto', ''))[:6000])
         bloques.append('\n'.join(b))
     msg = '\n\n'.join(bloques)
     msg += '\n\nRecuerda: el sub_tema de cada grupo debe tener entre 3 y 5 palabras, y solo JSON.'
@@ -557,7 +637,9 @@ def prompt_cubos(pendientes: Sequence[dict], tax: dict, permitir_nuevos: bool) -
     extra = ('Si ningun cubo sirve, propón uno NUEVO en 2 a 5 palabras que describa el asunto concreto\n'
              '(por ejemplo "Tramite de pasaportes"). No se acepta un cubo generico.\n'
              if permitir_nuevos else 'No propongas cubos nuevos: elige siempre uno de la lista.\n')
-    bloques = ['GRUPO id=%d\nSUB-TEMA: %s\nTITULAR: %s' % (p['grupo'], p['sub_tema'], sq(p['titulo'])[:180])
+    bloques = ['GRUPO id=%d\nSUB-TEMA: %s\nTITULAR: %s\nCONTEXTO: %s' %
+               (p['grupo'], p['sub_tema'], sq(p['titulo'])[:180],
+                sq(p.get('contexto') or '')[:5000])
                for p in pendientes]
     return ('Clasificas notas de prensa en cubos tematicos cerrados.\nCubos disponibles:\n%s\n\n%s'
             'Responde UNICAMENTE con {"resultados":[{"id":<grupo>,"cubo":"<nombre del cubo>"}]}\n\n%s'
@@ -768,38 +850,49 @@ def etiquetar_grupos(cfg: dict, grupos: List[dict], progress: Optional[Callable]
     return etiquetas
 
 
-def canonizar_subtemas(etiquetas: Dict[int, dict], umbral: float = 0.86) -> int:
-    """Unifica variantes del mismo sub-tema: deja el texto mas frecuente (y mas corto si empatan).
+def canonizar_subtemas(etiquetas: Dict[int, dict], umbral: float = 0.90) -> int:
+    """Unifica variantes inequívocas y conserva un texto canónico.
 
-    Es la version determinista de la canonizacion: en lotes paralelos el modelo no ve las
-    etiquetas de los demas lotes, asi que aqui se juntan las variantes equivalentes.
+    No basta con que dos cadenas se parezcan: ``Obras en Sincelejo`` y
+    ``Obras en Montería`` no son el mismo hecho. Se permite similitud alta o
+    contención de tokens cuando la diferencia es pequeña y no introduce una
+    ciudad/entidad distinta. El representante es el más frecuente y, en empate,
+    el más corto.
     """
     from rapidfuzz import fuzz
-    conteo = Counter(nz(e['sub_tema']) for e in etiquetas.values() if e.get('sub_tema'))
+
+    def contenido(s):
+        return {raiz(w) for w in words(s) if w not in CONECT and len(w) > 3}
+
+    conteo = Counter(nz(e.get('sub_tema')) for e in etiquetas.values() if e.get('sub_tema'))
     if len(conteo) <= 1:
         return 0
-    grupos, canon, cambios = [], {}, 0
-    for texto, n in conteo.most_common():
+    representantes = []
+    asignacion = {}
+    for texto, frecuencia in conteo.most_common():
+        ct = contenido(texto)
         destino = None
-        for rep in grupos:
-            if fuzz.token_sort_ratio(texto, rep) >= umbral * 100:
+        for rep in representantes:
+            cr = contenido(rep)
+            diferencia = ct ^ cr
+            contenida = ct <= cr or cr <= ct
+            misma_bolsa = len(diferencia) <= 2 and len(ct & cr) >= 2
+            if fuzz.token_sort_ratio(texto, rep) >= umbral * 100 or (contenida and misma_bolsa):
                 destino = rep
                 break
         if destino is None:
-            grupos.append(texto)
-            canon[texto] = (texto, n)
-        else:
-            canon[texto] = (destino, n)
+            representantes.append(texto)
+            destino = texto
+        asignacion[texto] = destino
+
+    originales = {nz(e.get('sub_tema')): e.get('sub_tema') for e in etiquetas.values()}
+    cambios = 0
     for e in etiquetas.values():
-        k = nz(e.get('sub_tema'))
-        if k in canon and canon[k][0] != k:
-            original = e['sub_tema']
-            mejor = max((t for t in etiquetas.values() if nz(t.get('sub_tema')) == canon[k][0]),
-                        key=lambda x: len(x['sub_tema']), default=None)
-            if mejor is not None:
-                e['sub_tema'] = mejor['sub_tema']
-                if nz(e['sub_tema']) != nz(original):
-                    cambios += 1
+        clave = nz(e.get('sub_tema'))
+        destino = asignacion.get(clave, clave)
+        if destino != clave:
+            e['sub_tema'] = originales.get(destino, destino).strip()
+            cambios += 1
     return cambios
 
 
@@ -879,8 +972,10 @@ def derivar_reglas(cubos: Sequence[str]) -> List[dict]:
         toks = [t for t in nz(nombre).split() if t]
         claves = [nz(nombre)]
         for t in toks:
-            if len(t) >= 4 and t not in CONECT and t not in FILLER and t not in MARCO and t not in claves:
-                claves.append(t)
+            if (_es_geografia(t) or len(t) < 4 or t in CONECT or t in FILLER or
+                    t in MARCO or t in claves):
+                continue
+            claves.append(t)
         if len(claves) > 1:
             reglas.append({'tema': nombre, 'claves': claves})
     reglas.sort(key=lambda r: -len(nz(r['tema']).split()))
@@ -963,6 +1058,20 @@ def proponer_taxonomia(cfg: dict, grupos: List[dict], etiquetas: Dict[int, dict]
     return tax
 
 
+def _tema_es_relevante(tema: str, sub_tema: str, contexto: str = '') -> bool:
+    """Valida que un tema propuesto comparta evidencia con el hecho.
+
+    El subtema tiene prioridad; el contexto solo confirma la relación. Evita
+    aceptar un cubo temáticamente ajeno propuesto por el modelo.
+    """
+    tema_tokens = {raiz(t) for t in words(tema) if t not in CONECT and len(t) > 3}
+    sub_tokens = {raiz(t) for t in words(sub_tema) if t not in CONECT and len(t) > 3}
+    if tema_tokens & sub_tokens:
+        return True
+    contexto_tokens = {raiz(t) for t in words(contexto) if t not in CONECT and len(t) > 3}
+    return len(tema_tokens & contexto_tokens) >= 2
+
+
 def asignar_temas(cfg: dict, grupos: List[dict], etiquetas: Dict[int, dict], tax: dict,
                   progress: Optional[Callable] = None) -> Tuple[Dict[int, str], Dict[int, str]]:
     temas, origen, pendientes = {}, {}, []
@@ -974,16 +1083,27 @@ def asignar_temas(cfg: dict, grupos: List[dict], etiquetas: Dict[int, dict], tax
             origen[g['grupo']] = 'regla:%s' % k
         else:
             pendientes.append({'grupo': g['grupo'], 'sub_tema': e.get('sub_tema', ''),
-                               'titulo': g['titulo']})
+                               'titulo': g['titulo'],
+                               'contexto': g.get('contexto') or g.get('contexto_marca') or ''})
     if pendientes and progress:
         progress(min(93, 93), 'Clasificando tema de %d grupos nuevos…' % len(pendientes))
     elegidos = elegir_cubos(cfg, pendientes, tax, permitir_nuevos=True)
     nuevos = []
     for p in pendientes:
         t = elegidos.get(p['grupo'])
+        if t and not _tema_es_relevante(t, p['sub_tema'], p.get('contexto', '')):
+            t = None
         if not t:
             t = _cubo_mas_cercano(p['sub_tema'], p['titulo'], tax)
-            origen[p['grupo']] = 'cercano'
+            if t:
+                origen[p['grupo']] = 'cercano'
+            else:
+                t = _tema_especifico_desde_subtema(p['sub_tema'])
+                origen[p['grupo']] = 'especifico'
+                if nz(t) not in {nz(x) for x in tax['temas']}:
+                    tax['temas'].append(t)
+                    tax['reglas'] = derivar_reglas(tax['temas'])
+                    nuevos.append(t)
         else:
             origen[p['grupo']] = 'llm'
             if nz(t) not in {nz(x) for x in tax['temas']}:
@@ -1047,13 +1167,16 @@ def enrich_rows_with_ai(
         if row.get('is_duplicate'):
             row['Contexto analizado'] = '-'
         else:
-            row['Contexto analizado'] = _contexto_marca(
+            row['Contexto analizado'] = _contexto_exacto_marca(
                 _texto_fila(row, km), _titulo_fila(row, km), brand, aliases,
                 voceros=cfg.get('voceros') or [])
 
     # --- agrupacion ---
     progreso(73, 'Agrupando notas equivalentes…')
     grupos, mapa = construir_grupos(rows, km, umbral_titulo, umbral_cuerpo)
+    for g in grupos:
+        contexto = [str(rows[i].get('Contexto analizado') or '') for i in g.get('idxs', [])]
+        g['contexto_marca'] = '\n\n'.join(dict.fromkeys(x for x in contexto if x and x != '-'))[:12000]
     progreso(75, '%d grupos (notas equivalentes comparten etiqueta)' % len(grupos))
 
     # --- etiquetado ---
@@ -1078,6 +1201,11 @@ def enrich_rows_with_ai(
                                             'nota': tax.get('nota', '')}
 
     corregidos = aplicar_guarda_tono(grupos, etiquetas, brand, aliases)
+    positivos = aplicar_guarda_positiva(grupos, etiquetas, brand, aliases,
+                                        voceros=cfg.get('voceros') or [])
+    if positivos:
+        _ULTIMO_RESUMEN['tono_corregido_positivo'] = positivos
+        _ULTIMO_RESUMEN['tono_subido_por_guarda'] = positivos
     if corregidos:
         _ULTIMO_RESUMEN['tono_corregido_por_guarda'] = corregidos
         if progress_callback:
@@ -1179,8 +1307,84 @@ def aplicar_guarda_tono(grupos: Sequence[dict], etiquetas: Dict[int, dict],
         e = etiquetas.get(g['grupo'])
         if not e or e.get('tono') != 'Negativo':
             continue
-        texto = '%s %s' % (g['titulo'], g.get('texto', ''))
+        texto = '%s %s' % (g['titulo'], g.get('contexto') or g.get('texto', ''))
         if _tema_negativo(texto) and not _critica_dirigida(texto, brand, aliases):
             e['tono'] = 'Neutro'
             corregidos.append(g['grupo'])
+def aplicar_guarda_positiva(grupos: Sequence[dict], etiquetas: Dict[int, dict],
+                            brand: str, aliases: Sequence[str],
+                            voceros: Sequence[str] = ()) -> List[int]:
+    """Sube Neutro a Positivo solo cuando la marca es autora del hecho favorable.
+
+    Evita el sesgo opuesto del modelo pequeño: una marca mencionada en una nota
+    positiva no es automáticamente positiva. La ventana se evalúa por oración
+    para que una marca al final de una frase no se convierta en sujeto de la
+    siguiente.
+    """
+    actores = [nz(x) for x in [brand] + list(aliases or []) + list(voceros or [])
+               if x and len(nz(x)) >= 4]
+    if not actores:
+        return []
+    verbos = (r'entreg(?:a|ó|aron|an)|inaugur(?:a|ó|aron|an)|constru(?:ye|yó|yeron|yen)|'
+              r'pone en marcha|puso en marcha|lanza|lanzó|impulsa|impulsó|aprueba|aprobó|'
+              r'destina|destinó|invierte|invirtió|dona|donó|respalda|respaldó|apoya|apoyó|'
+              r'capacita|capacitó|organiza|organizó|convoca|convocó|celebra|celebró|'
+              r'realiza|realizó|presenta|presentó|anuncia|anunció|'
+              r'gan(?:a|ó|aron|ará|arán)|recib(?:e|ió|ieron|irá|irán)|ocup(?:a|ó|aron|ará|arán)|'
+              r'abr(?:e|ió|irá|irán)|firm(?:a|ó|aron|ará|arán)|atend(?:e|ió|erá|erán)|'
+              r'pone en servicio|habilita|habilitó')
+    eventos = r'(congreso|foro|feria|cumbre|seminario|jornada|conferencia|encuentro|festival)'
+    peticion = re.compile(r'\b(pidió|pide|solicitó|solicita|exigió|exige|debería)\b', re.I)
+    critica = re.compile(r'\b(denunci|cuestion|sancion|acus|incumpl|sobrecost|corrup|'
+                         r'retras|paraliz|rechaz|investiga(?!ción|cion))\w*', re.I)
+    corregidos = []
+    for g in grupos:
+        e = etiquetas.get(g.get('grupo'))
+        if not e or e.get('tono') != 'Neutro':
+            continue
+        texto = '%s. %s' % (g.get('titulo', ''), g.get('contexto') or g.get('texto', ''))
+        for oracion in re.split(r'(?<=[.!?;:])\s+|\n+', ctrl(texto)):
+            n = nz(oracion)
+            if (not n or peticion.search(oracion) or critica.search(oracion) or
+                    (re.search(r'(informe|estudio|alerta|cifra|panorama|diagnóstico|diagnostico)', oracion, re.I)
+                     and not re.search(r'(obra|inversi|beca|premio|convenio|bloque|aula|colabor|particip|elabor|realiz|investig|intervenci|opini[oó]n|ponencia)', oracion, re.I))):
+                continue
+            voceros_norm = [nz(v) for v in (voceros or []) if v]
+            es_columna_vocero = bool(voceros_norm and any(v in n for v in voceros_norm)
+                                     and (re.search(r'^\s*(por|de)\s+', oracion, re.I)
+                                          or re.search(r'(columna|opini[oó]n|an[aá]lisis|intervenci[oó]n|art[ií]culo)', oracion, re.I)))
+            if es_columna_vocero:
+                e['tono'] = 'Positivo'
+                corregidos.append(g.get('grupo'))
+                break
+            if (re.search(r'(colaboraci[oó]n|colabor[oó]|participa|particip[oó]|coautor|coautora|'
+                          r'elaborad[oa] por|realizad[oa] por|investigaci[oó]n de|estudio de|'
+                          r'informe de|columna de opini[oó]n|intervenci[oó]n|vocero|vocera|'
+                          r'fuente experta|ponencia|present[oó] una)', oracion, re.I)
+                    and any(a in n for a in actores)):
+                e['tono'] = 'Positivo'
+                corregidos.append(g.get('grupo'))
+                break
+            if re.search(r'\b(recib(?:ió|e|ieron)|atend(?:erá|ió|e))\b', oracion, re.I) and re.search(
+                    r'(premio|acreditaci|reconocimiento|pacientes|benefici)', oracion, re.I):
+                e['tono'] = 'Positivo'
+                corregidos.append(g.get('grupo'))
+                break
+            for m in re.finditer(verbos, oracion, re.I):
+                antes = nz(oracion[max(0, m.start() - 80):m.start()])
+                despues = nz(oracion[m.end():m.end() + 110])
+                if any(a in antes for a in actores):
+                    # Verbos de organizar/realizar solo son positivos si hay un evento.
+                    if re.search(r'organiz|convoc|realiz|celebr', m.group(0), re.I) and not re.search(eventos, despues):
+                        continue
+                    if re.search(r'anunci|present', m.group(0), re.I):
+                        if re.search(r'(informe|estudio|alerta|cifra|panorama|diagnóstico|diagnostico)', oracion, re.I):
+                            continue
+                        if not re.search(r'(obra|inversi|programa|beca|sede|congreso|foro|feria|premio|convenio|bloque|aula|programa|paciente)', despues, re.I):
+                            continue
+                    e['tono'] = 'Positivo'
+                    corregidos.append(g.get('grupo'))
+                    break
+            if e.get('tono') == 'Positivo':
+                break
     return corregidos

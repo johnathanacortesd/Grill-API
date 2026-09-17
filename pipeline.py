@@ -918,6 +918,12 @@ def process_dossier(
             aliases=(ai_config or {}).get("aliases", []),
         )
 
+    # Orden editorial estable: primero por Título A–Z para revisar y agrupar
+    # noticias iguales/similares en Excel. La clave ignora mayúsculas y tildes,
+    # pero conserva el texto original en la salida.
+    rows.sort(key=lambda r: (norm_key(r.get(KEY_MAP.get("titulo", "Título"), "")),
+                             str(r.get(KEY_MAP.get("idnoticia", "ID Noticia"), ""))))
+
     cols_to_export = output_columns_for_export(include_ai=has_ai or has_pkl)
 
     emit_progress(progress, 94, "✓ Estructuración finalizada. Generando archivo Excel…")

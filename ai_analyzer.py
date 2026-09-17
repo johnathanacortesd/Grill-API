@@ -342,7 +342,7 @@ def _fallback_from_title(title: str) -> str:
         clean_words.pop()
     return " ".join(clean_words).capitalize() if clean_words else "Hecho Informativo"
 
-def cluster_similar_rows(rows: List[dict], km: dict, brand_regexes: List[str]) -> Dict[int, int]:
+def cluster_similar_rows(rows: List[dict], km: dict, brand_regexes: List[str], **_kwargs) -> Dict[int, int]:
     n = len(rows)
     cluster_map = {}
     clusters_rep = {}

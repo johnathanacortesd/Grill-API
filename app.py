@@ -44,25 +44,6 @@ THEME_LIGHT_VARS = """
 }
 """
 
-THEME_DARK_VARS = """
-:root,[data-testid="stApp"]{
-    --bg:#121418;--s1:#1c1f26;--s2:#252830;--s3:#2e333c;
-    --border:#3d4450;--border2:#5c6370;--border-focus:#f97316;
-    --text:#e8eaed;--text2:#c5c8ce;--text3:#b8bcc4;--text4:#8f95a0;--text-label:#e2e4e8;
-    --accent:#f97316;--accent2:#fb923c;--accent3:#fdba74;
-    --accent-bg:#2a1c10;--accent-bg2:#3d2814;--accent-bdr:#9a5b28;
-    --green:#34d399;--green2:#6ee7b7;--green-bg:#0f291e;--green-bdr:#065f46;
-    --red:#f87171;--amber:#fbbf24;--blue:#60a5fa;
-    --success-bg:linear-gradient(135deg,#0f291e,#134e3a);
-    --success-title:#6ee7b7;
-    --icon-dossier-bg:#2a1c10;
-    --r:8px;--r2:12px;--r3:16px;--r4:20px;
-    --shadow-sm:0 1px 2px rgba(0,0,0,0.4),0 1px 3px rgba(0,0,0,0.25);
-    --shadow-md:0 1px 3px rgba(0,0,0,0.45),0 4px 8px rgba(0,0,0,0.3);
-    --shadow-lg:0 2px 6px rgba(0,0,0,0.4),0 8px 24px rgba(0,0,0,0.35);
-    --transition:all 0.2s cubic-bezier(0.4,0,0.2,1);
-}
-"""
 
 def load_custom_css():
     theme_vars = THEME_LIGHT_VARS
