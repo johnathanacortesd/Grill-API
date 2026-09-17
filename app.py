@@ -44,25 +44,6 @@ THEME_LIGHT_VARS = """
 }
 """
 
-THEME_DARK_VARS = """
-:root,[data-testid="stApp"]{
-    --bg:#121418;--s1:#1c1f26;--s2:#252830;--s3:#2e333c;
-    --border:#3d4450;--border2:#5c6370;--border-focus:#f97316;
-    --text:#e8eaed;--text2:#c5c8ce;--text3:#b8bcc4;--text4:#8f95a0;--text-label:#e2e4e8;
-    --accent:#f97316;--accent2:#fb923c;--accent3:#fdba74;
-    --accent-bg:#2a1c10;--accent-bg2:#3d2814;--accent-bdr:#9a5b28;
-    --green:#34d399;--green2:#6ee7b7;--green-bg:#0f291e;--green-bdr:#065f46;
-    --red:#f87171;--amber:#fbbf24;--blue:#60a5fa;
-    --success-bg:linear-gradient(135deg,#0f291e,#134e3a);
-    --success-title:#6ee7b7;
-    --icon-dossier-bg:#2a1c10;
-    --r:8px;--r2:12px;--r3:16px;--r4:20px;
-    --shadow-sm:0 1px 2px rgba(0,0,0,0.4),0 1px 3px rgba(0,0,0,0.25);
-    --shadow-md:0 1px 3px rgba(0,0,0,0.45),0 4px 8px rgba(0,0,0,0.3);
-    --shadow-lg:0 2px 6px rgba(0,0,0,0.4),0 8px 24px rgba(0,0,0,0.35);
-    --transition:all 0.2s cubic-bezier(0.4,0,0.2,1);
-}
-"""
 
 def load_custom_css():
     theme_vars = THEME_LIGHT_VARS
@@ -74,6 +55,9 @@ def load_custom_css():
 """ + theme_vars + dark_extra + """
 html,body,[data-testid="stApp"]{
     background:var(--bg)!important;color:var(--text)!important;
+    color-scheme:light;
+    --text-color:var(--text);--background-color:var(--bg);
+    --secondary-background-color:var(--s1);--primary-color:var(--accent);
     font-family:'Google Sans Text','Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
     font-size:14px;-webkit-font-smoothing:antialiased;letter-spacing:0.01em;
 }
@@ -171,7 +155,41 @@ div[data-testid="stAlert"]{border-radius:var(--r2)!important}
 [data-testid="stCheckbox"] p,[data-testid="stToggle"] p{color:var(--text-label)!important}
 [role="radiogroup"] label p,[data-testid="stRadio"] label p{color:var(--text-label)!important;font-size:0.85rem!important;}
 [data-baseweb="select"]>div,[data-baseweb="input"]{background:var(--s1)!important;color:var(--text)!important}
-.stMarkdown,.stCaption{color:var(--text2)}
+.stMarkdown,.stCaption,[data-testid="stMarkdownContainer"],[data-testid="stCaptionContainer"]{color:var(--text2)!important}
+.stMarkdown p,.stCaption p,[data-testid="stMarkdownContainer"] p,[data-testid="stCaptionContainer"] p{color:inherit!important}
+[data-testid="stMarkdownContainer"] code,.stMarkdown code,code{background:var(--s2)!important;color:var(--text)!important}
+[data-testid="stExpander"],[data-testid="stExpander"] details,[data-testid="stExpander"] summary,
+[data-testid="stExpanderDetails"],.streamlit-expanderHeader,.streamlit-expanderContent{
+    background:var(--s1)!important;color:var(--text)!important;border-color:var(--border)!important;
+}
+[data-testid="stExpander"] summary p,[data-testid="stExpander"] summary span,
+[data-testid="stExpander"] [data-testid="stMarkdownContainer"],
+[data-testid="stExpander"] [data-testid="stMarkdownContainer"] p,
+[data-testid="stExpander"] .stMarkdown,[data-testid="stExpander"] .stCaption,
+.streamlit-expanderHeader p,.streamlit-expanderHeader span{
+    color:var(--text)!important;
+}
+[data-testid="stExpander"] svg,[data-testid="stExpanderToggleIcon"] svg{fill:var(--text)!important;color:var(--text)!important}
+div[data-testid="stAlert"],[data-testid="stNotification"],[data-baseweb="notification"]{
+    color:var(--text)!important;background:var(--s1)!important;border-color:var(--border)!important;
+}
+[data-testid="stAlertContentInfo"],[data-testid="stNotificationContentInfo"]{
+    background:#e8f0fe!important;color:#174ea6!important;
+}
+[data-testid="stAlertContentSuccess"],[data-testid="stNotificationContentSuccess"]{
+    background:var(--green-bg)!important;color:var(--green2)!important;
+}
+[data-testid="stAlertContentWarning"],[data-testid="stNotificationContentWarning"]{
+    background:#fff7ed!important;color:#b45309!important;
+}
+[data-testid="stAlertContentError"],[data-testid="stNotificationContentError"]{
+    background:#fef2f2!important;color:#b91c1c!important;
+}
+div[data-testid="stAlert"] [data-testid="stMarkdownContainer"],
+div[data-testid="stAlert"] [data-testid="stMarkdownContainer"] p,
+div[data-testid="stAlert"] p,[data-testid="stNotification"] p{
+    color:inherit!important;
+}
 @media(max-width:768px){
     .metrics-grid{grid-template-columns:repeat(2,1fr)}
     .live-metrics{grid-template-columns:1fr 1fr 1fr}
