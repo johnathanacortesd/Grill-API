@@ -55,9 +55,6 @@ def load_custom_css():
 """ + theme_vars + dark_extra + """
 html,body,[data-testid="stApp"]{
     background:var(--bg)!important;color:var(--text)!important;
-    color-scheme:light;
-    --text-color:var(--text);--background-color:var(--bg);
-    --secondary-background-color:var(--s1);--primary-color:var(--accent);
     font-family:'Google Sans Text','Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
     font-size:14px;-webkit-font-smoothing:antialiased;letter-spacing:0.01em;
 }
@@ -155,41 +152,7 @@ div[data-testid="stAlert"]{border-radius:var(--r2)!important}
 [data-testid="stCheckbox"] p,[data-testid="stToggle"] p{color:var(--text-label)!important}
 [role="radiogroup"] label p,[data-testid="stRadio"] label p{color:var(--text-label)!important;font-size:0.85rem!important;}
 [data-baseweb="select"]>div,[data-baseweb="input"]{background:var(--s1)!important;color:var(--text)!important}
-.stMarkdown,.stCaption,[data-testid="stMarkdownContainer"],[data-testid="stCaptionContainer"]{color:var(--text2)!important}
-.stMarkdown p,.stCaption p,[data-testid="stMarkdownContainer"] p,[data-testid="stCaptionContainer"] p{color:inherit!important}
-[data-testid="stMarkdownContainer"] code,.stMarkdown code,code{background:var(--s2)!important;color:var(--text)!important}
-[data-testid="stExpander"],[data-testid="stExpander"] details,[data-testid="stExpander"] summary,
-[data-testid="stExpanderDetails"],.streamlit-expanderHeader,.streamlit-expanderContent{
-    background:var(--s1)!important;color:var(--text)!important;border-color:var(--border)!important;
-}
-[data-testid="stExpander"] summary p,[data-testid="stExpander"] summary span,
-[data-testid="stExpander"] [data-testid="stMarkdownContainer"],
-[data-testid="stExpander"] [data-testid="stMarkdownContainer"] p,
-[data-testid="stExpander"] .stMarkdown,[data-testid="stExpander"] .stCaption,
-.streamlit-expanderHeader p,.streamlit-expanderHeader span{
-    color:var(--text)!important;
-}
-[data-testid="stExpander"] svg,[data-testid="stExpanderToggleIcon"] svg{fill:var(--text)!important;color:var(--text)!important}
-div[data-testid="stAlert"],[data-testid="stNotification"],[data-baseweb="notification"]{
-    color:var(--text)!important;background:var(--s1)!important;border-color:var(--border)!important;
-}
-[data-testid="stAlertContentInfo"],[data-testid="stNotificationContentInfo"]{
-    background:#e8f0fe!important;color:#174ea6!important;
-}
-[data-testid="stAlertContentSuccess"],[data-testid="stNotificationContentSuccess"]{
-    background:var(--green-bg)!important;color:var(--green2)!important;
-}
-[data-testid="stAlertContentWarning"],[data-testid="stNotificationContentWarning"]{
-    background:#fff7ed!important;color:#b45309!important;
-}
-[data-testid="stAlertContentError"],[data-testid="stNotificationContentError"]{
-    background:#fef2f2!important;color:#b91c1c!important;
-}
-div[data-testid="stAlert"] [data-testid="stMarkdownContainer"],
-div[data-testid="stAlert"] [data-testid="stMarkdownContainer"] p,
-div[data-testid="stAlert"] p,[data-testid="stNotification"] p{
-    color:inherit!important;
-}
+.stMarkdown,.stCaption{color:var(--text2)}
 @media(max-width:768px){
     .metrics-grid{grid-template-columns:repeat(2,1fr)}
     .live-metrics{grid-template-columns:1fr 1fr 1fr}
@@ -457,7 +420,7 @@ def main():
             f1 = st.file_uploader("Dossier", type=["xlsx"], label_visibility="collapsed", key="f1")
 
             st.markdown('<div class="sec-label">2. Configuración de Análisis IA (Tono, Tema, Subtema)</div>', unsafe_allow_html=True)
-            enable_ai = st.checkbox("Activar análisis reputacional con IA (gpt-4.1-nano-2025-04-14)", value=True)
+            enable_ai = st.checkbox("Activar análisis reputacional con IA + Jev para el tono", value=True)
             
             c_brand, c_alias = st.columns(2)
             with c_brand:
@@ -497,10 +460,10 @@ def main():
                      "Gobierno territorial (21 cubos)",
                      "Gremio o sector (16 cubos)"],
                     index=0,
-                    help="Los clientes son muy distintos (universidades, sector público, privado, marcas), "
-                         "así que lo recomendado es que la lista de Temas se genere leyendo los hechos "
-                         "de este archivo. También puedes reutilizar la lista de un cliente concreta o "
-                         "cargar una en JSON.",
+                    help="Por defecto los Temas se arman bottom-up en ESTE lote: se agrupan subtemas "
+                         "afines y se nombra cada familia. Si subes un PKL de tema, se usan las clases "
+                         "de ese modelo y no se inventan temas del lote. No hay memoria entre corridas. "
+                         "Las listas fijas o un JSON solo se usan como nombres candidatos cuando no hay PKL.",
                 )
 
             with st.expander("⚙ Ajustes finos del análisis (opcional)"):
@@ -570,8 +533,12 @@ def main():
                     st.error("Por favor indica la Marca o Cliente Principal para realizar el análisis enfocado.")
                 else:
                     api_key = st.secrets.get("OPENAI_API_KEY")
+                    typesafe_api_key = st.secrets.get("TYPESAFE_API_KEY")
                     if enable_ai and not api_key:
-                        st.error("❌ Falta configurar OPENAI_API_KEY en los Secrets de Streamlit.")
+                        st.error("❌ Falta configurar OPENAI_API_KEY en los Secrets de Streamlit: se usa para subtema y tema.")
+                        st.stop()
+                    if enable_ai and not typesafe_api_key:
+                        st.error("❌ Falta configurar TYPESAFE_API_KEY en los Secrets de Streamlit: se usa para el tono con Jev.")
                         st.stop()
                     
                     aliases_parsed = [
@@ -587,19 +554,6 @@ def main():
                         except Exception as exc:
                             st.error(f"La lista de Temas (JSON) no es válida: {exc}")
                             st.stop()
-                    elif tax_nombre == "Automática según el archivo (recomendada)":
-                        # Reutiliza la taxonomía de la corrida previa del mismo cliente
-                        # para que los Temas no cambien entre períodos (Power BI).
-                        try:
-                            from historial_cliente import taxonomia_anterior
-                            previa = taxonomia_anterior(
-                                brand_input.strip(),
-                                extra={"historial_dir": st.secrets.get("HISTORIAL_DIR")})
-                            if previa and previa.get("temas"):
-                                tax_cargada = previa
-                                st.session_state["taxonomia_reutilizada"] = len(previa["temas"])
-                        except Exception:
-                            pass
                     tone_bytes = f_tono.getvalue() if f_tono else None
                     theme_bytes = f_tema.getvalue() if f_tema else None
                     try:
@@ -632,6 +586,8 @@ def main():
                             "umbral_titulo": int(umbral_titulo_input),
                             "umbral_cuerpo": int(umbral_cuerpo_input),
                             "api_key": api_key if enable_ai else None,
+                            "typesafe_api_key": typesafe_api_key if enable_ai else None,
+                            "typesafe_model": "jev-latest",
                             "model": "gpt-4.1-nano-2025-04-14",
                             "historial_dir": st.secrets.get("HISTORIAL_DIR"),
                             "tone_pkl_bytes": tone_bytes,
@@ -667,6 +623,8 @@ def main():
             cubos_nuevos = analisis.get("cubos_nuevos") or []
             reglas = analisis.get("temas_por_regla")
             por_llm = analisis.get("temas_por_llm")
+            por_pkl = analisis.get("temas_por_pkl")
+            tonos_pkl = analisis.get("tonos_por_pkl")
             fallback = len(analisis.get("grupos_con_fallback") or [])
             errores = analisis.get("errores_api") or []
             guarda = len(analisis.get("tono_corregido_por_guarda") or [])
@@ -674,11 +632,15 @@ def main():
             piezas = []
             if grupos:
                 piezas.append(f"{grupos} hechos únicos agrupados")
-            if votos:
+            if tonos_pkl:
+                piezas.append(f"tono clasificado con PKL del cliente ({tonos_pkl} grupos)")
+            elif votos:
                 piezas.append(f"tono verificado {votos}× por grupo")
             if guarda:
                 piezas.append(f"guarda del tono: {guarda} Negativos sin señalamiento pasaron a Neutro")
-            if reglas is not None:
+            if por_pkl:
+                piezas.append(f"Tema por PKL del cliente: {por_pkl}")
+            elif reglas is not None:
                 piezas.append(f"Tema por reglas: {reglas} · por IA: {por_llm or 0}")
             if cubos_nuevos:
                 piezas.append("Cubos nuevos específicos: " + ", ".join(cubos_nuevos[:4]))
@@ -692,22 +654,31 @@ def main():
             detalle_tax = analisis.get("taxonomia_detalle") or {}
             if temas_gen:
                 modo = analisis.get("modo_taxonomia")
-                etiqueta = ("generada desde el archivo" if modo == "automatica"
-                            else "lista fija del cliente")
-                with st.expander("Lista de Temas usada (%d cubos, %s)" % (len(temas_gen), etiqueta),
-                                 expanded=(modo == "automatica")):
+                if modo == "pkl":
+                    etiqueta = "clases del PKL del cliente"
+                elif modo in ("lote", "automatica"):
+                    etiqueta = "de este lote"
+                else:
+                    etiqueta = "nombres candidatos del cliente"
+                titulo_exp = ("Temas del PKL (%d, %s)" % (len(temas_gen), etiqueta)
+                              if modo == "pkl"
+                              else "Temas de este lote (%d, %s)" % (len(temas_gen), etiqueta))
+                with st.expander(titulo_exp, expanded=(modo in ("lote", "automatica", "pkl"))):
                     st.markdown(" · ".join("`%s`" % t for t in temas_gen))
                     if detalle_tax:
                         st.download_button(
-                            "⬇ Descargar lista de Temas (JSON) para reutilizarla",
+                            "⬇ Descargar Temas de este lote (JSON)",
                             data=json.dumps(detalle_tax, ensure_ascii=False, indent=1),
                             file_name="temas_%s.json" % str(
                                 st.session_state.get("output_filename", "cliente")).replace(".xlsx", ""),
                             mime="application/json",
                         )
-                        st.caption("Súbela en «Reutilizar la lista de Temas de un cliente» para que el "
-                                   "próximo período del mismo cliente use los mismos Temas y puedas "
-                                   "comparar entre meses.")
+                        if modo == "pkl":
+                            st.caption("Son las clases del PKL de tema del cliente. No se inventan "
+                                       "nombres bottom-up ni se reescriben con el quality-gate del lote.")
+                        else:
+                            st.caption("Son los Temas armados bottom-up en esta corrida. El próximo lote "
+                                       "vuelve a agrupar sus propios subtemas; no se reutiliza el vocabulario.")
         
         st.markdown(f"""
         <div class="metrics-grid">
@@ -726,9 +697,6 @@ def main():
                 _historial = listar_historial(_sl, extra=st.session_state.get("ai_config_extra") or {})
         except Exception:
             _historial = []
-        if st.session_state.get("taxonomia_reutilizada"):
-            st.info("Se reutilizó la lista de Temas de la corrida anterior del mismo cliente "
-                    f"({st.session_state['taxonomia_reutilizada']} cubos) para comparar entre períodos.")
         if _historial:
             with st.expander(f"Historial del cliente ({len(_historial)} corridas previas)"):
                 for h in _historial[:10]:
