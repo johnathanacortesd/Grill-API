@@ -19,6 +19,9 @@ quedan **iguales**: son las mismas de Grill-API.
 | `app.py` | Interfaz Streamlit. Tema claro/oscuro, `APP_PASSWORD`, panel de progreso, descarga. |
 | `pipeline.py` | **Limpieza y estructuración (NO TOCAR)** + el hook al motor (`process_dossier`). |
 | `analyzer_tono_tema.py` | **Motor nuevo** de Tono/Tema/Sub-tema. |
+| `perfil_cliente.py` | **Perfiles de cliente (multicliente)**: CRUD de JSON en `clientes/` con marca, alias, voceros, criterio de tono (catálogo o texto libre `criterio_custom`) y lista fija de Temas opcional. |
+| `historial_cliente.py` | Historial de corridas por cliente (JSONL). `pipeline` lo alimenta, `app.py` lo muestra. |
+| `clientes/` | Perfiles de ejemplo (`universidad_simon_bolivar.json`, `fenavi.json`). |
 | `catalogo_tono_tema.py` | **Rúbrica del motor**: `CRITERIOS_TONO`, `TONOS`, `REGLAS_SUBTEMA`, `EJEMPLOS`, `CUBO_PROHIBIDO`, `MIN_PAL`/`MAX_PAL`. Las taxonomías nombradas son solo **nombres candidatos** opcionales; el tema del lote no se clasifica contra una lista cerrada. |
 | `ai_analyzer.py` | Legado. Solo se usan `extract_brand_context`, `generate_brand_variants`, `ensure_subtema_distinct_from_tema`. Su `enrich_rows_with_ai` ya **no se ejecuta**. |
 | `pkl_classifier.py` | Clasificadores PKL del cliente (opcionales) que **ganan** sobre el motor de lote/LLM en tono y/o tema. El quality-gate de frases del lote **no** reescribe las clases del PKL. El subtema nunca usa PKL. |
@@ -53,8 +56,12 @@ por `analyzer_tono_tema.ultimo_resumen()` en `resultado["analisis"]`.
 3. **Validador duro + reparación** — `validar` (3-7 palabras, sin verbo conjugado inicial, sin
    preposición final, sin rótulos vacíos, sin `:` `;` `|`) y `prompt_reparacion` en ciclo contra el
    propio modelo.
-4. **Tema bottom-up de ESTE LOTE** — `asignar_temas` agrupa subtemas canónicos afines y nombra cada
-   familia **una sola vez**. El nombre es una **frase nominal temática COMPLETA** (la que un
+4. **Tema bottom-up de ESTE LOTE** — `asignar_temas` agrupa subtemas canónicos afines
+   (`cluster_familias_subtema`: puentes solo con stems distintivos —descarta palabras
+   genéricas de evento como `congreso`/`internacional` y stems omnipresentes en el lote—,
+   equivalencias `criminalidad`/`criminología`→`crimen`, `juvenil`/`juventud`/`jóvenes`→`joven`,
+   y anti-encadenamiento: un puente de titular solo une si toca el núcleo temático)
+   y nombra cada familia **una sola vez**. El nombre es una **frase nominal temática COMPLETA** (la que un
    analista pondría en Power BI): LLM con few-shot buenos/malos → gate duro → una reparación →
    frase segura. Prohibido bag-of-words, unir stems y recortes que suelten el núcleo o el objeto.
    No hay lista cerrada ni memoria entre corridas. Un subtema canónico implica exactamente un tema.
@@ -64,12 +71,49 @@ por `analyzer_tono_tema.ultimo_resumen()` en `resultado["analisis"]`.
    no las sustituye. Si hay `tone_model`, `Tono_IA` son las clases de ese modelo (sin guarda LLM).
 5. **Guarda de generalidad y de lengua** — el tema es más general que el subtema
    (`_tema_distinto_de_subtema`) y pasa `problemas_calidad_tema` / `tema_frase_natural`:
-   frase completa, no verbo/cláusula, no PP truncado, no solo adjetivos, no persona, no sigla
-   suelta, no rótulo vacío, **no copia ni prefijo del titular**. El subtema sigue siendo el
+   frase completa, no verbo/cláusula, no PP truncado (ni **inicio** con preposición:
+   `Para Carnaval 2027` → `Carnaval 2027`, con reparación determinista
+   `_reparar_inicio_preposicional` que solo ignora los flags cosméticos
+   `mash_keywords`/`empieza_por_adjetivo`), no solo adjetivos, no persona, no sigla
+   suelta, no rótulo vacío, **no copia ni prefijo del titular** (sustantivo + año como
+   `Carnaval 2027` ya no cuenta como `mash_keywords`). El subtema sigue siendo el
    hecho concreto.
-6. **Nunca "Otros"** — `CUBO_PROHIBIDO`, `cubo_valido`. Jev (TypeSafe) es opcional y **solo**
-   corrige temas mal clasificados (boolean/choice, alta confianza). No genera subtemas ni reemplaza
-   el pipeline de tono.
+6. **Calidad del subtema** — `validar` detecta `copia_titular` (el subtema repite el
+   titular en el mismo orden de palabras, sin reformular; los nombres de evento como
+   `Cumbre internacional de criminología` están exentos) y `subtema_vago`
+   (solo evento genérico + sujeto genérico, sin objeto: `Reunión de expertos en crimen`).
+   El prompt de reparación exige reformular el primero y concretar el segundo.
+7. **Nunca "Otros"** — `CUBO_PROHIBIDO`, `cubo_valido`. Jev (TypeSafe) es opcional y **solo**
+   audita temas ya nombrados (boolean/choice, alta confianza): nunca genera subtemas ni
+   decide el tono. El tono siempre sale de la API de OpenAI + las guardas deterministas,
+   que codifican el criterio del cliente (crítica dirigida, vocero experto, tragedia).
+   Sin `TYPESAFE_API_KEY` el pipeline funciona igual; la app lo avisa sin bloquear.
+
+Estilo de los temas ("estilo Muse", v4.1): el prompt de nombrado (`sys_tema`,
+`prompt_temas_familias`, `prompt_reparacion_tema`) pide español natural, sobrio y preciso —
+lo concreto antes que lo abstracto ("Empleo juvenil", no "Fortalecimiento de la
+empleabilidad juvenil")— y `TEMAS_EJEMPLO_BUENOS` se curó con 16 ejemplos impecables
+(todos pasan `tema_frase_natural`, verificado por test). El gate también se calibró:
+sustantivos como "carnaval"/"festival" ya no se confunden con adjetivos, y
+sustantivo + adjetivos ("Movilidad urbana sostenible") no cuenta como `mash_keywords`.
+
+Estabilizadores porque el modelo es pequeño (sesgo sistemático, no ruido):
+
+- **Votación de tono** — `_voto_mayoria` (N veces por grupo, empate → Neutro).
+- **Guarda determinista** — `aplicar_guarda_tono`: sin señalamiento **dirigido** (el blanco a ≤35
+  caracteres del verbo de crítica) no hay Negativo. El tema trágico no hace negativo al cliente.
+- **Guarda positiva de vocero** — `aplicar_guarda_positiva`: si la marca o un vocero del
+  perfil aparece citado como fuente experta (verbo de habla: `dijo`, `afirmó`, `señaló`,
+  `advirtió`, `consideró`…; `reveló` está excluido porque introduce hallazgos) y no hay
+  señalamiento ni petición, un Neutro sube a Positivo.
+- **Un hecho, un tono** — `unificar_tono_mismo_hecho`: los grupos con el mismo subtema
+  canónico votan su tono (empate → Neutro); si alguno es Negativo no se toca el grupo
+  (no se borra un posible señalamiento).
+- **Tragedia con experto de la casa** — `aplicar_regla_tragedia` (+ excepción en
+  `aplicar_guarda_positiva` y línea en el criterio `Aspectual estricto`): si la nota es
+  una tragedia (muerte) y el experto/docente de la marca solo aparece citado como
+  fuente, el tono es Neutro aunque sea voz experta. No aplica si la marca actúa frente
+  al problema (ayuda, dona, organiza, propone): eso sigue Positivo. No toca Negativos.
 
 Estabilizadores porque el modelo es pequeño (sesgo sistemático, no ruido):
 
@@ -132,9 +176,44 @@ Este repo tiene **dos motores de análisis**, y el port solo cambia el de Grill:
 `ai_analyzer.py` **no se toca**: sigue alimentando `Contexto analizado`, la variante Sucre y el
 camino PKL. Si algún día se unifica el motor, hay que migrar Sucre en el mismo cambio; no antes.
 
-## 10. Estado conocido de las pruebas
+## 11. Perfiles de cliente (multicliente)
+
+El análisis se adapta por cliente sin tocar código, mediante `perfil_cliente.py`:
+
+- Cada perfil (`clientes/<slug>.json`) guarda: `brand`, `aliases`, `voceros`,
+  `criterio` (clave de `CRITERIOS_TONO`), `criterio_custom` (texto libre que, si
+  existe, **reemplaza** la regla del catálogo en `prompt_sistema` vía
+  `cfg['criterio_texto']`) y `taxonomia` opcional (`{"temas": [...]}`).
+- En `app.py`, el selector "Perfil de cliente" precarga los campos del formulario;
+  el usuario puede editarlos antes de procesar. Desde "Ajustes finos" puede guardar
+  la configuración actual como perfil nuevo. Si el perfil ya existe, el guardado se
+  detiene con un aviso salvo que se marque "Sobrescribir".
+- El modo manual (digitar marca, alias y voceros en cada corrida) sigue siendo el
+  valor por defecto del selector: los perfiles son un atajo opcional, no un requisito.
+- Precedencia de la lista de Temas: JSON subido en el formulario > opción elegida
+  en "Lista de Temas" > `taxonomia` del perfil > automática bottom-up del lote.
+- `historial_cliente.py` registra cada corrida por marca (JSONL en `HISTORIAL_DIR`
+  o `./historial/`); es best-effort y nunca interrumpe el pipeline.
+- `auditoria_mail.py` envía un correo de auditoría de uso tras cada corrida con IA
+  (`enviar_auditoria_desde_resultado`, invocado desde `pipeline.process_dossier`):
+  marca/cliente, alias, voceros, criterio, filas, tonos y duración, para saber qué
+  clientes consumen la API. Lee `SMTP_HOST/PORT/USER/PASSWORD/FROM` y
+  `USAGE_NOTIFY_EMAIL` de los Secrets (fallback a entorno); best-effort, nunca
+  interrumpe. Con Gmail, `SMTP_PASSWORD` debe ser una contraseña de aplicación.
+- Tema visual: paleta clara cálida estilo Muse (fondo charcoal cálido `#12100d` con auroras coral, tarjetas de vidrio
+  (glassmorphism, blur), título en serif editorial Instrument Serif, acento coral
+  `#e8937c` con glow; vista previa estática en `tema_muse_preview.html`.
+- Variable de entorno opcional `CLIENTES_DIR` para mover la carpeta de perfiles.
+
+## 12. Estado conocido de las pruebas
 
 `python -m unittest discover -s tests` cubre las invariantes de tema/subtema del lote
-(clustering, canonización, un tema por subtema, tema ≠ subtema, sin memoria entre corridas)
-y el camino PKL (el predict del PKL se invoca y gana sobre el nombrado libre/LLM del lote).
-No hay llamadas a API.
+(clustering, canonización, un tema por subtema, tema ≠ subtema, sin memoria entre corridas),
+el camino PKL (el predict del PKL se invoca y gana sobre el nombrado libre/LLM del lote)
+y los perfiles de cliente (`tests/test_perfil_cliente.py`: validación, roundtrip de
+guardado/carga, historial y `criterio_texto` en el prompt). `tests/test_calidad_tema_tono.py`
+cubre las mejoras de calidad 2026-09-20: clustering con stems distintivos (PISA/IA educativa
+no se mezcla con criminología; juventud no se mezcla con suicidio), temas que no empiezan
+con preposición y son estrictamente más generales que el subtema, subtemas que no copian
+el titular ni quedan vagos, guarda positiva para vocero citado como fuente experta y
+unificación de tono por hecho. No hay llamadas a API.
