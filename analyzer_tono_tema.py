@@ -147,7 +147,8 @@ def _contexto_exacto_marca(texto: str, titulo: str, brand: str,
     Prioriza todos los párrafos que contienen la marca, alias o vocero. Si el
     archivo no conserva saltos de párrafo, devuelve las oraciones que contienen
     la mención y sus vecinas inmediatas. El resultado conserva literalmente la
-    ortografía, tildes y puntuación del texto fuente.
+    ortografía, tildes y puntuación del texto fuente, en un solo párrafo (sin
+    saltos de línea).
     """
     fuente = str(texto or '')
     nombres = [str(x).strip() for x in [brand, *(aliases or []), *(voceros or [])]
@@ -167,7 +168,8 @@ def _contexto_exacto_marca(texto: str, titulo: str, brand: str,
                                     flags=re.I) if p.strip()]
     encontrados = [p.strip() for p in parrafos if menciona(p)]
     if encontrados:
-        return '\n\n'.join(encontrados)[:6000]
+        # Un solo párrafo: se unen con espacio y se colapsan saltos internos.
+        return re.sub(r'\s+', ' ', ' '.join(encontrados)).strip()[:6000]
 
     # Respaldo para cuerpos guardados como un bloque único.
     partes = [p for p in re.split(r'(?<=[.!?…])\s+', fuente) if p.strip()]
