@@ -1744,6 +1744,142 @@ def unificar_subtemas_noticias_similares(grupos: Sequence[dict], etiquetas: Dict
     return cambios
 
 
+def _sanitizar_fusiones(fusiones, n):
+    """Limpia la respuesta del modelo: >=2 índices distintos por grupo y sin
+    repetir un índice en dos grupos (mapeo determinista).
+
+    Tolera índices 0-based o 1-based: si el mínimo es 0 y el máximo < n se
+    interpretan como 0-based; si están en [1, n], como 1-based. Sin esto, una
+    respuesta 0-based se descartaba en silencio y no se fusionaba nada.
+    """
+    limpias = []
+    usados = set()
+    for f in fusiones or []:
+        crudos = []
+        for x in f or []:
+            try:
+                crudos.append(int(x))
+            except Exception:
+                continue
+        if not crudos:
+            continue
+        if min(crudos) >= 1 and max(crudos) <= n:
+            idxs = [c - 1 for c in crudos]
+        elif min(crudos) >= 0 and max(crudos) < n:
+            idxs = list(crudos)
+        else:
+            continue
+        unicos = []
+        for i in idxs:
+            if i not in unicos and i not in usados:
+                unicos.append(i)
+        if len(unicos) >= 2:
+            limpias.append(unicos)
+            usados.update(unicos)
+    return limpias
+
+
+def _canonico_de_fusion(idxs, textos, conteo):
+    """Representante del grupo fusionado: el más frecuente; en empate, el MÁS
+    LARGO (más específico). El empate corto-elegido degradaba la especificidad
+    del subtema («Conversatorio» ganaba a «Participación en el conversatorio
+    de salud mental»). Devuelve el texto original (verbatim) del elegido."""
+    mejor = None
+    for i in idxs:
+        t = textos[i]
+        clave = (conteo.get(nz(t), 0), len(t))
+        if mejor is None or clave > mejor[0]:
+            mejor = (clave, t)
+    return mejor[1]
+
+
+def unificar_subtemas_llm(cfg, grupos, etiquetas, uso=None):
+    """Pase final (1 sola llamada LLM): fusiona subtemas que son el mismo
+    asunto aunque la redaccion difiera entre lotes.
+
+    Los lotes de etiquetado corren en paralelo sin verse entre si y la
+    canonizacion determinista solo caza variantes de redaccion parecida
+    («Inauguración del laboratorio» vs «Inaguración del laboratorio»), no
+    parafrasis («Apertura del laboratorio»). Esta pasada recibe la lista
+    completa de subtemas unicos y pide al modelo agrupar solo los que son
+    EXACTAMENTE el mismo hecho/asunto. Conservadora por diseño: ante la
+    duda no fusiona (un tema incorrecto es peor que dos subtemas pequenos);
+    en empate de frecuencia conserva el subtema MAS especifico (el mas
+    largo), y nunca fusiona subtemas con tonos distintos (evita que el voto
+    de tono por subtema voltee un Positivo a Neutro).
+    Si la llamada falla, no rompe el pipeline: devuelve 0.
+    """
+    vistos = {}
+    for e in etiquetas.values():
+        s = (e.get('sub_tema') or '').strip()
+        if s and nz(s) not in vistos:
+            vistos[nz(s)] = s
+    textos = list(vistos.values())
+    if len(textos) <= 1:
+        return 0
+    # Un titular corto de ejemplo por subtema, para desambiguar.
+    gid_por_sub = {}
+    for gid, e in etiquetas.items():
+        k = nz(e.get('sub_tema'))
+        if k and k not in gid_por_sub:
+            gid_por_sub[k] = gid
+    grupo_por_gid = {g.get('grupo'): g for g in grupos}
+    lineas = []
+    for i, t in enumerate(textos, 1):
+        g = grupo_por_gid.get(gid_por_sub.get(nz(t))) or {}
+        tit = str(g.get('titulo') or '')[:110].strip()
+        lineas.append('%d. «%s»%s' % (i, t, ' — ej.: «%s»' % tit if tit else ''))
+    mensajes = [
+        {'role': 'system',
+         'content': 'Unificas nombres de subtemas de un dossier de prensa. Solo agrupas '
+                    'los que describen EXACTAMENTE el mismo hecho o asunto específico. '
+                    'Respondes únicamente en JSON.'},
+        {'role': 'user',
+         'content': (
+             'SUBTEMAS:\n' + '\n'.join(lineas) + '\n\n'
+             'Reglas:\n'
+             '1. Fusiona SOLO los que describen exactamente el mismo hecho o asunto '
+             'específico (p. ej. «Inauguración del laboratorio» y «Apertura del laboratorio»).\n'
+             '2. ANTE LA DUDA, NO FUSIONES: es preferible dejar dos subtemas separados '
+             'que unir dos asuntos distintos.\n'
+             '3. No fusiones por palabras genéricas (prevención, impacto, crisis, jóvenes, '
+             'mujeres) ni porque mencionen la misma marca, persona o ciudad.\n'
+             '4. Si difieren en ciudad, persona, fecha, entidad o alcance, NO los fusiones.\n'
+             'Responde {"fusiones": [[i, j], ...]} con los números de la lista (empezando '
+             'en 1) que sí son el mismo asunto. Si ninguno, {"fusiones": []}.')},
+    ]
+    try:
+        data = _json_loose(llamar_llm(cfg, mensajes, json_mode=True,
+                                      max_tokens=2000, uso=uso)) or {}
+    except Exception:
+        return 0
+    fusiones = _sanitizar_fusiones(data.get('fusiones'), len(textos))
+    if not fusiones:
+        return 0
+    conteo = Counter(nz(e.get('sub_tema')) for e in etiquetas.values()
+                     if e.get('sub_tema'))
+    cambios = 0
+    for idxs in fusiones:
+        miembros = {nz(textos[i]) for i in idxs}
+        # Nunca fusionar subtemas con tonos distintos: el voto de tono por
+        # subtema (`unificar_tono_mismo_hecho`) podria voltear un Positivo
+        # legitimo a Neutro. Ante la duda, separar.
+        tonos = {((etiquetas.get(g) or {}).get('tono') or 'Neutro')
+                 for g, e in etiquetas.items() if nz(e.get('sub_tema')) in miembros}
+        if len(tonos) > 1:
+            continue
+        canon = _canonico_de_fusion(idxs, textos, conteo)
+        canon_k = nz(canon)
+        for e in etiquetas.values():
+            k = nz(e.get('sub_tema'))
+            if k in miembros and k != canon_k:
+                e['sub_tema'] = canon
+                cambios += 1
+    if cambios:
+        _ULTIMO_RESUMEN['subtemas_unificados_llm'] = cambios
+    return cambios
+
+
 def elegir_cubos(cfg: dict, pendientes: Sequence[dict], tax: dict,
                  permitir_nuevos: bool = True) -> Dict[int, str]:
     """El modelo elige dentro de la lista cerrada (o propone un cubo nuevo especifico)."""
@@ -3290,8 +3426,13 @@ def enrich_rows_with_ai(
                                  votos=votos, uso=uso)
     cambios = canonizar_subtemas(etiquetas)
     extra_uni = unificar_subtemas_noticias_similares(grupos, etiquetas)
-    if (cambios or extra_uni) and progress_callback:
-        progreso(93, 'Sub-temas unificados: %d' % (cambios + extra_uni))
+    # v4.14: pase final entre lotes (1 llamada LLM): caza paráfrasis que la
+    # canonización determinista no ve («Apertura…» vs «Inauguración…»).
+    # Corre antes de las guardas de tono para que el voto por subtema use
+    # los subtemas ya unificados.
+    extra_llm = unificar_subtemas_llm(cfg, grupos, etiquetas, uso=uso)
+    if (cambios or extra_uni or extra_llm) and progress_callback:
+        progreso(93, 'Sub-temas unificados: %d' % (cambios + extra_uni + extra_llm))
 
     # Con PKL de tono el modelo del cliente es la autoridad: no se aplica la
     # guarda LLM (degradar Negativo / subir a Positivo) porque pisaría el PKL.
@@ -3670,7 +3811,7 @@ def aplicar_guarda_positiva(grupos: Sequence[dict], etiquetas: Dict[int, dict],
               r'gan(?:a|ó|aron|ará|arán)|recib(?:e|ió|ieron|irá|irán)|ocup(?:a|ó|aron|ará|arán)|'
               r'abr(?:e|ió|irá|irán)|firm(?:a|ó|aron|ará|arán)|atend(?:e|ió|erá|erán)|'
               r'pone en servicio|habilita|habilitó')
-    eventos = r'(congreso|foro|feria|cumbre|seminario|jornada|conferencia|encuentro|festival)'
+    eventos = r'(congreso|foro|feria|cumbre|seminario|jornada|conferencia|encuentro|festival|reuni[oó]n|reuniones|conversatorio)'
     peticion = re.compile(r'\b(pidió|pide|solicitó|solicita|exigió|exige|debería)\b', re.I)
     critica = re.compile(r'\b(denunci|cuestion|sancion|acus|incumpl|sobrecost|corrup|'
                          r'retras|paraliz|rechaz|investiga(?!ción|cion))\w*', re.I)
@@ -3721,6 +3862,24 @@ def aplicar_guarda_positiva(grupos: Sequence[dict], etiquetas: Dict[int, dict],
                     or (not tragedia_sin_accion
                         and _AUTORIA_PROPIA_PAT.search(oracion)
                         and any(a in n for a in actores)):
+                e['tono'] = 'Positivo'
+                corregidos.append(g.get('grupo'))
+                break
+            # Participación de la marca en reuniones/conversatorios/foros: es
+            # Positivo (regla del cliente, 2026-09-22). Requiere verbo de
+            # participación + nombre del evento + actor en la misma oración.
+            # No aplica en tragedia sin acción de la marca (la regla tragedia
+            # corre después y sigue mandando) ni toca Negativos.
+            if (not tragedia_sin_accion
+                    and re.search(r'\b(participa|participó|participaron|participará|'
+                                  r'asiste|asistió|asistieron|hizo parte|hace parte|'
+                                  r'formó parte|tomó parte|estuvo presente|'
+                                  r'interviene|intervino)\b', oracion, re.I)
+                    and re.search(r'\b(reuni[oó]n|reuniones|conversatorio|'
+                                  r'mesa de trabajo|mesa redonda|encuentro|'
+                                  r'foro|congreso|seminario|jornada|panel|'
+                                  r'simposio)\b', oracion, re.I)
+                    and any(a in n for a in actores)):
                 e['tono'] = 'Positivo'
                 corregidos.append(g.get('grupo'))
                 break

@@ -434,3 +434,66 @@ PKL de tema verificado y reforzado:
   `strip` vía `format_theme_label`), marca `origen='pkl'`, nunca toca el
   subtema, y se salta `asignar_temas`/`corregir_temas_con_jev`.
 - Tests: `tests/test_costo_pkl_tema.py` (12 ok).
+
+## 20. v4.14 — Unificación de subtemas entre lotes + Tema visible + badge PKL (2026-09-22)
+
+Pase final de unificación entre lotes (1 llamada LLM):
+- `unificar_subtemas_llm(cfg, grupos, etiquetas, uso=...)` corre después de
+  `canonizar_subtemas` + `unificar_subtemas_noticias_similares`, antes de las
+  guardas de tono (el voto de tono por subtema usa los subtemas ya unificados).
+- Recibe la lista completa de subtemas únicos (con un titular corto de ejemplo
+  por subtema para desambiguar) y pide al modelo agrupar solo los que son
+  EXACTAMENTE el mismo hecho/asunto. Prompt conservador: ante la duda no
+  fusiona; no une por genéricos, marca, ciudad/persona/fecha distintas.
+- `_sanitizar_fusiones`: índices 1-based válidos, ≥2 distintos por grupo, sin
+  repetir un índice en dos grupos. `_canonico_de_fusion`: gana el más
+  frecuente; en empate, el más corto (mismo criterio que `canonizar_subtemas`);
+  conserva el texto original verbatim.
+- Si la llamada falla, devuelve 0 sin romper el pipeline. No llama si hay ≤1
+  subtema único. La llamada suma a `uso` (tarjeta de costo).
+- `_ULTIMO_RESUMEN['subtemas_unificados_llm']` con el conteo; `app.py` lo
+  muestra en la línea informativa del análisis.
+
+Tema más visible:
+- Nuevo radio "Columna Tema_IA" en la sección 2 de configuración (junto a
+  "Lista de Temas"): "Solo Tono_IA + Subtema_IA (rápido)" /
+  "Agregar Tema_IA con IA (etapa adicional)". Default: rápido (igual que antes).
+- Eliminado el checkbox "Generar columna Tema_IA" de Ajustes finos (duplicaba
+  el control). El help del radio aclara que con PKL de tema la columna se
+  genera igual, sin costo extra de IA.
+- Texto de ayuda de la sección 3 (PKL) actualizado: subir un PKL de tema
+  activa Tema_IA automáticamente aunque se elija el modo rápido.
+
+Badge "Tema: PKL activo":
+- En resultados, si `modo_taxonomia == 'pkl'`, banner `st.success`:
+  "◆ Tema: PKL del cliente activo — N grupos clasificados con las clases del
+  modelo (verbatim, sin reescritura)."
+
+Tests: `tests/test_unificacion_subtemas_llm.py` (15 ok: sanitización,
+canónico por frecuencia/empate/verbatim, fusión aplicada, sin fusiones,
+fallo LLM no rompe, sin llamada con ≤1 subtema, suma a `uso`).
+
+## 21. v4.15 — Fix calidad subtema v4.14 + participación en reuniones es Positivo (2026-09-22)
+
+Regresión reportada de v4.14 (pase `unificar_subtemas_llm`): subtemas menos
+específicos y Positivos volteados a Neutro. Causas y correcciones:
+- Empate de frecuencia elegía el subtema MÁS CORTO → ahora el MÁS LARGO
+  (más específico). `_canonico_de_fusion` conserva verbatim.
+- La pasada fusionaba subtemas con tonos distintos y el voto de tono por
+  subtema (`unificar_tono_mismo_hecho`) volteaba Positivos a Neutro → ahora
+  se salta cualquier fusión con tonos heterogéneos (ante la duda, separar).
+- `_sanitizar_fusiones` tolera índices 0-based además de 1-based (antes una
+  respuesta 0-based se descartaba en silencio y no se fusionaba nada).
+
+Regla de tono (pedido del cliente): participación de la marca en reuniones /
+conversatorios / foros es Positivo.
+- En `aplicar_guarda_positiva`: verbo de participación (participa, asistió,
+  hizo parte, intervino…) + nombre del evento (reunión, conversatorio, mesa,
+  encuentro, foro…) + actor en la misma oración → Neutro a Positivo.
+- No toca Negativos; no aplica en tragedia sin acción de la marca (la regla
+  tragedia corre después y sigue mandando).
+- `eventos` ampliado con reunión/reuniones/conversatorio (organiza/convoca/
+  realiza/celebra + reunión también cuentan).
+
+Tests: `tests/test_unificacion_subtemas_llm.py` (24 ok, incl. nueva clase
+`TestGuardaParticipacion` con 6 casos).
