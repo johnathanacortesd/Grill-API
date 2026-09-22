@@ -849,6 +849,19 @@ def _load_optional_pkl_models(ai_config: Optional[dict]):
     return tone_model, theme_model
 
 
+def _ai_extra_con_pkl(ai_config: Optional[dict], theme_model) -> dict:
+    """Extra para enrich: si hay PKL de tema, fuerza incluir_tema=True.
+
+    La clasificación del PKL es local (sin llamadas LLM ni demora), así que
+    siempre se aplica aunque el checkbox "Generar columna Tema_IA" del
+    cliente venga desmarcado: el modelo del cliente manda.
+    """
+    extra = dict(ai_config or {})
+    if theme_model is not None:
+        extra["incluir_tema"] = True
+    return extra
+
+
 # ======================================
 # Proceso Principal
 # ======================================
@@ -888,6 +901,10 @@ def process_dossier(
     analisis = {}
 
     if has_ai:
+        # v4.13: el PKL de tema del cliente manda. La clasificación es local
+        # (sin llamadas LLM ni demora), así que siempre se aplica aunque el
+        # checkbox "Generar columna Tema_IA" venga desmarcado.
+        ai_extra = _ai_extra_con_pkl(ai_config, theme_model)
         emit_progress(progress, 70, "Iniciando análisis de Tono, Tema y Sub-tema…")
         rows = enrich_rows_with_ai(
             rows=rows,
@@ -899,7 +916,7 @@ def process_dossier(
             progress_callback=progress,
             tone_model=tone_model,
             theme_model=theme_model,
-            extra=ai_config,
+            extra=ai_extra,
         )
         analisis = ultimo_resumen()
     elif has_pkl:
@@ -929,7 +946,7 @@ def process_dossier(
 
     cols_to_export = output_columns_for_export(
         include_ai=has_ai or has_pkl,
-        include_tema=(ai_config or {}).get("incluir_tema", True),
+        include_tema=(ai_extra if has_ai else (ai_config or {})).get("incluir_tema", True),
     )
 
     emit_progress(progress, 94, "✓ Estructuración finalizada. Generando archivo Excel…")

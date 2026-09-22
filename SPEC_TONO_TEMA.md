@@ -410,3 +410,27 @@ Mejoras adicionales, todas neutras en calidad:
 Estimación para 445 filas con nano: ~6 oleadas de llamadas (234 grupos,
 lotes de 10, votos=2, 8 workers) + ~5 s locales → del orden de 2 minutos,
 frente a los 400+ s medidos con luna fallando.
+
+## 19. v4.13 — Costo aprox. en tarjetas + PKL de tema manda (2026-09-22)
+
+Costo aproximado de IA en la tarjeta de resultados finales:
+- `llamar_llm(..., uso=...)` acumula `prompt_tokens`/`completion_tokens` del
+  `usage` real de cada respuesta (seguro entre hilos con `_USO_LOCK`).
+- `PRECIOS_MODELO_USD` (USD/millón): nano $0.10/$0.40 (tarifas indicadas por
+  el cliente), luna $0.10/$0.50, sol $2.00/$10.00 (anuncio OpenAI).
+- `enrich_rows_with_ai` guarda en `_ULTIMO_RESUMEN`: `uso_tokens`
+  (input/output/llamadas), `costo_aprox_usd`, `costo_modelo`, `costo_precios`.
+- `app.py` muestra quinta tarjeta "Costo IA aprox." + caption con el detalle
+  (tokens in/out, llamadas, modelo). Solo cubre llamadas OpenAI; Jev no
+  entra en el cálculo.
+
+PKL de tema verificado y reforzado:
+- Con `theme_model` presente, `incluir_tema` se fuerza a True dentro de
+  `enrich_rows_with_ai` y en `pipeline._ai_extra_con_pkl` (para la columna
+  del Excel): la clasificación del PKL es local, sin llamadas LLM ni demora,
+  así que siempre se aplica aunque el checkbox "Generar columna Tema_IA"
+  venga desmarcado. Sin PKL, el checkbox sigue mandando.
+- Verificado: `aplicar_pkl_del_cliente` conserva las clases verbatim (solo
+  `strip` vía `format_theme_label`), marca `origen='pkl'`, nunca toca el
+  subtema, y se salta `asignar_temas`/`corregir_temas_con_jev`.
+- Tests: `tests/test_costo_pkl_tema.py` (12 ok).

@@ -405,7 +405,7 @@ def main():
                 <div class="app-header-icon">◈</div>
                 <div class="app-header-text">
                     <div class="app-header-title">Limpieza y Análisis de Noticias</div>
-                    <div class="app-header-version">v4.12 · Tono/Tema/Subtema por reglas + IA · Realizado por Johnathan Cortés</div>
+                    <div class="app-header-version">v4.13 · Tono/Tema/Subtema por reglas + IA · Realizado por Johnathan Cortés</div>
                 </div>
                 <div class="app-header-badge">Estructurador + IA</div>
             </div>""", unsafe_allow_html=True)
@@ -818,13 +818,28 @@ def main():
                                 st.caption("Son los Temas armados bottom-up en esta corrida. El próximo lote "
                                            "vuelve a agrupar sus propios subtemas; no se reutiliza el vocabulario.")
         
+            costo = (analisis or {}).get("costo_aprox_usd")
+            uso_t = (analisis or {}).get("uso_tokens") or {}
+            modelo_c = (analisis or {}).get("costo_modelo") or ""
+            if costo is not None:
+                costo_txt = "$%.2f" % costo if costo >= 0.01 else "$%.4f" % costo
+                det_costo = "%s tokens de entrada / %s de salida · %d llamadas · %s" % (
+                    f"{uso_t.get('input', 0):,}".replace(",", "."),
+                    f"{uso_t.get('output', 0):,}".replace(",", "."),
+                    uso_t.get('llamadas', 0), modelo_c)
+            else:
+                costo_txt, det_costo = "—", ""
+
             st.markdown(f"""
             <div class="metrics-grid">
               <div class="metric-card m-total"><div class="metric-val" style="color:var(--text)">{total}</div><div class="metric-lbl">Total Registros</div></div>
               <div class="metric-card m-unique"><div class="metric-val" style="color:var(--green)">{uniq}</div><div class="metric-lbl">Únicos</div></div>
               <div class="metric-card m-dup"><div class="metric-val" style="color:var(--amber)">{dups}</div><div class="metric-lbl">Duplicados</div></div>
               <div class="metric-card m-time"><div class="metric-val" style="color:var(--blue)">{dur}</div><div class="metric-lbl">Tiempo de Ejecución</div></div>
+              <div class="metric-card m-cost" title="{det_costo}"><div class="metric-val" style="color:var(--amber)">{costo_txt}</div><div class="metric-lbl">Costo IA aprox.</div></div>
             </div>""", unsafe_allow_html=True)
+            if det_costo:
+                st.caption("Costo estimado del análisis: " + det_costo + ".")
         
             _historial = []
             try:
