@@ -1247,15 +1247,31 @@ def _tono_con_jev(cfg: dict, grupo: dict) -> Optional[str]:
         return None
 
 
+def _param_limite(modelo: str) -> str:
+    """Nombre del parametro de limite de tokens segun la familia del modelo.
+
+    Los modelos nuevos (GPT-5/6, serie o) rechazan 'max_tokens' con HTTP 400 y
+    exigen 'max_completion_tokens'; los anteriores usan 'max_tokens'.
+    """
+    m = str(modelo or '').strip().lower()
+    if re.match(r'^(gpt-[5-9]|o[0-9])', m):
+        return 'max_completion_tokens'
+    return 'max_tokens'
+
+
 def llamar_llm(cfg: dict, mensajes: List[dict], json_mode: bool = True,
                max_tokens: int = 4000, temperatura: float = 0.0, intentos: int = 3) -> str:
     url = (cfg.get('base_url') or BASE_URL_DEFECTO).rstrip('/') + '/chat/completions'
-    payload = {'model': cfg.get('model') or MODELO_DEFECTO, 'messages': mensajes,
-               'temperature': temperatura, 'max_tokens': max_tokens}
+    modelo = cfg.get('model') or MODELO_DEFECTO
+    clave_limite = _param_limite(modelo)
+    payload = {'model': modelo, 'messages': mensajes,
+               'temperature': temperatura, clave_limite: max_tokens}
     if json_mode:
         payload['response_format'] = {'type': 'json_object'}
     cab = {'Authorization': 'Bearer %s' % cfg.get('api_key', ''), 'Content-Type': 'application/json'}
     ultimo = ''
+    limite_ajustado = False
+    temp_ajustada = False
     for k in range(intentos):
         try:
             r = requests.post(url, headers=cab, json=payload, timeout=cfg.get('timeout', 120))
@@ -1263,6 +1279,23 @@ def llamar_llm(cfg: dict, mensajes: List[dict], json_mode: bool = True,
                 ultimo = 'HTTP %s' % r.status_code
                 time.sleep(2 + 3 * k)
                 continue
+            if r.status_code == 400:
+                cuerpo = (r.text or '').lower()
+                if (not limite_ajustado and 'max_completion_tokens' in cuerpo
+                        and clave_limite == 'max_tokens'):
+                    # El modelo rechaza max_tokens: autocorregir y reintentar.
+                    payload['max_completion_tokens'] = payload.pop('max_tokens')
+                    clave_limite = 'max_completion_tokens'
+                    limite_ajustado = True
+                    ultimo = 'HTTP 400 (max_tokens no soportado; reintentando con max_completion_tokens)'
+                    continue
+                if (not temp_ajustada and 'temperature' in cuerpo
+                        and 'temperature' in payload):
+                    # El modelo no acepta temperature distinta del default.
+                    payload.pop('temperature', None)
+                    temp_ajustada = True
+                    ultimo = 'HTTP 400 (temperature no soportada; reintentando sin temperature)'
+                    continue
             if r.status_code != 200:
                 raise RuntimeError('HTTP %s: %s' % (r.status_code, r.text[:300]))
             return r.json()['choices'][0]['message']['content']

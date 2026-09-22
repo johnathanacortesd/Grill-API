@@ -362,3 +362,23 @@ Decisión del usuario: el default del selector pasa a `gpt-6-luna`
 `pipeline.py` también apuntan a luna), y el checkbox "Generar columna
 Tema_IA" sale **desmarcado** por defecto — el Excel sale solo con
 `Tono_IA` y `Subtema_IA` salvo que el usuario active el tema a mano.
+
+## 17. v4.11 — Fix crítico: `max_completion_tokens` para GPT-6 (2026-09-22)
+
+Fallo reportado con gpt-6-luna: `HTTP 400: Unsupported parameter: 'max_tokens'
+is not supported with this model. Use 'max_completion_tokens' instead.`
+`llamar_llm` enviaba siempre `max_tokens`; la API lo rechazaba y **todas**
+las llamadas fallaban. Cada grupo caía entonces al fallback determinista
+(tono `Neutro` + subtema = primeras palabras del título), lo que explicaba a
+la vez los 377 s (reintentos inútiles en cada lote) y la calidad destruida.
+La lógica de calidad (prompts, gate, guardas) no se tocó en v4.9–v4.10: lo
+que se vio fue el fallback total, no un cambio de criterio.
+
+- Nuevo `_param_limite(modelo)`: `max_completion_tokens` para familias nuevas
+  (`gpt-5/6…`, serie `o`); `max_tokens` para el resto (nano sin cambios).
+- Autocorrección reactiva en `llamar_llm`: si un 400 menciona
+  `max_completion_tokens`, reintenta con el parámetro corregido; si un 400
+  rechaza `temperature`, reintenta sin ella. Cada ajuste ocurre una sola vez
+  por llamada y cubre modelos futuros sin cambiar código.
+- Tests: `tests/test_llamar_llm_params.py` (6 ok: payload inicial de luna,
+  swap reactivo ante 400, retiro de temperature).
