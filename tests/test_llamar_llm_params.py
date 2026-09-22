@@ -59,7 +59,7 @@ class TestLlamarLlmAutocorreccion(unittest.TestCase):
             vistos.append(json)
             return _Resp(200, data=_OK)
 
-        with patch.object(az.requests, 'post', side_effect=fake_post):
+        with patch.object(az, '_http_post', side_effect=fake_post):
             az.llamar_llm(self._cfg('gpt-6-luna'), [{'role': 'user', 'content': 'hola'}],
                           json_mode=False)
         self.assertEqual(len(vistos), 1)
@@ -78,7 +78,7 @@ class TestLlamarLlmAutocorreccion(unittest.TestCase):
                 return _Resp(400, text=_ERR_LUNA)
             return _Resp(200, data=_OK)
 
-        with patch.object(az.requests, 'post', side_effect=fake_post):
+        with patch.object(az, '_http_post', side_effect=fake_post):
             out = az.llamar_llm(self._cfg('modelo-futuro-xyz'),
                                 [{'role': 'user', 'content': 'hola'}], json_mode=False)
         self.assertEqual(llamadas['n'], 2)
@@ -99,12 +99,35 @@ class TestLlamarLlmAutocorreccion(unittest.TestCase):
                                       "'temperature' is not supported with this model.\" } }")
             return _Resp(200, data=_OK)
 
-        with patch.object(az.requests, 'post', side_effect=fake_post):
+        with patch.object(az, '_http_post', side_effect=fake_post):
             az.llamar_llm(self._cfg('gpt-6-luna'), [{'role': 'user', 'content': 'hola'}],
                           json_mode=False)
         self.assertEqual(llamadas['n'], 2)
         self.assertIn('temperature', vistos[0])
         self.assertNotIn('temperature', vistos[1])
+
+
+class TestSesionReutilizada(unittest.TestCase):
+    def test_una_sola_sesion_para_varias_llamadas(self):
+        import analyzer_tono_tema as az2
+        az2._SESION_HTTP = None
+        llamadas = {'post': 0, 'session': 0}
+
+        class _FakeSession:
+            def post(self, url, headers=None, json=None, timeout=None):
+                llamadas['post'] += 1
+                return _Resp(200, data=_OK)
+
+        def fake_session():
+            llamadas['session'] += 1
+            return _FakeSession()
+
+        with patch.object(az.requests, 'Session', side_effect=fake_session):
+            az._http_post('https://x.test/v1', {}, {}, 10)
+            az._http_post('https://x.test/v1', {}, {}, 10)
+        self.assertEqual(llamadas['session'], 1)
+        self.assertEqual(llamadas['post'], 2)
+        az2._SESION_HTTP = None
 
 
 if __name__ == '__main__':

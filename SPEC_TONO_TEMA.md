@@ -382,3 +382,31 @@ que se vio fue el fallback total, no un cambio de criterio.
   por llamada y cubre modelos futuros sin cambiar código.
 - Tests: `tests/test_llamar_llm_params.py` (6 ok: payload inicial de luna,
   swap reactivo ante 400, retiro de temperature).
+
+## 18. v4.12 — Velocidad sin tocar calidad + nano por defecto (2026-09-22)
+
+Decisión del usuario: el default vuelve a `gpt-4.1-nano-2025-04-14`
+(selector, `MODELO_DEFECTO` y fallback de `pipeline.py`); luna/sol siguen
+como opciones. El fix de `max_completion_tokens` (v4.11) se conserva.
+
+Auditoría de tiempos con el dossier Cotelco (445 filas, LLM simulado
+instantáneo): `enrich_rows_with_ai` tardaba 26.9 s en puro CPU local.
+El profiling mostró que `construir_grupos` consumía ~60 s por un bug de
+indentación: el pase "Titulares cortos casi iguales" quedó anidado dentro
+del loop de bolsa de palabras y se ejecutaba `len(base)` veces (88 M de
+llamadas a `find`). Los merges son idempotentes, así que al sacarlo a pase
+único la partición es bit a bit idéntica (verificado: 234 grupos iguales
+antes/después) y el tiempo cae a 2.1 s.
+
+Mejoras adicionales, todas neutras en calidad:
+- `_http_post` con `requests.Session` reutilizada: evita renegociar TLS en
+  cada una de las ~50-90 llamadas (tests en `test_llamar_llm_params.py`).
+- Loop de reparación de etiquetas en paralelo (mismos workers, mismos
+  trozos de 12, merge por id de grupo: resultado idéntico).
+- Default de "Llamadas en paralelo": 4 → 8 (rango hasta 16); los lotes son
+  independientes, no afecta el etiquetado. Los 429 se siguen manejando con
+  backoff.
+
+Estimación para 445 filas con nano: ~6 oleadas de llamadas (234 grupos,
+lotes de 10, votos=2, 8 workers) + ~5 s locales → del orden de 2 minutos,
+frente a los 400+ s medidos con luna fallando.

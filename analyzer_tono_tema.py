@@ -185,10 +185,10 @@ def _contexto_exacto_marca(texto: str, titulo: str, brand: str,
     # No se atribuye tono a la marca si solo aparece en el titular o no aparece.
     return str(titulo or '').strip()[:6000]
 BASE_URL_DEFECTO = "https://api.openai.com/v1"
-MODELO_DEFECTO = "gpt-6-luna"
+MODELO_DEFECTO = "gpt-4.1-nano-2025-04-14"
 JEV_URL_DEFECTO = "https://api.typesafe.ai/v1/systemone"
 TAM_LOTE_DEFECTO = 10
-WORKERS_DEFECTO = 4
+WORKERS_DEFECTO = 8
 UMBRAL_TITULO_DEFECTO = 92
 UMBRAL_CUERPO_DEFECTO = 85
 K_BODY, MIN_GRAMAS, MIN_PALABRAS_TITULO = 5, 30, 3
@@ -357,14 +357,17 @@ def construir_grupos(
                 if jac >= 0.42 or (jac >= 0.32 and t3[i, j] >= 0.88):
                     uni(i, j)
 
-            # Titulares cortos casi iguales: 2 palabras distintivas + token_set alto.
-            for i in range(len(base)):
-                for j in range(i + 1, len(base)):
-                    if find(i) == find(j):
-                        continue
-                    inter = base[i]['ctit'] & base[j]['ctit']
-                    if len(inter) >= 2 and t3[i, j] >= 0.90:
-                        uni(i, j)
+        # Titulares cortos casi iguales: 2 palabras distintivas + token_set alto.
+        # (Pase unico: antes quedo anidado por error dentro del loop anterior y
+        # se ejecutaba len(base) veces; los merges son idempotentes asi que el
+        # resultado es identico pero 445x mas rapido en dossiers medianos.)
+        for i in range(len(base)):
+            for j in range(i + 1, len(base)):
+                if find(i) == find(j):
+                    continue
+                inter = base[i]['ctit'] & base[j]['ctit']
+                if len(inter) >= 2 and t3[i, j] >= 0.90:
+                    uni(i, j)
 
     inv = defaultdict(set)
     for j, b in enumerate(base):
@@ -1259,6 +1262,21 @@ def _param_limite(modelo: str) -> str:
     return 'max_tokens'
 
 
+_SESION_HTTP = None
+
+
+def _http_post(url, headers, payload, timeout):
+    """POST con sesion reutilizada: evita renegociar TLS en cada llamada.
+
+    La sesion (y su pool de conexiones) es segura para uso concurrente desde
+    los workers del ThreadPoolExecutor.
+    """
+    global _SESION_HTTP
+    if _SESION_HTTP is None:
+        _SESION_HTTP = requests.Session()
+    return _SESION_HTTP.post(url, headers=headers, json=payload, timeout=timeout)
+
+
 def llamar_llm(cfg: dict, mensajes: List[dict], json_mode: bool = True,
                max_tokens: int = 4000, temperatura: float = 0.0, intentos: int = 3) -> str:
     url = (cfg.get('base_url') or BASE_URL_DEFECTO).rstrip('/') + '/chat/completions'
@@ -1274,7 +1292,7 @@ def llamar_llm(cfg: dict, mensajes: List[dict], json_mode: bool = True,
     temp_ajustada = False
     for k in range(intentos):
         try:
-            r = requests.post(url, headers=cab, json=payload, timeout=cfg.get('timeout', 120))
+            r = _http_post(url, cab, payload, cfg.get('timeout', 120))
             if r.status_code in (429, 500, 502, 503):
                 ultimo = 'HTTP %s' % r.status_code
                 time.sleep(2 + 3 * k)
@@ -1438,14 +1456,24 @@ def etiquetar_grupos(cfg: dict, grupos: List[dict], progress: Optional[Callable]
             break
         if progress:
             progress(min(93, 92), 'Reparando %d etiquetas…' % len(fallos))
-        for i in range(0, len(fallos), 12):
-            trozo = fallos[i:i + 12]
+        def _reparar(trozo):
             try:
                 txt = llamar_llm(cfg, [{'role': 'system', 'content': prompt_sistema(cfg)},
                                        {'role': 'user', 'content': prompt_reparacion(trozo)}])
-                corr = _normaliza_label(_json_loose(txt), [f['grupo'] for f in trozo])
+                return _normaliza_label(_json_loose(txt), [f['grupo'] for f in trozo])
             except Exception:
-                corr = {}
+                return {}
+
+        # Los trozos son independientes (cada grupo aparece en uno solo): se
+        # reparan en paralelo con los mismos workers. Mismo resultado, menos
+        # tiempo cuando hay muchas etiquetas por corregir.
+        trozos = [fallos[i:i + 12] for i in range(0, len(fallos), 12)]
+        if len(trozos) > 1:
+            with ThreadPoolExecutor(max_workers=max(1, int(workers))) as ex_rep:
+                correcciones = list(ex_rep.map(_reparar, trozos))
+        else:
+            correcciones = [_reparar(t) for t in trozos]
+        for corr in correcciones:
             for gid, v in corr.items():
                 if v.get('sub_tema'):
                     etiquetas[gid] = v

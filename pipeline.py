@@ -895,7 +895,7 @@ def process_dossier(
             brand=ai_config["brand"],
             aliases=ai_config.get("aliases", []),
             api_key=ai_config["api_key"],
-            model=ai_config.get("model", "gpt-6-luna"),
+            model=ai_config.get("model", "gpt-4.1-nano-2025-04-14"),
             progress_callback=progress,
             tone_model=tone_model,
             theme_model=theme_model,
