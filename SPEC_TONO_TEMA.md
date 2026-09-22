@@ -336,3 +336,22 @@ El cliente puede desactivar la columna `Tema_IA` desde "Ajustes finos"
   temas del lote.
 
 No cambia el default: sin el checkbox, el comportamiento es idéntico a v4.7.
+
+## 15. v4.9 — Selector de modelo: gpt-6-luna (2026-09-22)
+
+OpenAI lanzó el 2026-09-22 los modelos GPT-6 Sol y GPT-6 Luna, disponibles en
+la API como `gpt-6-sol` y `gpt-6-luna`. Luna cuesta $0.10/1M tokens de entrada
+y $0.50/1M de salida (mitad que su predecesor) y está descrito por OpenAI como
+su modelo más eficiente para tareas enfocadas de alto volumen — justo el perfil
+del etiquetado por lotes de esta app.
+
+- La app ya hablaba con la API vía `/chat/completions` con `model` como
+  parámetro libre: ningún hardcode impedía usar otro modelo.
+- Nuevo `st.selectbox` "Modelo de IA" en Ajustes finos con opciones
+  `gpt-4.1-nano-2025-04-14` (default, comportamiento sin cambios),
+  `gpt-6-luna` y `gpt-6-sol`. El valor viaja `pending_ai_config["model"]` →
+  `enrich_rows_with_ai(model=...)` → `cfg['model']` → payload de
+  `llamar_llm`, verificado por `tests/test_modelo_luna.py`.
+- El default se mantiene en `gpt-4.1-nano-2025-04-14`: los prompts y el gate
+  de validación se calibraron contra ese modelo; cambiar de modelo es
+  decisión del usuario por dossier.

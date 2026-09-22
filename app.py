@@ -405,7 +405,7 @@ def main():
                 <div class="app-header-icon">◈</div>
                 <div class="app-header-text">
                     <div class="app-header-title">Limpieza y Análisis de Noticias</div>
-                    <div class="app-header-version">v4.8 · Tono/Tema/Subtema por reglas + IA · Realizado por Johnathan Cortés</div>
+                    <div class="app-header-version">v4.9 · Tono/Tema/Subtema por reglas + IA · Realizado por Johnathan Cortés</div>
                 </div>
                 <div class="app-header-badge">Estructurador + IA</div>
             </div>""", unsafe_allow_html=True)
@@ -552,6 +552,14 @@ def main():
                         value=True,
                         help="Si la desactivas, se omite por completo la etapa de temas: el proceso es "
                              "más rápido y el Excel sale solo con Tono_IA y Subtema_IA.",
+                    )
+                    modelo_input = st.selectbox(
+                        "Modelo de IA",
+                        options=["gpt-4.1-nano-2025-04-14", "gpt-6-luna", "gpt-6-sol"],
+                        index=0,
+                        help="gpt-6-luna (lanzado 2026-09-22) es el más rápido y económico "
+                             "($0.10 por 1M tokens de entrada): ideal para dossiers de alto volumen. "
+                             "gpt-6-sol es más capaz pero más costoso.",
                     )
                     st.markdown("**💾 Perfil de cliente**")
                     guardar_chk = st.checkbox(
@@ -714,7 +722,7 @@ def main():
                                 "api_key": api_key if enable_ai else None,
                                 "typesafe_api_key": typesafe_api_key if enable_ai else None,
                                 "typesafe_model": "jev-latest",
-                                "model": "gpt-4.1-nano-2025-04-14",
+                                "model": modelo_input,
                                 "historial_dir": st.secrets.get("HISTORIAL_DIR"),
                                 "tone_pkl_bytes": tone_bytes,
                                 "theme_pkl_bytes": theme_bytes,
