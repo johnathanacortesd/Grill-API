@@ -316,3 +316,23 @@ marca no une familias, PISA no se mezcla con criminología),
 guard por miembro en `asignar_temas` (cada noticia recibe el tema que la describe;
 el miembro ajeno se separa con tema propio — casos Gutiérrez y Foro de periodismo
 científico — y las familias legítimas no se fragmentan). No hay llamadas a API.
+
+## 14. v4.8: modo sin tema (solo tono + subtema)
+
+El cliente puede desactivar la columna `Tema_IA` desde "Ajustes finos"
+(checkbox "Generar columna Tema_IA", default activado). Con
+`incluir_tema=False` en la config de IA:
+
+- `enrich_rows_with_ai` omite por completo la etapa de temas: no llama a
+  `asignar_temas` (ahorra las llamadas LLM secuenciales de
+  `nombrar_familias_tema`), ni a `corregir_temas_con_jev`, ni aplica el PKL de
+  tema. El tono y el subtema siguen el flujo normal (lotes con votos,
+  guardas deterministas, unificación por mismo hecho).
+- `volcar_analisis_en_filas(..., incluir_tema=False)` deja `Tema_IA` vacío y
+  omite el fallback determinista.
+- `output_columns_for_export(..., include_tema=False)` excluye `Tema_IA` del
+  xlsx; el archivo sale con `Tono_IA` y `Subtema_IA` después de Audiencia.
+- El resumen reporta `modo_taxonomia='omitido'`; la UI no muestra sección de
+  temas del lote.
+
+No cambia el default: sin el checkbox, el comportamiento es idéntico a v4.7.

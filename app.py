@@ -405,7 +405,7 @@ def main():
                 <div class="app-header-icon">◈</div>
                 <div class="app-header-text">
                     <div class="app-header-title">Limpieza y Análisis de Noticias</div>
-                    <div class="app-header-version">v4.7 · Tono/Tema/Subtema por reglas + IA · Realizado por Johnathan Cortés</div>
+                    <div class="app-header-version">v4.8 · Tono/Tema/Subtema por reglas + IA · Realizado por Johnathan Cortés</div>
                 </div>
                 <div class="app-header-badge">Estructurador + IA</div>
             </div>""", unsafe_allow_html=True)
@@ -547,6 +547,12 @@ def main():
                         help="Cada grupo se etiqueta N veces y gana la mayoría; un empate cae a Neutro. "
                              "Con 2 se reducen los vaivenes de los modelos pequeños; con 3 sube el costo "
                              "una vez más.")
+                    incluir_tema_input = st.checkbox(
+                        "Generar columna Tema_IA",
+                        value=True,
+                        help="Si la desactivas, se omite por completo la etapa de temas: el proceso es "
+                             "más rápido y el Excel sale solo con Tono_IA y Subtema_IA.",
+                    )
                     st.markdown("**💾 Perfil de cliente**")
                     guardar_chk = st.checkbox(
                         "Guardar esta configuración como perfil al procesar",
@@ -699,6 +705,7 @@ def main():
                                 "taxonomia": tax_eff,
                                 "cubos_objetivo": int(cubos_objetivo_input),
                                 "votos": int(votos_input),
+                                "incluir_tema": bool(incluir_tema_input),
                                 "permitir_cubos_nuevos": True,
                                 "tam_lote": int(tam_lote_input),
                                 "workers": int(workers_input),

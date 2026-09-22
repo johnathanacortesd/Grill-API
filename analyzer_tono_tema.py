@@ -3064,23 +3064,28 @@ def aplicar_pkl_del_cliente(
 
 def volcar_analisis_en_filas(rows: List[dict], mapa: Dict[int, int],
                              etiquetas: Dict[int, dict], temas: Dict[int, str],
-                             preservar_tema: bool = False) -> List[dict]:
+                             preservar_tema: bool = False,
+                             incluir_tema: bool = True) -> List[dict]:
     """Propaga etiqueta de GRUPO. No reasigna tema por fila.
 
     `preservar_tema=True` (PKL de tema): solo rellena si la celda quedó vacía.
     No reescribe clases del cliente con el gate de frases del lote.
+    `incluir_tema=False` (v4.8): deja Tema_IA vacío y omite el fallback, porque
+    la columna no se exporta.
     """
     for i, row in enumerate(rows):
         if row.get('is_duplicate'):
             row['Tono_IA'] = 'Duplicada'
-            row['Tema_IA'] = '-'
+            row['Tema_IA'] = '-' if incluir_tema else ''
             row['Subtema_IA'] = '-'
             continue
         gid = mapa.get(i)
         e = etiquetas.get(gid, {}) if gid else {}
         row['Tono_IA'] = e.get('tono') or 'Neutro'
-        row['Tema_IA'] = temas.get(gid) if gid is not None else ''
+        row['Tema_IA'] = (temas.get(gid) if gid is not None else '') if incluir_tema else ''
         row['Subtema_IA'] = e.get('sub_tema') or 'Hecho informativo'
+        if not incluir_tema:
+            continue
         falta = not _tema_util(row['Tema_IA'])
         copia_titulo = _tema_copia_o_prefijo_titulo(row['Tema_IA'], [_titulo_fila(row, {})])
         if falta or (copia_titulo and not preservar_tema):
@@ -3137,6 +3142,10 @@ def enrich_rows_with_ai(
     votos = int(extra.get('votos') or 2)
     umbral_titulo = int(extra.get('umbral_titulo') or UMBRAL_TITULO_DEFECTO)
     umbral_cuerpo = int(extra.get('umbral_cuerpo') or UMBRAL_CUERPO_DEFECTO)
+    # v4.8: el cliente puede pedir solo tono + subtema. Con incluir_tema=False se
+    # omite por completo la etapa de asignación de temas (asignar_temas,
+    # corrección con Jev y PKL de tema) y el Excel sale sin la columna Tema_IA.
+    incluir_tema = bool(extra.get('incluir_tema', True))
     progreso = progress_callback or (lambda pct, msg: None)
 
     # --- contexto de marca (funcion existente, se conserva para la columna de auditoria) ---
@@ -3198,9 +3207,11 @@ def enrich_rows_with_ai(
             _ULTIMO_RESUMEN['tono_unificado_mismo_hecho'] = unificados
 
     # --- tema: PKL del cliente = clases del modelo; si no hay PKL, bottom-up de ESTE lote ---
+    # v4.8: con incluir_tema=False se salta toda la etapa (ni LLM de temas, ni
+    # Jev, ni PKL de tema). Ahorra las llamadas secuenciales de nombrar_familias_tema.
     temas: Dict[int, str] = {}
     origen: Dict[int, str] = {}
-    if theme_model is None:
+    if incluir_tema and theme_model is None:
         tax_lote = {'temas': candidatos_tax, 'reglas': derivar_reglas(candidatos_tax) if candidatos_tax else []}
         temas, origen = asignar_temas(cfg, grupos, etiquetas, tax_lote, progreso)
         corregir_temas_con_jev(cfg, grupos, etiquetas, temas)
@@ -3209,12 +3220,13 @@ def enrich_rows_with_ai(
     # del lote no reescribe las clases del cliente (antes las sustituía).
     pkl_counts = aplicar_pkl_del_cliente(
         grupos, rows, etiquetas, temas, origen,
-        tone_model=tone_model, theme_model=theme_model,
+        tone_model=tone_model, theme_model=theme_model if incluir_tema else None,
     )
 
     volcar_analisis_en_filas(
         rows, mapa, etiquetas, temas,
-        preservar_tema=theme_model is not None,
+        preservar_tema=(theme_model is not None) and incluir_tema,
+        incluir_tema=incluir_tema,
     )
 
     temas_lote: List[str] = []
@@ -3225,7 +3237,15 @@ def enrich_rows_with_ai(
             vistos.add(k)
             temas_lote.append(t)
     _ULTIMO_RESUMEN['taxonomia'] = temas_lote
-    if theme_model is not None:
+    if not incluir_tema:
+        # Sin etapa de temas: el resumen no reporta taxonomía del lote.
+        _ULTIMO_RESUMEN['modo_taxonomia'] = 'omitido'
+        _ULTIMO_RESUMEN['taxonomia_detalle'] = {
+            'temas': [],
+            'reglas': [],
+            'nota': 'Etapa de temas omitida por configuración (solo tono + subtema).',
+        }
+    elif theme_model is not None:
         _ULTIMO_RESUMEN['modo_taxonomia'] = 'pkl'
         _ULTIMO_RESUMEN['temas_por_pkl'] = pkl_counts.get('tema', 0)
         _ULTIMO_RESUMEN['taxonomia_detalle'] = {
@@ -3248,7 +3268,10 @@ def enrich_rows_with_ai(
     _ULTIMO_RESUMEN['filas'] = len(rows)
     _ULTIMO_RESUMEN['duplicadas'] = sum(1 for r in rows if r.get('is_duplicate'))
     if progress_callback:
-        progreso(93, 'Etiquetado listo: %d grupos, %d temas del lote' % (len(grupos), len(temas_lote)))
+        if incluir_tema:
+            progreso(93, 'Etiquetado listo: %d grupos, %d temas del lote' % (len(grupos), len(temas_lote)))
+        else:
+            progreso(93, 'Etiquetado listo: %d grupos (solo tono + subtema)' % len(grupos))
     return rows
 
 # ============================================================================

@@ -56,11 +56,12 @@ AI_COLUMNS_AFTER_AUDIENCIA = ["Tono_IA", "Tema_IA", "Subtema_IA"]
 CONTEXTO_ANALIZADO_COL = "Contexto analizado"
 
 
-def output_columns_for_export(include_ai: bool = False) -> List[str]:
+def output_columns_for_export(include_ai: bool = False, include_tema: bool = True) -> List[str]:
     """Columnas del xlsx de salida.
 
     Con IA/PKL: inserta Tono_IA, Tema_IA, Subtema_IA después de Audiencia y deja
     Contexto analizado como última columna. Sin IA: solo BASE_OUTPUT_COLUMNS.
+    v4.8: con include_tema=False se omite la columna Tema_IA (solo tono + subtema).
     """
     cols = list(BASE_OUTPUT_COLUMNS)
     if not include_ai:
@@ -69,6 +70,8 @@ def output_columns_for_export(include_ai: bool = False) -> List[str]:
     for offset, col in enumerate(AI_COLUMNS_AFTER_AUDIENCIA):
         if col not in cols:
             cols.insert(audiencia_idx + 1 + offset, col)
+    if not include_tema and "Tema_IA" in cols:
+        cols.remove("Tema_IA")
     if CONTEXTO_ANALIZADO_COL in cols:
         cols = [c for c in cols if c != CONTEXTO_ANALIZADO_COL]
     cols.append(CONTEXTO_ANALIZADO_COL)
@@ -924,7 +927,10 @@ def process_dossier(
     rows.sort(key=lambda r: (norm_key(r.get(KEY_MAP.get("titulo", "Título"), "")),
                              str(r.get(KEY_MAP.get("idnoticia", "ID Noticia"), ""))))
 
-    cols_to_export = output_columns_for_export(include_ai=has_ai or has_pkl)
+    cols_to_export = output_columns_for_export(
+        include_ai=has_ai or has_pkl,
+        include_tema=(ai_config or {}).get("incluir_tema", True),
+    )
 
     emit_progress(progress, 94, "✓ Estructuración finalizada. Generando archivo Excel…")
 
