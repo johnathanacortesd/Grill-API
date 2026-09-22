@@ -185,7 +185,7 @@ def _contexto_exacto_marca(texto: str, titulo: str, brand: str,
     # No se atribuye tono a la marca si solo aparece en el titular o no aparece.
     return str(titulo or '').strip()[:6000]
 BASE_URL_DEFECTO = "https://api.openai.com/v1"
-MODELO_DEFECTO = "gpt-4.1-nano-2025-04-14"
+MODELO_DEFECTO = "gpt-6-luna"
 JEV_URL_DEFECTO = "https://api.typesafe.ai/v1/systemone"
 TAM_LOTE_DEFECTO = 10
 WORKERS_DEFECTO = 4

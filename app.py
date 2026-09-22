@@ -405,7 +405,7 @@ def main():
                 <div class="app-header-icon">◈</div>
                 <div class="app-header-text">
                     <div class="app-header-title">Limpieza y Análisis de Noticias</div>
-                    <div class="app-header-version">v4.9 · Tono/Tema/Subtema por reglas + IA · Realizado por Johnathan Cortés</div>
+                    <div class="app-header-version">v4.10 · Tono/Tema/Subtema por reglas + IA · Realizado por Johnathan Cortés</div>
                 </div>
                 <div class="app-header-badge">Estructurador + IA</div>
             </div>""", unsafe_allow_html=True)
@@ -525,7 +525,7 @@ def main():
                     ca, cb, cc, cd = st.columns(4)
                     with ca:
                         tam_lote_input = st.slider("Grupos por llamada", 5, 30, 10, 1,
-                                                   help="Con gpt-4.1-nano 10 funciona mejor.")
+                                                   help="10 es un buen punto de partida.")
                     with cb:
                         workers_input = st.slider("Llamadas en paralelo", 1, 8, 4, 1,
                                                   help="Sube para dossiers grandes; más hilos, más velocidad.")
@@ -549,13 +549,14 @@ def main():
                              "una vez más.")
                     incluir_tema_input = st.checkbox(
                         "Generar columna Tema_IA",
-                        value=True,
-                        help="Si la desactivas, se omite por completo la etapa de temas: el proceso es "
-                             "más rápido y el Excel sale solo con Tono_IA y Subtema_IA.",
+                        value=False,
+                        help="Si la activas, se genera la columna Tema_IA (etapa adicional, "
+                             "más lenta). Desactivada por defecto: el Excel sale solo con "
+                             "Tono_IA y Subtema_IA.",
                     )
                     modelo_input = st.selectbox(
                         "Modelo de IA",
-                        options=["gpt-4.1-nano-2025-04-14", "gpt-6-luna", "gpt-6-sol"],
+                        options=["gpt-6-luna", "gpt-4.1-nano-2025-04-14", "gpt-6-sol"],
                         index=0,
                         help="gpt-6-luna (lanzado 2026-09-22) es el más rápido y económico "
                              "($0.10 por 1M tokens de entrada): ideal para dossiers de alto volumen. "

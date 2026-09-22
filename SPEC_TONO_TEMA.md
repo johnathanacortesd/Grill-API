@@ -352,6 +352,13 @@ del etiquetado por lotes de esta app.
   `gpt-6-luna` y `gpt-6-sol`. El valor viaja `pending_ai_config["model"]` →
   `enrich_rows_with_ai(model=...)` → `cfg['model']` → payload de
   `llamar_llm`, verificado por `tests/test_modelo_luna.py`.
-- El default se mantiene en `gpt-4.1-nano-2025-04-14`: los prompts y el gate
-  de validación se calibraron contra ese modelo; cambiar de modelo es
-  decisión del usuario por dossier.
+- v4.9 mantenía `gpt-4.1-nano-2025-04-14` como default (los prompts y el gate
+  se calibraron contra ese modelo).
+
+## 16. v4.10 — Defaults: gpt-6-luna y sin columna Tema_IA (2026-09-22)
+
+Decisión del usuario: el default del selector pasa a `gpt-6-luna`
+(`MODELO_DEFECTO` en `analyzer_tono_tema.py` y el fallback de
+`pipeline.py` también apuntan a luna), y el checkbox "Generar columna
+Tema_IA" sale **desmarcado** por defecto — el Excel sale solo con
+`Tono_IA` y `Subtema_IA` salvo que el usuario active el tema a mano.
