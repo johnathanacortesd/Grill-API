@@ -545,3 +545,75 @@ par de prueba). Suite completa: 196/196 OK.
   `km["tipodemedio"]`) y 2000 en el resto. El tipo de medio se pasa desde el
   flujo principal; sin vecinas: solo la oración-mención.
 - Tests nuevos: `TestContextoExactoCalibrado` (8 ok). Suite: 204/204 OK.
+
+## 23. v4.17 — Fix caso Unisimón «La Universidad de Atalaya» (2026-09-23)
+
+Dos errores graves en una nota (cliente Universidad Simón Bolívar):
+subtema «Investigación sobre Carnaval 2027» (hecho ajeno) y tono Neutro
+(debía ser Positivo: la marca participa en la creación del campus).
+
+- **Causa 1 (subtema):** `unificar_subtemas_noticias_similares` unía grupos
+  por señales débiles y el canon por frecuencia sobrescribía el subtema
+  correcto de la minoría con el de la mayoría, sin verificar mismo hecho.
+- **Fix 1:** el canon solo se adopta con evidencia FUERTE y directa entre la
+  pareja (`_puede_adoptar_canon`): subtemas ya similares, titulares casi
+  duplicados (token_set_ratio ≥ 80 y ≥2 palabras de contenido), o pasajes de
+  contexto casi idénticos (`_solapamiento_contexto ≥ 0.75`; calibrado: mismo
+  hecho real ≈0.83, boilerplate compartido ≈0.62). Ante la duda, separar: la
+  unión débil ya no renombra.
+- **Causa 2 (tono):** `unificar_tono_mismo_hecho` corría DESPUÉS de las
+  guardas, así que el voto por subtema revertía el Positivo que la guarda
+  positiva sí había detectado (verificado por simulación con el texto real).
+- **Fix 2:** el voto por hecho corre ANTES que las guardas deterministas;
+  las reglas de criterio del cliente (guarda positiva, tragedia, crítica con
+  respuesta…) tienen la última palabra. Efecto colateral correcto: la regla
+  tragedia ya no puede ser revertida por el voto a Positivo.
+- Todo paramétrico por marca/alias/voceros y por dossier: nada atado a cliente.
+- Tests nuevos: `tests/test_caso_atalaya_unisimon.py` (5 ok). Suite: 209/209 OK.
+
+## 24. v4.18 — Ajustes tras auditoría del dossier Unisimón (2026-09-23)
+
+Auditoría fila por fila del dossier real (41 noticias) tras v4.17: cuatro
+subtemas cruzados entre noticias del mismo archivo (el subtema de un grupo
+describía el hecho de otro grupo) y dos calibraciones de tono.
+
+- **F1 — Empate de subtema gana el más largo:** `_voto_mayoria` y el canon
+  determinista de `unificar_subtemas_noticias_similares` elegían en empate el
+  subtema MÁS CORTO. Un solo voto cruzado del modelo (corto y ajeno) le
+  ganaba al voto correcto. Ahora en empate gana el más específico (más
+  palabras, desempate por caracteres), mismo criterio ya adoptado en v4.15
+  para el pase LLM. `reparar_subtemas_ajenos` revierte a `_subtema_desde_titulo`.
+- **F2 — Guarda contra subtemas ajenos** (`reparar_subtemas_ajenos`): tras las
+  unificaciones de subtema y antes del voto de tono, detecta si el subtema de
+  un grupo comparte ≥2 palabras distintivas con el titular de OTRO grupo y
+  ≤1 con su propio contenido (título+texto+contexto); si se confirma, lo
+  reemplaza por un rótulo honesto derivado del propio titular
+  (`_subtema_desde_titulo`: quita artículo inicial, usa lo que sigue a «:»,
+  últimas 7 palabras en titulares largos, siglas en mayúsculas conservadas).
+  Solo actúa con evidencia fuerte; ignora subtemas genéricos y conjuntos
+  distintivos de <2 palabras. Registra `subtemas_ajenos_reparados` en el
+  resumen. Casos reales reparados: Atalaya→«Universidad de Atalaya»,
+  Estefanel→«Ascenso político de Estefanel Gutiérrez»,
+  «LA IA Y LA RECONVERSIÓN LABORAL»→«IA y la reconversión laboral»,
+  congreso de psicología→«Congreso Internacional de Innovación en
+  Intervención Psicológica».
+- **F3 — Guarda positiva con participios pasivos:** `aplicar_guarda_positiva`
+  reconoce «organizado/realizado/presentado/publicado… por la marca» (actor
+  después del verbo, introducido por «por»). Caso real: foro de periodismo
+  climático «organizado por la Universidad Simón Bolívar» → Neutro a Positivo.
+- **F4 — Alma máter no es acción de la marca:** `_mencion_biografica` evita
+  que «recordó su formación en la Universidad…, donde participó…»,
+  «egresado de…», «alma máter», «estudió en…» suban a Positivo (participó la
+  persona, no la marca). Solo cuenta si el actor va DESPUÉS de la marca
+  biográfica («estudió en la Universidad»); «la Universidad estudió…» es
+  acción propia y no se excluye. Caso real: proyecto de paz barrial de
+  Estefanel → permanece Neutro.
+- Todo paramétrico por marca/alias/voceros y por dossier (verificado por AST:
+  los únicos literales del dominio son recursos lingüísticos generales —
+  geografía y sustantivos en -al — preexistentes).
+- Tests nuevos: `tests/test_ajustes_v418.py` (18 ok; 4 cruces reales, falsos
+  positivos, empate→largo, participio pasivo, alma máter). Dos tests de
+  `test_pkl_tono_tema.py` actualizados al comportamiento correcto: el fake
+  que etiquetaba la nota de robótica como «PAE» ahora se repara (caso 1), y
+  el caso «mismo subtema, distintas clases PKL» usa una nota que comparte el
+  subtema legítimamente. Suite: 227/227 OK.

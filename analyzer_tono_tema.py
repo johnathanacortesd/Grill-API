@@ -1463,7 +1463,12 @@ def _voto_mayoria(por_grupo: List[Dict[int, dict]], ids_lote: Sequence[int]) -> 
         else:
             maxrep = max(cs.values())
             candidatos = [s for s in subs if cs[nz(s)] == maxrep]
-            sub = min(candidatos, key=len)
+            # En empate gana el MAS LARGO (más específico): es el mismo grupo
+            # y el mismo hecho, así que el largo detalla mejor. El empate-corto
+            # amplificaba un voto cruzado del modelo (caso Unisimón: un voto
+            # ajeno y corto como «Investigación sobre Carnaval 2027» le ganaba
+            # a «Creación de la Universidad de Atalaya»). Criterio v4.15.
+            sub = max(candidatos, key=len)
         salida[gid] = {'sub_tema': sub, 'tono': tono}
     return salida
 
@@ -1655,6 +1660,20 @@ ATRIBUTO_DEMOGRAFICO = {
 }
 
 
+def _solapamiento_contexto(a: str, b: str, min_gramas: int = 6) -> float:
+    """Solapamiento de 5-gramas entre dos contextos (0.0 si no hay base).
+
+    Mide cuántos pasajes literales comparten: 1.0 = pasajes casi idénticos.
+    """
+    ga, gb = grams(words(nz(a or '')), 5), grams(words(nz(b or '')), 5)
+    if len(ga) < min_gramas or len(gb) < min_gramas:
+        return 0.0
+    inter = len(ga & gb)
+    if inter < min_gramas:
+        return 0.0
+    return inter / min(len(ga), len(gb))
+
+
 def _contextos_mismo_hecho(a: str, b: str, umbral: float = 0.55,
                            min_gramas: int = 6) -> bool:
     """True si dos textos de contexto comparten pasajes del mismo hecho.
@@ -1662,11 +1681,37 @@ def _contextos_mismo_hecho(a: str, b: str, umbral: float = 0.55,
     Comparación por solapamiento de 5-gramas (orden-sensible): confirma que es
     el mismo hecho contado por dos notas, no solo palabras clave en común.
     """
-    ga, gb = grams(words(nz(a or '')), 5), grams(words(nz(b or '')), 5)
-    if len(ga) < min_gramas or len(gb) < min_gramas:
-        return False
-    inter = len(ga & gb)
-    return inter >= min_gramas and inter / min(len(ga), len(gb)) >= umbral
+    return _solapamiento_contexto(a, b, min_gramas) >= umbral
+
+
+# Solapamiento de contexto que autoriza a un grupo a adoptar el subtema de
+# otro aunque la redacción difiera: pasajes casi idénticos (no boilerplate
+# parcial). Calibrado: mismo hecho real ≈0.83, boilerplate compartido ≈0.62.
+SOLAPAMIENTO_CTX_FUERTE = 0.75
+
+
+def _puede_adoptar_canon(gi: dict, si: str, gj: dict, sj: str,
+                         umbral: int = 80) -> bool:
+    """True si el grupo gi puede adoptar el subtema de gj (mismo hecho).
+
+    La unión por señales débiles no basta para renombrar: se exige evidencia
+    fuerte y directa entre la pareja — subtemas ya similares, titulares casi
+    duplicados, o pasajes de contexto casi idénticos. Caso real Unisimón:
+    «La Universidad de Atalaya» no adopta «Investigación sobre Carnaval 2027».
+    """
+    from rapidfuzz import fuzz
+    if _subtemas_mismo_hecho(si, sj):
+        return True
+    ti, tj = nz(gi.get('titulo')), nz(gj.get('titulo'))
+    if ti and tj and fuzz.token_set_ratio(ti, tj) >= umbral:
+        wi = {w for w in words(ti) if w not in GENERIC_TITULO}
+        wj = {w for w in words(tj) if w not in GENERIC_TITULO}
+        if len(wi & wj) >= 2:
+            return True
+    if _solapamiento_contexto(gi.get('contexto_marca') or '',
+                              gj.get('contexto_marca') or '') >= SOLAPAMIENTO_CTX_FUERTE:
+        return True
+    return False
 
 
 def _subtemas_mismo_hecho(a: str, b: str, umbral: float = 0.82) -> bool:
@@ -1733,6 +1778,96 @@ def canonizar_subtemas(etiquetas: Dict[int, dict], umbral: float = 0.82) -> int:
     return cambios
 
 
+# ---------------------------------------------------------------------------
+# v4.18: reparación de etiquetas ajenas (cruce del modelo entre grupos).
+# El etiquetador trabaja por lotes y a veces le pega a un grupo el subtema de
+# OTRO grupo del lote («La Universidad de Atalaya» -> «Investigación sobre
+# Carnaval 2027»; «La IA y la reconversión laboral» -> «Medicina multimodal y
+# personalizada»). Ninguna unificación determinista lo produce: hay que
+# detectarlo por coherencia. Criterio: el subtema comparte >=2 palabras
+# distintivas (no genéricas) con el TITULAR de otro grupo y <=1 con el
+# contenido propio (título+texto+contexto). Ante la duda no se toca nada.
+# El grupo afectado vuelve a un rótulo honesto derivado de su propio titular.
+def _subtema_desde_titulo(titulo: str) -> str:
+    """Rótulo de emergencia a partir del propio titular (nunca inventado)."""
+    t = sq(titulo or '').strip()
+    if not t:
+        return 'Hecho informativo'
+    # Titular en dos partes («…: así fue el ascenso político de X»): el hecho
+    # suele estar después de los dos puntos.
+    if ':' in t:
+        t = t.split(':')[-1].strip()
+    t = re.sub(r'^(as[ií]\s+fue\s+el|as[ií]\s+fue\s+la|esto\s+es\s+lo\s+que)\s+',
+               '', t, flags=re.I).strip()
+    t = re.sub(r'^(el|la|los|las|un|una)\s+', '', t, flags=re.I).strip()
+    pals = t.split()
+    if len(pals) > 7:
+        # Titular largo sin dos puntos: el asunto distintivo suele ir al
+        # final («…el VIII Congreso Internacional de … Psicológica»).
+        t = ' '.join(pals[-7:])
+        t = re.sub(r'^(para|por|de|del|en|y|e|o|con|sin|sobre|entre|hacia|desde|hasta|que)\s+',
+                   '', t, flags=re.I).strip()
+    if t and t == t.upper() and any(c.isalpha() for c in t):
+        # Conserva siglas (IA, PAE); nexos y resto a frase normal: primera
+        # palabra con mayúscula inicial, las demás en minúsculas.
+        stop = {'Y', 'O', 'E', 'DE', 'LA', 'EL', 'EN', 'LOS', 'LAS', 'DEL', 'AL',
+                'UN', 'UNA', 'UNO', 'CON', 'POR', 'PARA', 'QUE', 'SE', 'SU'}
+        pals_m = []
+        for i, w in enumerate(t.split()):
+            if w.isupper() and 2 <= len(w) <= 4 and w not in stop:
+                pals_m.append(w)  # sigla
+            elif i == 0:
+                pals_m.append(w.capitalize())
+            else:
+                pals_m.append(w.lower())
+        t = ' '.join(pals_m)
+    if t:
+        t = t[0].upper() + t[1:]
+    return t or 'Hecho informativo'
+
+
+def _etiqueta_ajena(g: dict, subtema: str, grupos: Sequence[dict]) -> bool:
+    """True si `subtema` describe mejor el titular de OTRO grupo que el propio."""
+    ws = _contenido_discriminante(subtema) - GENERICO_NO_UNEN
+    if len(ws) < 2:
+        return False
+    propio = _contenido_discriminante(' '.join([
+        str(g.get('titulo') or ''),
+        ' '.join(str(x or '') for x in (g.get('titulos_alt') or [])),
+        str(g.get('texto') or ''),
+        str(g.get('contexto') or g.get('contexto_marca') or ''),
+    ]))
+    if len(ws & propio) > 1:
+        return False
+    for h in grupos:
+        if h.get('grupo') == g.get('grupo'):
+            continue
+        wh = _contenido_discriminante(str(h.get('titulo') or '')) - GENERICO_NO_UNEN
+        if len(ws & wh) >= 2:
+            return True
+    return False
+
+
+def reparar_subtemas_ajenos(grupos: Sequence[dict],
+                            etiquetas: Dict[int, dict]) -> int:
+    """Repara etiquetas cruzadas del modelo (v4.18).
+
+    Corre tras todas las unificaciones de subtema y antes del voto de tono
+    por subtema, para que el voto no use subtemas ajenos. Solo actúa con
+    evidencia fuerte (>=2 palabras distintivas con el titular ajeno y <=1 con
+    el propio); ante la duda, separar = no tocar.
+    """
+    cambios = 0
+    for g in grupos:
+        e = etiquetas.get(g.get('grupo'))
+        if not e or not (e.get('sub_tema') or '').strip():
+            continue
+        if _etiqueta_ajena(g, e['sub_tema'], grupos):
+            e['sub_tema'] = _subtema_desde_titulo(g.get('titulo'))
+            cambios += 1
+    return cambios
+
+
 def unificar_subtemas_noticias_similares(grupos: Sequence[dict], etiquetas: Dict[int, dict],
                                          umbral: int = 80) -> int:
     """Si dos grupos siguen separados pero son el mismo hecho, comparten subtema."""
@@ -1790,11 +1925,25 @@ def unificar_subtemas_noticias_similares(grupos: Sequence[dict], etiquetas: Dict
         c = Counter(nz(s) for s in validos)
         maxrep = max(c.values())
         cand = [s for s in validos if c[nz(s)] == maxrep]
-        canon = min(cand, key=lambda s: (len(s.split()), len(s)))
+        # En empate de frecuencia, el canon es el MAS LARGO (más específico),
+        # mismo criterio que v4.15 para el pase LLM: «Conversatorio» no le gana
+        # a «Participación en el conversatorio de salud mental».
+        canon = max(cand, key=lambda s: (len(s.split()), len(s)))
+        # Quiénes ya llevan el canon (antes de reescribir): solo se adopta el
+        # canon si hay evidencia FUERTE de mismo hecho con alguno de ellos.
+        # La unión por señales débiles no autoriza a renombrar. Caso real
+        # Unisimón: «La Universidad de Atalaya» absorbida por «Investigación
+        # sobre Carnaval 2027». Ante la duda, separar.
+        holders = [m for m in miembros
+                   if nz((etiquetas.get(grupos[m]['grupo']) or {}).get('sub_tema')) == nz(canon)]
         for k in miembros:
             gid = grupos[k]['grupo']
             e = etiquetas.get(gid)
-            if e and e.get('sub_tema') and nz(e['sub_tema']) != nz(canon):
+            sk = (e or {}).get('sub_tema') or ''
+            if not (e and sk and nz(sk) != nz(canon)):
+                continue
+            if any(_puede_adoptar_canon(grupos[k], sk, grupos[m], canon, umbral)
+                   for m in holders if m != k):
                 e['sub_tema'] = canon
                 cambios += 1
     return cambios
@@ -3493,12 +3642,26 @@ def enrich_rows_with_ai(
     # Corre antes de las guardas de tono para que el voto por subtema use
     # los subtemas ya unificados.
     extra_llm = unificar_subtemas_llm(cfg, grupos, etiquetas, uso=uso)
-    if (cambios or extra_uni or extra_llm) and progress_callback:
-        progreso(93, 'Sub-temas unificados: %d' % (cambios + extra_uni + extra_llm))
+    # v4.18: repara etiquetas cruzadas del modelo (el subtema de un grupo
+    # describe la noticia de otro). Corre antes del voto de tono por subtema.
+    ajenos = reparar_subtemas_ajenos(grupos, etiquetas)
+    if ajenos:
+        _ULTIMO_RESUMEN['subtemas_ajenos_reparados'] = ajenos
+    if (cambios or extra_uni or extra_llm or ajenos) and progress_callback:
+        progreso(93, 'Sub-temas unificados: %d' % (cambios + extra_uni + extra_llm + ajenos))
 
     # Con PKL de tono el modelo del cliente es la autoridad: no se aplica la
     # guarda LLM (degradar Negativo / subir a Positivo) porque pisaría el PKL.
     if tone_model is None:
+        # El voto por hecho corre ANTES que las guardas deterministas: las
+        # reglas de criterio del cliente (guarda positiva, tragedia, crítica
+        # con respuesta...) tienen la última palabra y el voto no puede
+        # deshacerlas. Caso real Unisimón: la guarda detectaba Positivo en
+        # «La Universidad de Atalaya» y el voto posterior lo revertía a
+        # Neutro por mayoría del subtema ajeno.
+        unificados = unificar_tono_mismo_hecho(grupos, etiquetas)
+        if unificados:
+            _ULTIMO_RESUMEN['tono_unificado_mismo_hecho'] = unificados
         corregidos = aplicar_guarda_tono(grupos, etiquetas, brand, aliases)
         # Crítica con respuesta de la marca: la información se equilibra → Neutro.
         equilibrio = aplicar_regla_critica_con_respuesta(
@@ -3532,9 +3695,6 @@ def enrich_rows_with_ai(
             _ULTIMO_RESUMEN['tono_corregido_por_guarda'] = corregidos
             if progress_callback:
                 progreso(93, 'Guarda del tono: %d Negativos sin señalamiento pasaron a Neutro' % len(corregidos))
-        unificados = unificar_tono_mismo_hecho(grupos, etiquetas)
-        if unificados:
-            _ULTIMO_RESUMEN['tono_unificado_mismo_hecho'] = unificados
 
     # --- tema: PKL del cliente = clases del modelo; si no hay PKL, bottom-up de ESTE lote ---
     # v4.8: con incluir_tema=False se salta toda la etapa (ni LLM de temas, ni
@@ -3931,6 +4091,30 @@ _AUTORIA_PROPIA_PAT = re.compile(
     r'publicad[oa] por|liderad[oa] por|coordinad[oa] por)', re.I)
 
 
+# Marca mencionada como alma máter de alguien («su formación en la
+# Universidad…», «egresado de…», «estudió en…»): lo que sigue («…donde
+# participó…») es participación de la persona, no acción de la marca.
+_ALMA_MATER_PAT = re.compile(
+    r'formaci[oó]n|egresad[oa]s?|graduad[oa]s?|alma m[aá]ter|estudi[oó]\s+en', re.I)
+
+
+def _mencion_biografica(oracion: str, actores: Sequence[str]) -> bool:
+    """True si un actor aparece en la oración como alma máter de alguien.
+
+    Evita que «recordó su formación en la Universidad Simón Bolívar, donde
+    participó en…» suba a Positivo: quien participó fue la persona, no la marca
+    (caso real Unisimón, v4.18). Solo cuenta si el actor va DESPUÉS de la marca
+    biográfica («estudió en la Universidad»); «la Universidad estudió…» es
+    acción propia y no se excluye. «estudio» como sustantivo («el estudio de
+    la Universidad») tampoco cuenta: se exige «estudió en».
+    """
+    n = nz(oracion)
+    m = _ALMA_MATER_PAT.search(n)
+    if not m:
+        return False
+    return any(a in n[m.end():] for a in actores)
+
+
 def aplicar_guarda_positiva(grupos: Sequence[dict], etiquetas: Dict[int, dict],
                             brand: str, aliases: Sequence[str],
                             voceros: Sequence[str] = ()) -> List[int]:
@@ -3945,15 +4129,25 @@ def aplicar_guarda_positiva(grupos: Sequence[dict], etiquetas: Dict[int, dict],
                if x and len(nz(x)) >= 4]
     if not actores:
         return []
-    verbos = (r'entreg(?:a|ó|aron|an)|inaugur(?:a|ó|aron|an)|constru(?:ye|yó|yeron|yen)|'
-              r'pone en marcha|puso en marcha|lanza|lanzó|impulsa|impulsó|aprueba|aprobó|'
-              r'destina|destinó|invierte|invirtió|dona|donó|respalda|respaldó|apoya|apoyó|'
-              r'capacita|capacitó|organiza|organizó|convoca|convocó|celebra|celebró|'
-              r'realiza|realizó|presenta|presentó|anuncia|anunció|publica|publicó|'
-              r'socializa|socializó|'
+    # Verbos de acción propia de la marca. Incluyen participios pasivos
+    # («organizado por la Universidad…»): en pasiva el actor va después del
+    # verbo, introducido por «por». El participio va primero en cada grupo
+    # para que «organizado» no calce solo con «organiza».
+    verbos = (r'entreg(?:ad[oa]s?|a|ó|aron|an)|inaugur(?:ad[oa]s?|a|ó|aron|an)|'
+              r'constru(?:id[oa]s?|ye|yó|yeron|yen)|'
+              r'pone en marcha|puso en marcha|lanza|lanzó|lanzad[oa]s?|'
+              r'impulsa|impulsó|impulsad[oa]s?|aprueba|aprobó|aprobad[oa]s?|'
+              r'destina|destinó|destinad[oa]s?|invierte|invirtió|invertid[oa]s?|'
+              r'dona|donó|donad[oa]s?|respalda|respaldó|respaldad[oa]s?|'
+              r'apoya|apoyó|apoyad[oa]s?|'
+              r'capacita|capacitó|capacitad[oa]s?|organiza|organizó|organizad[oa]s?|'
+              r'convoca|convocó|convocad[oa]s?|celebra|celebró|celebrad[oa]s?|'
+              r'realiza|realizó|realizad[oa]s?|presenta|presentó|presentad[oa]s?|'
+              r'anuncia|anunció|anunciad[oa]s?|publica|publicó|publicad[oa]s?|'
+              r'socializa|socializó|socializad[oa]s?|'
               r'gan(?:a|ó|aron|ará|arán)|recib(?:e|ió|ieron|irá|irán)|ocup(?:a|ó|aron|ará|arán)|'
               r'abr(?:e|ió|irá|irán)|firm(?:a|ó|aron|ará|arán)|atend(?:e|ió|erá|erán)|'
-              r'pone en servicio|habilita|habilitó')
+              r'pone en servicio|habilita|habilitó|habilitad[oa]s?')
     eventos = r'(congreso|foro|feria|cumbre|seminario|jornada|conferencia|encuentro|festival|reuni[oó]n|reuniones|conversatorio)'
     peticion = re.compile(r'\b(pidió|pide|solicitó|solicita|exigió|exige|debería)\b', re.I)
     critica = re.compile(r'\b(denunci|cuestion|sancion|acus|incumpl|sobrecost|corrup|'
@@ -3998,6 +4192,7 @@ def aplicar_guarda_positiva(grupos: Sequence[dict], etiquetas: Dict[int, dict],
                     corregidos.append(g.get('grupo'))
                     break
             if (not tragedia_sin_accion
+                    and not _mencion_biografica(oracion, actores)
                     and re.search(r'(colaboraci[oó]n|colabor[oó]|participa|particip[oó]|coautor|coautora|'
                           r'intervenci[oó]n|vocero|vocera|'
                           r'fuente experta|ponencia|present[oó] una)', oracion, re.I)
@@ -4014,6 +4209,7 @@ def aplicar_guarda_positiva(grupos: Sequence[dict], etiquetas: Dict[int, dict],
             # No aplica en tragedia sin acción de la marca (la regla tragedia
             # corre después y sigue mandando) ni toca Negativos.
             if (not tragedia_sin_accion
+                    and not _mencion_biografica(oracion, actores)
                     and re.search(r'\b(participa|participó|participaron|participará|'
                                   r'asiste|asistió|asistieron|hizo parte|hace parte|'
                                   r'formó parte|tomó parte|estuvo presente|'
@@ -4034,9 +4230,20 @@ def aplicar_guarda_positiva(grupos: Sequence[dict], etiquetas: Dict[int, dict],
             for m in re.finditer(verbos, oracion, re.I):
                 antes = nz(oracion[max(0, m.start() - 80):m.start()])
                 despues = nz(oracion[m.end():m.end() + 110])
-                if any(a in antes for a in actores):
-                    # Verbos de organizar/realizar solo son positivos si hay un evento.
-                    if re.search(r'organiz|convoc|realiz|celebr', m.group(0), re.I) and not re.search(eventos, despues):
+                actor_antes = any(a in antes for a in actores)
+                # Pasiva con participio («organizado por la Universidad…»): el
+                # actor va después del verbo, introducido por «por». Sin esto,
+                # «El encuentro, organizado por la Universidad Simón Bolívar»
+                # no subía a Positivo (caso real Unisimón, v4.18).
+                actor_por = (not actor_antes and any(
+                    re.search(r'\bpor\s+(?:el\s+|la\s+|los\s+|las\s+)?'
+                              + re.escape(a) + r'(?=\W|$)', despues)
+                    for a in actores))
+                if actor_antes or actor_por:
+                    # Verbos de organizar/realizar solo son positivos si hay un
+                    # evento en la oración (puede estar antes del verbo, como en
+                    # «El encuentro, organizado por la Universidad…»).
+                    if re.search(r'organiz|convoc|realiz|celebr', m.group(0), re.I) and not re.search(eventos, antes + ' ' + despues):
                         continue
                     if re.search(r'anunci|present', m.group(0), re.I):
                         menciona_informe = bool(re.search(r'(informe|estudio|alerta|cifra|panorama|diagnóstico|diagnostico)', oracion, re.I))
