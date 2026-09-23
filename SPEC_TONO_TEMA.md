@@ -497,3 +497,51 @@ conversatorios / foros es Positivo.
 
 Tests: `tests/test_unificacion_subtemas_llm.py` (24 ok, incl. nueva clase
 `TestGuardaParticipacion` con 6 casos).
+
+## 22. v4.16 — Freno anti-encadenamiento + Negativo calibrado + contexto mínimo (2026-09-23)
+
+Tres mejoras derivadas de la auditoría del dossier Cotelco (445 noticias, 23 columnas).
+
+1. **Freno anti-encadenamiento en `construir_grupos`.** Las palabras
+   omnipresentes del dossier (>12% de los titulares, mínimo 8) no sirven como
+   puente distintivo entre hechos. Los cuatro pases por similitud de título
+   ahora exigen que las palabras compartidas sean DISTINTIVAS
+   (`_puente_distintivo`). Caso real: 'Traslado de adultos mayores' había
+   absorbido '36 hoteles resultaron afectados' por compartir solo
+   {cali, hoteles, terremoto}. No baja umbrales ni fuerza familias: solo
+   elimina fusiones, nunca agrega ("ante la duda, separar").
+
+2. **Negativo calibrado: el señalamiento debe apuntar a la marca**
+   (`aplicar_regla_negativo_sin_blanco`, corre tras crítica-con-respuesta).
+   Baja Negativo a Neutro cuando la marca no es blanco del señalamiento Y no
+   protagoniza la noticia (mención incidental). `_marca_blanco_de_critica`
+   exige verbo de acusación en construcción direccional ("cuestionaron a
+   Cotelco", "Cotelco fue sancionada"); un sustantivo-tema como 'multa' en
+   'fotomultas' no cuenta. `_marca_protagonista`: marca en titular o ≥2
+   menciones. Caso real: el único Negativo del dossier Cotelco (fotomultas,
+   mención incidental) pasa a Neutro.
+
+3. **Contexto mínimo** (`_contexto_minimo_util`). Si la extracción por mención
+   devolvió solo un fragmento (<140 caracteres o <18 palabras, p. ej. "Edwin
+   Bernal, director ejecutivo de Cotelco."), se completa con titular + texto
+   más completo (resumen). Los contextos útiles no se tocan.
+
+Tests: `tests/test_calidad_v416.py` (10 ok, incl. réplica del caso real
+traslado-vs-afectados y verificación de que el código viejo sí fusionaba el
+par de prueba). Suite completa: 196/196 OK.
+
+### Calibración 2026-09-23 (mismo v4.16, sin bump de versión)
+
+- **Generalidad por cliente:** las tres mejoras son agnósticas al cliente
+  (verificado por AST: ningún literal de cliente en el código). El freno
+  anti-encadenamiento calcula las palabras omnipresentes por dossier; el
+  Negativo calibrado y el contexto mínimo se parametrizan con
+  marca/alias/voceros del perfil o del modo manual.
+- **Contexto analizado recalibrado** (`_contexto_exacto_marca`): antes
+  devolvía párrafos completos con la mención (tope 6000) → ahora devuelve el
+  extracto exacto: solo las oraciones con mención de marca/alias/vocero,
+  literales, deduplicadas y en orden. Topes: 1200 caracteres en
+  radiodifusión (Radio, Televisión, Aire, Cable, AM, FM, TV — se lee de
+  `km["tipodemedio"]`) y 2000 en el resto. El tipo de medio se pasa desde el
+  flujo principal; sin vecinas: solo la oración-mención.
+- Tests nuevos: `TestContextoExactoCalibrado` (8 ok). Suite: 204/204 OK.

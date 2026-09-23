@@ -96,6 +96,23 @@ def _texto_hasta_terminal(texto: str, n: int) -> str:
     return texto[:idx + 1] if idx >= 0 else texto
 
 
+def _contexto_minimo_util(ctx: str, titulo: str, texto: str) -> str:
+    """Garantiza un contexto informativo mínimo para la columna de auditoría.
+
+    Si la extracción por mención devolvió solo un fragmento (p. ej. la firma
+    "Edwin Bernal, director ejecutivo de Cotelco."), se completa con el
+    titular y el texto más completo disponible (resumen). Un fragmento no
+    resume la noticia y degrada el Excel entregable.
+    """
+    c = (ctx or '').strip()
+    if len(c) >= 140 and len(c.split()) >= 18:
+        return c
+    fb = ' '.join(x.strip() for x in [titulo or '', (texto or '')[:1200]]
+                  if x and x.strip())
+    fb = re.sub(r'\s+', ' ', fb).strip()[:6000]
+    return fb if len(fb) > len(c) else c
+
+
 def _contexto_marca(texto: str, titulo: str, brand: str, aliases: Sequence[str],
                     voceros: Optional[Sequence[str]] = None) -> str:
     """Extrae contexto literal y amplio, sin resumir ni inventar texto.
@@ -141,50 +158,67 @@ def _contexto_marca(texto: str, titulo: str, brand: str, aliases: Sequence[str],
         return (titulo_limpio + ('\n\n' + parrafos[0] if parrafos else '')).strip()[:6000]
     return titulo_limpio[:6000]
 
-def _contexto_exacto_marca(texto: str, titulo: str, brand: str,
-                           aliases: Sequence[str], voceros: Sequence[str] = ()) -> str:
-    """Extrae evidencia textual exacta de CuerpoEs, sin resumir ni inventar.
+# Tipos de medio de radiodifusión (comparación con nz(): minúsculas, sin
+# tildes). Los transcripts son largos y repiten menciones: el extracto se
+# acota más. Calibración 2026-09-23: el contexto debe ser el extracto exacto
+# de las menciones, no párrafos completos.
+MEDIOS_RADIODIFUSION = {'radio', 'television', 'tv', 'aire', 'cable', 'am', 'fm'}
 
-    Prioriza todos los párrafos que contienen la marca, alias o vocero. Si el
-    archivo no conserva saltos de párrafo, devuelve las oraciones que contienen
-    la mención y sus vecinas inmediatas. El resultado conserva literalmente la
-    ortografía, tildes y puntuación del texto fuente, en un solo párrafo (sin
-    saltos de línea).
+# Topes del extracto exacto de menciones (caracteres). Antes: 6000 parejo.
+TOPE_CTX_GENERAL = 2000
+TOPE_CTX_RADIODIFUSION = 1200
+
+
+def _contexto_exacto_marca(texto: str, titulo: str, brand: str,
+                           aliases: Sequence[str], voceros: Sequence[str] = (),
+                           tipo_medio: str = '') -> str:
+    """Extracto exacto de las menciones de marca, alias o vocero.
+
+    Devuelve las oraciones que contienen la mención, literales y sin resumir,
+    deduplicadas y en orden de aparición. No se devuelven párrafos completos:
+    en prensa y sobre todo en radio/televisión los párrafos y transcripts son
+    largos y el contexto se volvía inmanejable. Se acumulan oraciones
+    completas hasta el tope (1200 caracteres en radiodifusión, 2000 en el
+    resto); el texto conserva literalmente ortografía, tildes y puntuación.
     """
     fuente = str(texto or '')
     nombres = [str(x).strip() for x in [brand, *(aliases or []), *(voceros or [])]
                if str(x or '').strip() and len(nz(x)) >= 3]
     if not fuente or not nombres:
-        return str(titulo or '').strip()[:6000]
+        return str(titulo or '').strip()[:TOPE_CTX_GENERAL]
 
     patrones = [re.compile(r'(?<![a-z0-9])' + re.escape(nz(x)) + r'(?![a-z0-9])')
                 for x in nombres]
 
     def menciona(fragmento: str) -> bool:
-        normal = nz(fragmento)
-        return any(p.search(normal) for p in patrones)
+        return any(p.search(nz(fragmento)) for p in patrones)
 
-    # CuerpoEs suele separar párrafos con saltos de línea o HTML <br>.
-    parrafos = [p for p in re.split(r'(?:\r?\n|<br\s*/?>)+', fuente,
-                                    flags=re.I) if p.strip()]
-    encontrados = [p.strip() for p in parrafos if menciona(p)]
-    if encontrados:
-        # Un solo párrafo: se unen con espacio y se colapsan saltos internos.
-        return re.sub(r'\s+', ' ', ' '.join(encontrados)).strip()[:6000]
+    # Oraciones: los transcripts de radio/tv no traen párrafos; partir por
+    # puntuación y por saltos de línea cubre ambos casos.
+    oraciones = [o.strip() for o in re.split(r'(?<=[.!?…])\s+|\r?\n+', fuente)
+                 if o.strip()]
+    hits = [o for o in oraciones if menciona(o)]
+    if not hits:
+        # La marca solo aparece en el titular o no aparece: no se inventa.
+        return str(titulo or '').strip()[:TOPE_CTX_GENERAL]
 
-    # Respaldo para cuerpos guardados como un bloque único.
-    partes = [p for p in re.split(r'(?<=[.!?…])\s+', fuente) if p.strip()]
-    ids = [i for i, p in enumerate(partes) if menciona(p)]
-    if ids:
-        seleccion = []
-        for i in ids:
-            for j in (i - 1, i, i + 1):
-                if 0 <= j < len(partes) and partes[j] not in seleccion:
-                    seleccion.append(partes[j])
-        return ' '.join(seleccion)[:6000]
-
-    # No se atribuye tono a la marca si solo aparece en el titular o no aparece.
-    return str(titulo or '').strip()[:6000]
+    es_rtv = nz(tipo_medio) in MEDIOS_RADIODIFUSION
+    tope = TOPE_CTX_RADIODIFUSION if es_rtv else TOPE_CTX_GENERAL
+    vistas = []
+    for o in hits:
+        o = re.sub(r'\s+', ' ', o).strip()
+        if o and o not in vistas:
+            vistas.append(o)
+    # Oraciones completas hasta el tope; al menos la primera mención va
+    # entera (si una sola oración supera el tope, se corta ahí).
+    salida, total = [], 0
+    for o in vistas:
+        if salida and total + len(o) + 1 > tope:
+            break
+        salida.append(o)
+        total += len(o) + 1
+    texto_out = ' '.join(salida).strip()
+    return texto_out[:tope] if len(texto_out) > tope else texto_out
 BASE_URL_DEFECTO = "https://api.openai.com/v1"
 MODELO_DEFECTO = "gpt-4.1-nano-2025-04-14"
 JEV_URL_DEFECTO = "https://api.typesafe.ai/v1/systemone"
@@ -353,6 +387,24 @@ def construir_grupos(
 
     par = list(range(len(base)))
 
+    # --- freno anti-encadenamiento (v4.16): las palabras omnipresentes del
+    # dossier (p. ej. 'terremoto', 'hoteles', 'cali' en una cobertura sísmica)
+    # no sirven como puente distintivo entre hechos. Sin esto, '36 hoteles
+    # resultaron afectados' se encadenaba con 'traslado de adultos mayores
+    # a hoteles' por compartir solo {cali, hoteles, terremoto}. El umbral es
+    # adaptativo al dossier: >12% de los titulares (mínimo 8).
+    _dfq = Counter()
+    for b in base:
+        for w in b['ctit']:
+            _dfq[w] += 1
+    _omni_corte = max(8, int(len(base) * 0.12))
+    OMNI = {w for w, c in _dfq.items() if c > _omni_corte}
+
+    def _puente_distintivo(a, b, minimo):
+        """True si a y b comparten >= `minimo` palabras de contenido
+        DISTINTIVAS (no omnipresentes en el dossier)."""
+        return len((a - OMNI) & (b - OMNI)) >= minimo
+
     def find(x):
         while par[x] != x:
             par[x] = par[par[x]]
@@ -373,7 +425,8 @@ def construir_grupos(
         T = np.maximum(t1, np.maximum(t2, t3))
         for i in range(len(base)):
             for j in np.where(T[i] >= umbral_titulo / 100.0)[0]:
-                if j > i and len(base[i]['ctit'] & base[j]['ctit']) >= MIN_PALABRAS_TITULO:
+                if j > i and _puente_distintivo(base[i]['ctit'], base[j]['ctit'],
+                                               MIN_PALABRAS_TITULO):
                     uni(i, j)
 
         # --- Señal de bolsa de palabras (orden-independiente): dos noticias
@@ -395,8 +448,10 @@ def construir_grupos(
                     continue
                 jac = len(inter) / len(union)
                 # piso de Jaccard para evtar fusionar hechos distintos que solo
-                # comparten pocas palabras comunes de la ciudad/entidad.
-                if jac >= 0.42 or (jac >= 0.32 and t3[i, j] >= 0.88):
+                # comparten pocas palabras comunes de la ciudad/entidad; además
+                # el puente debe ser distintivo (v4.16: freno anti-encadenamiento).
+                if (jac >= 0.42 or (jac >= 0.32 and t3[i, j] >= 0.88)) \
+                        and _puente_distintivo(wi, wj, MIN_PALABRAS_TITULO):
                     uni(i, j)
 
         # Titulares cortos casi iguales: 2 palabras distintivas + token_set alto.
@@ -407,8 +462,8 @@ def construir_grupos(
             for j in range(i + 1, len(base)):
                 if find(i) == find(j):
                     continue
-                inter = base[i]['ctit'] & base[j]['ctit']
-                if len(inter) >= 2 and t3[i, j] >= 0.90:
+                if _puente_distintivo(base[i]['ctit'], base[j]['ctit'], 2) \
+                        and t3[i, j] >= 0.90:
                     uni(i, j)
 
     inv = defaultdict(set)
@@ -447,7 +502,8 @@ def construir_grupos(
             if len(bj['g5']) < 8:
                 continue
             same_g = len(b['g5'] & bj['g5']) / max(1, min(len(b['g5']), len(bj['g5'])))
-            if same_g >= 0.70 and len(b['ctit'] & bj['ctit']) >= MIN_PALABRAS_TITULO:
+            if same_g >= 0.70 and _puente_distintivo(b['ctit'], bj['ctit'],
+                                                    MIN_PALABRAS_TITULO):
                 uni(i, j)
 
     # --- señal de CONTEXTO ANALIZADO: mismo hecho, título y cuerpo distintos ---
@@ -3406,9 +3462,15 @@ def enrich_rows_with_ai(
         if row.get('is_duplicate'):
             row['Contexto analizado'] = '-'
         else:
-            row['Contexto analizado'] = _contexto_exacto_marca(
+            ctx = _contexto_exacto_marca(
                 _texto_fila(row, km), _titulo_fila(row, km), brand, aliases,
-                voceros=cfg.get('voceros') or [])
+                voceros=cfg.get('voceros') or [],
+                tipo_medio=str(row.get(km.get('tipodemedio', 'Tipo de Medio'), '')
+                               or ''))
+            # v4.16: si el extracto es solo la mención (fragmento), completar
+            # con titular + resumen en vez de dejar "Edwin Bernal, director…".
+            row['Contexto analizado'] = _contexto_minimo_util(
+                ctx, _titulo_fila(row, km), _texto_fila(row, km))
 
     # --- agrupacion ---
     progreso(73, 'Agrupando notas equivalentes…')
@@ -3446,6 +3508,14 @@ def enrich_rows_with_ai(
             if progress_callback:
                 progreso(93, 'Crítica con respuesta: %d Negativos pasaron a Neutro'
                          % len(equilibrio))
+        # v4.16: el Negativo debe estar dirigido a la marca; la mención
+        # incidental no sostiene un Negativo (caso fotomultas/Cotelco).
+        sin_blanco = aplicar_regla_negativo_sin_blanco(
+            grupos, etiquetas, brand, aliases, voceros=cfg.get('voceros') or [])
+        if sin_blanco:
+            _ULTIMO_RESUMEN['tono_negativo_sin_blanco'] = sin_blanco
+            if progress_callback:
+                progreso(93, 'Negativo sin blanco: %d pasaron a Neutro' % len(sin_blanco))
         positivos = aplicar_guarda_positiva(grupos, etiquetas, brand, aliases,
                                             voceros=cfg.get('voceros') or [])
         tragedia = aplicar_regla_tragedia(grupos, etiquetas, brand, aliases,
@@ -3706,6 +3776,79 @@ def _critica_dirigida(texto: str, brand: str, aliases: Sequence[str]) -> bool:
         if BLANCO_EMPRESA.search(ventana) or NOMBRE_PROPIO.search(ventana):
             return True
     return False
+
+
+# Verbos de acusación/señalamiento: solo en construcción direccional hacia la
+# marca cuentan como crítica dirigida ("cuestionaron a Cotelco",
+# "Cotelco fue sancionada"). Un sustantivo como 'multa' dentro de 'fotomultas'
+# es el tema de la noticia, no un señalamiento contra la marca.
+_VERBO_ACUSACION_PAT = (r'(denunci\w*|cuestion\w*|acus\w*|sancion\w*|critic\w*|'
+                        r'atac\w*|señal\w*|censur\w*|reproch\w*|conden\w*|'
+                        r'demand\w*|imput\w*)')
+
+
+def _marca_blanco_de_critica(texto: str, brand: str, aliases: Sequence[str]) -> bool:
+    """True si un verbo de acusación apunta a la marca/alias en construcción
+    direccional ("cuestionaron a Cotelco", "Cotelco fue sancionada").
+
+    A diferencia de `_critica_dirigida` (que acepta cualquier nombre propio
+    como blanco y cualquier palabra del patrón cerca de la marca), aquí el
+    blanco debe ser la marca y el señalamiento debe estar gramaticalmente
+    dirigido a ella: el tono se evalúa hacia la marca, no hacia terceros ni
+    hacia el tema de la noticia.
+    """
+    t = nz(texto)
+    marcas = [nz(x) for x in [brand] + list(aliases or []) if x and len(nz(x)) >= 4]
+    if not t or not marcas:
+        return False
+    mpat = '(?:' + '|'.join(re.escape(x) for x in marcas) + ')'
+    verbo = _VERBO_ACUSACION_PAT
+    patrones = [
+        # "cuestionaron a Cotelco", "denuncias contra la marca"
+        verbo + r'(?:\s+\w+){0,3}?\s+(?:a|al|contra|hacia)\s+' + mpat,
+        # "Cotelco fue sancionada"
+        mpat + r'\s+(?:fue|fueron|ha sido|sería|será)\s+' + verbo,
+    ]
+    return any(re.search(p, t) for p in patrones)
+
+
+def _marca_protagonista(titulo: str, texto: str, actores: Sequence[str]) -> bool:
+    """True si la marca protagoniza la noticia: aparece en el titular o tiene
+    al menos dos menciones en el texto. Una mención incidental aislada no
+    basta (criterio 'mención breve/sin protagonismo = Neutro')."""
+    if any(a in nz(titulo or '') for a in actores):
+        return True
+    x = nz(texto or '')
+    return sum(x.count(a) for a in actores) >= 2
+
+
+def aplicar_regla_negativo_sin_blanco(grupos: Sequence[dict], etiquetas: Dict[int, dict],
+                                      brand: str, aliases: Sequence[str],
+                                      voceros: Sequence[str] = ()) -> List[int]:
+    """Calibra el Negativo: el sentimiento se evalúa hacia la marca.
+
+    Baja Negativo a Neutro cuando el señalamiento no apunta a la marca/alias/
+    vocero Y la marca no protagoniza la noticia (mención incidental). No toca
+    tragedias con experto citado (regla aparte) ni críticas con respuesta de
+    la marca (ya quedan en Neutro). Devuelve los grupos corregidos.
+    """
+    actores = [nz(x) for x in [brand] + list(aliases or []) + list(voceros or [])
+               if x and len(nz(x)) >= 4]
+    if not actores:
+        return []
+    bajados = []
+    for g in grupos:
+        e = etiquetas.get(g.get('grupo'))
+        if not e or e.get('tono') != 'Negativo':
+            continue
+        texto = '%s. %s' % (g.get('titulo', ''), g.get('contexto') or g.get('texto', ''))
+        if _marca_blanco_de_critica(texto, brand, aliases):
+            continue
+        if _marca_protagonista(g.get('titulo', ''), texto, actores):
+            continue
+        e['tono'] = 'Neutro'
+        bajados.append(g.get('grupo'))
+    return bajados
 
 
 def aplicar_guarda_tono(grupos: Sequence[dict], etiquetas: Dict[int, dict],
