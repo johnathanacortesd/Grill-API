@@ -617,3 +617,33 @@ describía el hecho de otro grupo) y dos calibraciones de tono.
   que etiquetaba la nota de robótica como «PAE» ahora se repara (caso 1), y
   el caso «mismo subtema, distintas clases PKL» usa una nota que comparte el
   subtema legítimamente. Suite: 227/227 OK.
+
+## 25. v4.19 — Precisión de tono: marca como sede + cita experta (2026-09-23)
+
+Regla del cliente: «eventos en la marca/alias o participación de voceros es
+positivo». Caso real (ID 60761392): «Salud Consciencia 2026, realizado el 26
+de agosto en la Universidad Simón Bolívar» quedó Neutro.
+
+- **Sede del evento** (nueva rama en `aplicar_guarda_positiva`): verbo de
+  realización (`realiz|celebr|organiz|desarroll` en participio, futuro,
+  presente y pasados; `llev(ad[oa]s?|ara|a) a cabo`; `tuvo/tiene/tendrá
+  lugar`) o sustantivo de evento (congreso, foro, simposio, panel…) +
+  «en + marca/alias» en la misma oración → Positivo. La marca es anfitriona.
+  No aplica en tragedia sin acción de la marca; tampoco en menciones
+  biográficas («realiza sus estudios en la Universidad» se excluye por
+  sustantivo académico entre verbo y marca) ni en alianzas («en alianza con
+  … la Universidad» no es sede: el «en» no precede a la marca). «encuentro»
+  no cuenta tras «me » (verbo, no evento).
+- **HABLA_PAT suma «de acuerdo con»**: «de acuerdo con Hernando Sánchez,
+  biólogo y docente de la Universidad Simón Bolívar, …» → Positivo (vocero
+  citado como fuente experta). «según» se excluyó deliberadamente: cero
+  verdaderos positivos en el dossier real y riesgo de marcar la marca como
+  simple punto de referencia («según la Policía, ocurrió frente a la
+  Universidad»).
+- Verificado sobre el dossier real: voltean a Positivo 60761392 (Salud
+  Consciencia), 60816125 y 60794120 (Ruta del cuidado, sede Unisimón),
+  60879489 (simposio científico en Unisimón) y 60843713 (docente experto en
+  ciénaga). Siguen Neutro: alianzas (11874683), tesis biográfica (60775126),
+  tragedia (60887853), asistencia como invitado (60763705).
+- Todo paramétrico por marca/alias/voceros (verificado por AST).
+- Tests nuevos: `tests/test_precision_tono_v419.py` (14 ok). Suite: 241/241 OK.

@@ -4034,7 +4034,7 @@ def aplicar_guarda_tono(grupos: Sequence[dict], etiquetas: Dict[int, dict],
 HABLA_PAT = re.compile(
     r'\b(dijo|afirm[oó]|señal[oó]|advirti[oó]|consider[oó]|explic[oó]|asegur[oó]|'
     r'indic[oó]|destac[oó]|manifest[oó]|sostu?vo|sostiene|precis[oó]|coment[oó]|'
-    r'expres[oó]|declar[oó]|puntualiz[oó])\b')
+    r'expres[oó]|declar[oó]|puntualiz[oó]|de\s+acuerdo\s+con)\b')
 
 
 # Regla del usuario (2026-09-20): "tragedia con experto de la casa = neutral".
@@ -4222,6 +4222,31 @@ def aplicar_guarda_positiva(grupos: Sequence[dict], etiquetas: Dict[int, dict],
                 e['tono'] = 'Positivo'
                 corregidos.append(g.get('grupo'))
                 break
+            # La marca/alias como SEDE del evento («realizado … en la Universidad»,
+            # «se llevará a cabo en Unisimón», «un congreso … en la Universidad»).
+            # Regla del cliente (2026-09-23): eventos en la marca/alias son
+            # Positivo — la marca es anfitriona. No aplica en tragedia sin
+            # acción de la marca ni en menciones biográficas («estudió en la
+            # Universidad» no trae verbo de evento).
+            if not tragedia_sin_accion and not _mencion_biografica(oracion, actores):
+                m_sede = re.search(
+                    r'\b((realiz|celebr|organiz|desarroll)(ad[oa]s?|ara|an|a|o|aron)|'
+                    r'llev(ad[oa]s?|ara|a)\s+a\s+cabo|(tuvo|tiene|tendra)\s+lugar|'
+                    r'congreso|foro|feria|cumbre|seminario|jornada|conferencia|'
+                    r'(?<!\bme\s)encuentro|festival|reuni[oó]n|reuniones|conversatorio|simposio|panel)\b', n)
+                if m_sede:
+                    despues_sede = n[m_sede.end():m_sede.end() + 110]
+                    # «realiza sus estudios en la Universidad» es formación de
+                    # la persona, no un evento de la marca: se excluye.
+                    if re.search(r'\b(estudios?|carrera|doctorado|maestr[íi]a|pregrado|tesis|curso)\b',
+                                 despues_sede):
+                        pass
+                    elif any(re.search(r'\ben\s+(?:el\s+|la\s+|los\s+|las\s+)?'
+                                       + re.escape(a) + r'(?=\W|$)', despues_sede)
+                             for a in actores):
+                        e['tono'] = 'Positivo'
+                        corregidos.append(g.get('grupo'))
+                        break
             if re.search(r'\b(recib(?:ió|e|ieron)|atend(?:erá|ió|e))\b', oracion, re.I) and re.search(
                     r'(premio|acreditaci|reconocimiento|pacientes|benefici)', oracion, re.I):
                 e['tono'] = 'Positivo'
