@@ -647,3 +647,107 @@ de agosto en la Universidad Simón Bolívar» quedó Neutro.
   tragedia (60887853), asistencia como invitado (60763705).
 - Todo paramétrico por marca/alias/voceros (verificado por AST).
 - Tests nuevos: `tests/test_precision_tono_v419.py` (14 ok). Suite: 241/241 OK.
+
+## 26. v4.20 — Mismo hecho por ancla de persona + voto final de tono (2026-09-24)
+
+Caso real (Fundación Santa Fe, dossier 2026-09-24, 484 filas): un mismo
+paciente produjo 8+ variantes de subtema («Estado de salud de Yamid Amat»,
+«Hospitalización de Yamid Amat», «Yamid Amat en UCI», «Ingreso a UCI de
+Yamid»…) y el mismo hecho quedó con tonos divididos (194 Positivo / 67
+Neutro). Criterio del cliente: para salud es esencial ver los pacientes
+tratados; noticias similares deben compartir subtema Y tono.
+
+- **Clases de evento** (`_CLASES_EVENTO`, vocabulario de dominio, no de
+  cliente): `salud` (hospitalización, UCI, pronóstico, complicación,
+  tratamiento…), `nacimiento` (nacimiento, parto, cesárea), `cirugia`,
+  `lanzamiento`, `reunion`, `reconocimiento`, `ranking`, `inauguracion`,
+  `firma`. Las etapas asistenciales van separadas: el ingreso ≠ el
+  nacimiento aunque compartan paciente.
+- **`unificar_hecho_por_ancla`** (tras `reparar_subtemas_ajenos`, antes del
+  voto de tono): une grupos con ancla de persona compartida (nombre propio
+  multi-palabra, nunca marca/alias/voceros/geografía) + clase de evento
+  compatible + firma de evento sin más de una diferencia. Referencia cruzada
+  madre/hijo solo si ambos titulares se nombran. El canon es el subtema más
+  frecuente (empate: nombra el ancla, luego el más largo) y se escribe con
+  sus mayúsculas originales. Ante la duda, no une.
+- **Veto de anclas no-persona** (`_ancla_vetada` + `_ORG_PAT`): un «nombre
+  propio» con vocabulario de evento («Así Vamos en Salud», «Sistema de Salud
+  Colombiano») o sustantivo común («Conversatorio», «Estado») no es un
+  paciente y no ancla.
+- **Guarda positiva: episodio de atención en la marca**
+  (`_atencion_paciente_en_marca`): ancla de persona + clase asistencial +
+  marca/alias como lugar («en/de/a la Fundación Santa Fe») → Positivo. Para
+  clientes de salud el episodio asistencial es contenido propio. No aplica en
+  tragedia sin acción ni con crítica dirigida.
+- **Guarda positiva: alianza/convenio con la marca** («alianza entre Morphy
+  y la Fundación…») → Positivo; «de acuerdo con» se excluye (atribución).
+- **Guarda positiva: sede en construcción de sujeto** («Serena del Mar vivió
+  una gran fiesta deportiva») → Positivo.
+- **`aplicar_regla_positivo_incidental`** (espejo de la v4.16): el Positivo
+  también se evalúa hacia la marca. Baja Positivo→Neutro la mención
+  incidental (una sola mención, sin protagonismo). La guarda se valida en
+  una copia: si ella misma encontraría evidencia (atención al paciente,
+  alianza, sede, vocero…), el Positivo se conserva. No toca Negativos ni
+  Duplicadas; lo bajado queda `neutro_pegajoso`.
+- **`voto_final_tono_por_subtema`**: tras las guardas, mayoría ≥60% dentro de
+  cada subtema unificado; respeta `neutro_pegajoso` y nunca toca Negativos.
+- **Alias ambiguo** (`_marca_protagonista`): la forma corta («Santa Fe»)
+  solo cuenta como protagonismo fuera de contexto deportivo local
+  (`_DEPORTE_PAT`: partido, empate/empató, campín, gol, fútbol…); la forma
+  larga siempre resuelve primero.
+- Verificado sobre el dossier real (simulación determinista, sin LLM):
+  Yamid 280/284 en «Estado de salud de Yamid Amat» (281 Positivo);
+  «Vargas se pronuncia sobre Yamid», «Edad y trayectoria» e «Información
+  sobre el EPOC» siguen separados; Lina/Gael por etapas (12 ingreso, 15
+  nacimiento); 25 Positivos incidentales → Neutro (rankings de otros
+  hospitales, inmobiliaria, Mhoni Vidente, Morphy en config Santa Fe…).
+- Tests nuevos: `tests/test_v420_ancla_tono.py` (27 ok). Suite: 268/268 OK.
+
+## 27. v4.21 — El subtema nunca es el titular (2026-09-24)
+
+El modelo a veces devuelve el titular tal cual como subtema. La revisión
+exhaustiva sobre el dossier Fundación Santa Fe (484 filas) encontró el
+panorama real:
+
+- `copia_titular` tenía 46 falsos positivos: etiquetas nominales válidas
+  («Estado de salud de Yamid Amat») que aparecen dentro del titular iban a
+  la vuelta de reparación LLM, desperdiciando llamadas y arriesgando que el
+  modelo «arreglara» lo que estaba bien. Quedan 2 casos genuinos.
+- 4 subtemas-cita: `"Septiembre era el momento perfecto"` como etiqueta.
+- El fallback final recortaba 5 palabras crudas del titular (medio titular
+  como subtema).
+
+Cambios (generales, no atados a cliente):
+
+1. `_es_etiqueta_valida(sub)`: el subtema es etiqueta válida por sí misma
+   (2–7 palabras, nominal, sin ¡!¿? ni comillas envolventes) reusando
+   `validar(..., _con_copia=False)` — sin el flag habría recursión infinita.
+2. `validar()` solo marca `copia_titular` cuando el subtema NO es etiqueta
+   válida: una etiqueta buena que coincide con (parte de) el titular no es
+   pereza del modelo.
+3. `reparar_subtema_determinista()`: el titular copiado tal cual, la cita
+   como etiqueta y la pregunta como etiqueta se reparan sin LLM derivando
+   un rótulo honesto del titular. Corre antes de la vuelta LLM; solo los
+   problemas puramente mecánicos (`copia_titular`, `caracter_marcador`) van
+   por esta vía. Contador en `_ULTIMO_RESUMEN['subtemas_reparados_determinista']`.
+4. `_subtema_desde_titulo` endurecido: quita interjecciones («¡Atención!»,
+   «Última hora:»), signos ¡!¿? en bordes, comillas envolventes; elimina
+   oraciones-pregunta («¿Cuántos años…? Inició en…» → «Inició en…»); ante
+   `:` prefiere el segmento no-cita y detecta frase destacada sin comillas
+   («…Gael: Septiembre era el momento perfecto» → el hecho, no el destacado;
+   `_es_frase_destacada`: último ≤6 palabras sin clase de evento + primero
+   ≥2× más largo con clase); tras recortar a 7 palabras quita verbos
+   iniciales («revela detalles…» → «detalles…»).
+5. El fallback final usa `_subtema_desde_titulo` en vez del recorte crudo.
+- La cita parcial dentro de etiqueta nominal («Lanzamiento de álbum
+  'Arriba La L'») se conserva: solo se reescribe la cita envolvente.
+- Una etiqueta válida idéntica al titular no se toca (el titular ya era
+  etiqueta; no hay nada que reparar).
+- Validación dossier real: `copia_titular` 46 → 2; los 2 se reparan sin LLM
+  («Septiembre…» → «Detalles del nacimiento de su hijo Gael», que luego la
+  unificación por ancla v4.20 lleva a «Nacimiento de Gael en Santa Fe»).
+- Tests nuevos: `tests/test_v421_subtema_no_titular.py` (21 ok); 2 tests de
+  `test_calidad_tema_tono.py` actualizados al criterio v4.21 (los ejemplos
+  que marcaban son etiquetas válidas). Suite: 258/258 OK (3 módulos no
+  cargan: falta `openai`, ambiental preexistente, no instalable por
+  conflicto debian).

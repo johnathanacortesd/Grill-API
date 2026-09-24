@@ -581,8 +581,18 @@ FILLER = MARCO | {'importantes', 'relevantes', 'generales', 'varias', 'diversos'
                   'departamental', 'institucional', 'gubernamental', 'regional', 'recientes', 'varios'}
 
 
-def validar(sub_tema, tono, fuentes, min_pal=MIN_PAL, max_pal=MAX_PAL) -> List[str]:
-    """Problemas encontrados. Lista vacia = etiqueta valida. Los avisos 'revisar_anclaje' son blandos."""
+def validar(sub_tema, tono, fuentes, min_pal=MIN_PAL, max_pal=MAX_PAL,
+            _con_copia=True) -> List[str]:
+    """Problemas encontrados. Lista vacia = etiqueta valida. Los avisos 'revisar_anclaje' son blandos.
+
+    v4.21: `copia_titular` solo se marca cuando el subtema NO es ya una
+    etiqueta valida por si misma. Que una etiqueta nominal bien formada
+    aparezca dentro del titular («Estado de salud de Yamid Amat» en
+    «Actualización sobre el estado de salud…») no es pereza del modelo:
+    es lo esperado. Sin este filtro, docenas de etiquetas buenas iban a
+    la vuelta de reparacion LLM, desperdiciando llamadas y arriesgando
+    que el modelo «arregle» lo que estaba bien.
+    """
     p = []
     sub_tema = str(sub_tema or '').strip()
     if not sub_tema:
@@ -609,7 +619,8 @@ def validar(sub_tema, tono, fuentes, min_pal=MIN_PAL, max_pal=MAX_PAL) -> List[s
     # no copia ("Medicina multimodal y personalizada" ← "La medicina que viene
     # será multimodal y personalizada…"). El titular es fuentes[0].
     titulo = (fuentes or [''])[0] or ''
-    if _subtema_copia_titular(sub_tema, titulo):
+    if _con_copia and _subtema_copia_titular(sub_tema, titulo) \
+            and not _es_etiqueta_valida(sub_tema):
         p.append('copia_titular')
     # Vago: solo evento genérico + sujeto genérico, sin objeto distintivo
     # ("Reunión de expertos en crimen").
@@ -683,6 +694,25 @@ def _subtema_copia_titular(sub_tema: str, titulo: str) -> bool:
             return False
         j += 1
     return True
+
+
+def _es_etiqueta_valida(sub_tema: str) -> bool:
+    """True si el subtema ya es una etiqueta tematica valida por si misma,
+    sin mirar el titular.
+
+    v4.21: distingue «etiqueta que coincide con (parte de) el titular»
+    de «titular copiado como subtema». Reusa validar() con _con_copia=False
+    (sin ese flag habria recursion infinita: validar -> _es_etiqueta_valida
+    -> validar). Los avisos blandos 'revisar_anclaje' se excluyen porque sin
+    fuentes siempre saltarian. Una etiqueta nunca lleva ¡!¿?: un titular
+    copiado con interjecciones («¡Atención! …») no es etiqueta valida.
+    """
+    s = str(sub_tema or '')
+    if re.search(r'[¡!¿?]', s):
+        return False
+    pr = validar(s, 'Neutro', [], _con_copia=False)
+    duros = [x for x in pr if not x.startswith('revisar_anclaje')]
+    return not duros
 
 
 # ============================================================================
@@ -1560,6 +1590,22 @@ def etiquetar_grupos(cfg: dict, grupos: List[dict], progress: Optional[Callable]
             if duros or not e['sub_tema']:
                 fallos.append({'grupo': g['grupo'], 'titulo': g['titulo'], 'texto': g['texto'],
                                'sub_tema': e['sub_tema'], 'problemas': duros or ['vacio']})
+        # v4.21: reparacion determinista primero para los problemas mecanicos
+        # (titular copiado como subtema, cita o pregunta como etiqueta). Lo
+        # que se repara aqui no gasta llamada LLM; el resto sigue a la vuelta
+        # de reparacion con el modelo.
+        pendientes = []
+        for f in fallos:
+            base = [p.split('(')[0] for p in f['problemas']]
+            if base and all(b in _PROBLEMAS_MECANICOS for b in base):
+                nuevo = reparar_subtema_determinista(f['sub_tema'], f['titulo'])
+                if nuevo:
+                    etiquetas[f['grupo']]['sub_tema'] = nuevo
+                    _ULTIMO_RESUMEN['subtemas_reparados_determinista'] = \
+                        _ULTIMO_RESUMEN.get('subtemas_reparados_determinista', 0) + 1
+                    continue
+            pendientes.append(f)
+        fallos = pendientes
         if not fallos:
             break
         if progress:
@@ -1588,11 +1634,13 @@ def etiquetar_grupos(cfg: dict, grupos: List[dict], progress: Optional[Callable]
                     etiquetas[gid] = v
 
     # ---- fallback determinista para lo que quedo vacio: nunca dejamos una fila sin etiqueta ----
+    # v4.21: el rótulo se deriva del titular con _subtema_desde_titulo (rótulo
+    # honesto y corto) en vez del recorte crudo de 5 palabras, que dejaba
+    # medio titular como subtema.
     for g in grupos:
         e = etiquetas[g['grupo']]
         if not e.get('sub_tema'):
-            palabras = [w for w in words(g['titulo']) if w not in GENERIC_TITULO][:5]
-            e['sub_tema'] = ' '.join(palabras).capitalize() if palabras else 'Hecho informativo'
+            e['sub_tema'] = _subtema_desde_titulo(g.get('titulo')) or 'Hecho informativo'
             fallidos.append(g['grupo'])
         if not e.get('tono'):
             e['tono'] = 'Neutro'
@@ -1615,11 +1663,31 @@ def etiquetar_grupos(cfg: dict, grupos: List[dict], progress: Optional[Callable]
 
 
 def _contenido_discriminante(s: str) -> set:
-    """Tokens de contenido (sin nexos, relleno ni geografía genérica)."""
-    base = {raiz(w) for w in words(s)
+    """Tokens de contenido (sin nexos, relleno ni geografía genérica).
+
+    v4.20: los tokens se normalizan por clase de evento («hospitalización»,
+    «internación», «ingreso», «uci» → 'salud'; «lanzamiento»/«presentación» →
+    'lanzamiento'...) para que las paráfrasis del mismo hecho se reconozcan
+    como tal. Los nombres propios siguen discriminando: dos pacientes o dos
+    ciudades distintas no se unen aunque compartan clase.
+    """
+    toks = [w for w in words(s)
             if w not in CONECT and w not in FILLER and w not in MARCO
-            and len(w) >= 3 and not _es_geografia(w)}
-    return {_EQUIV_STEMS.get(t, t) for t in base}
+            and len(w) >= 3 and not _es_geografia(w)]
+    r = [raiz(w) for w in toks]
+    sal = set()
+    usados = set()
+    for k in range(len(r) - 1):
+        cid = _BIGRAM_CLASE.get((r[k], r[k + 1]))
+        if cid:
+            sal.add(cid)
+            usados.add(k)
+            usados.add(k + 1)
+    for k, t in enumerate(r):
+        if k in usados:
+            continue
+        sal.add(_CLASE_DE.get(t, _EQUIV_STEMS.get(t, t)))
+    return sal
 
 
 # Familias morfológicas que el stemmer simple no une y sí comparten asunto.
@@ -1637,6 +1705,87 @@ _EQUIV_STEMS = {
 GENERICO_NO_UNEN = {
     'congreso', 'internacional', 'nacional', 'evento', 'encuentro', 'jornada',
     'seminario', 'simposio', 'conferencia', 'feria', 'festival', 'reunion', 'cumbre',
+}
+
+
+# ============================================================================
+# v4.20: clases de evento (vocabulario de dominio, no de cliente).
+#
+# Caso real (Fundación Santa Fe, dossier 2026-09-24): la atención a un mismo
+# paciente salió con 10+ subtemas («Estado de salud de Yamid Amat»,
+# «Hospitalización de Yamid Amat», «Yamid Amat en UCI», «Ingreso a UCI de
+# Yamid»...) porque ninguna comparación de cadenas une «hospitalización» con
+# «estado de salud». Las clases normalizan paráfrasis del MISMO evento antes
+# de comparar: «hospitalización», «internación», «ingreso a UCI» → 'salud'.
+# Los nombres propios siguen discriminando: dos pacientes distintos no se
+# unen aunque compartan clase. Para clientes de salud esto además garantiza
+# «ver los pacientes tratados»: el hecho se agrupa por el paciente.
+# ============================================================================
+# Clases de evento asistencial separadas por etapa (v4.20): el ingreso a
+# clínica, el nacimiento/parto y la cirugía son hechos distintos aunque
+# compartan paciente («Ingreso de Lina Tejeiro a clínica» ≠ «Nacimiento de
+# Gael en Santa Fe»). «salud» queda como clase genérica para el estado
+# clínico general (pronóstico, complicación, tratamiento...).
+_CLASES_EVENTO = {
+    'salud': (
+        'hospitalizacion hospitalizado hospitalizada hospitalizan '
+        'internacion internado internada '
+        'ingreso ingresado ingresada ingresa ingresan '
+        'uci cuidado cuidados intensivo intensivos '
+        'salud medico medica '
+        'pronostico '
+        'complicacion complicaciones '
+        'tratamiento tratamientos '
+        'consulta diagnostico recuperacion emergencia urgencia urgencias'
+    ).split(),
+    'nacimiento': (
+        'nacimiento nacio nacen parto alumbramiento cesarea'
+    ).split(),
+    'cirugia': (
+        'cirugia operacion operado operada operan'
+    ).split(),
+    'lanzamiento': (
+        'lanzamiento lanzamientos presentacion debut estreno estrenos '
+        'revelacion unveiling'
+    ).split(),
+    'reunion': (
+        'reunion reuniones encuentro conversatorio mesa foro foros cumbre '
+        'dialogo junta asamblea'
+    ).split(),
+    'reconocimiento': (
+        'reconocimiento premio premios galardon distincion homenaje '
+        'condecoracion'
+    ).split(),
+    'ranking': 'ranking listado listados clasificacion escalafon'.split(),
+    'inauguracion': 'inauguracion apertura reapertura inaugura inauguran'.split(),
+    'firma': 'firma firmas alianza alianzas convenio acuerdo pacto firman'.split(),
+}
+# Mapa stem → clase (se normaliza con raiz() igual que el resto de tokens).
+_CLASE_DE = {}
+for _cid, _pals in _CLASES_EVENTO.items():
+    for _pal in _pals:
+        _CLASE_DE.setdefault(raiz(_pal), _cid)
+del _cid, _pals, _pal
+# Bigramas que solo significan evento de salud juntos («reporte» o «parte»
+# solos son genéricos: «reporte policial» no es un evento de salud).
+_BIGRAM_CLASE = {
+    ('reporte', 'medico'): 'salud',
+    ('parte', 'medico'): 'salud',
+    ('estado', 'salud'): 'salud',
+    ('cuidado', 'intensivo'): 'salud',
+    ('trabajo', 'parto'): 'salud',
+    ('labor', 'parto'): 'salud',
+    ('dar', 'luz'): 'salud',
+    ('atencion', 'medica'): 'salud',
+}
+# Condiciones/enfermedades: NO son eventos. Veto para no unir dos atenciones
+# distintas del mismo paciente («hospitalizado por fiebre» vs «nacimiento»).
+_CONDICION_NO_EVENTO = {
+    raiz(p) for p in (
+        'epoc cancer diabetes fiebre covid coronavirus infarto tumor tumores '
+        'neumonia asma hipertension alzheimer parkinson artritis lupus anemia '
+        'bronquitis hepatitis rubeola varicela sarampion'
+    ).split()
 }
 
 
@@ -1788,15 +1937,95 @@ def canonizar_subtemas(etiquetas: Dict[int, dict], umbral: float = 0.82) -> int:
 # distintivas (no genéricas) con el TITULAR de otro grupo y <=1 con el
 # contenido propio (título+texto+contexto). Ante la duda no se toca nada.
 # El grupo afectado vuelve a un rótulo honesto derivado de su propio titular.
+# v4.21: interjecciones con las que arrancan muchos titulares y que nunca deben
+# quedar en un subtema («¡Atención! …», «Última hora: …»).
+_INTERJECCION_TITULAR = re.compile(
+    r'^(atenci[oó]n|[úu]ltima hora|urgente|en vivo|lo [úu]ltimo|'
+    r'de [úu]ltimo minuto|[úu]ltimo minuto|breaking|exclusivo|exclusiva|'
+    r'atentos?)\s*[:!¡,.\-–—]?\s*', re.I)
+# Verbo de habla/información en 3a persona del singular: tras recortar un
+# titular largo, lo que sigue al verbo es el asunto («…revela detalles del
+# nacimiento…» → «detalles del nacimiento…»).
+_VERBO_INFO_SING = {
+    'revela', 'devela', 'cuenta', 'detalla', 'narra', 'explica', 'anuncia',
+    'presenta', 'confirma', 'asegura', 'dice', 'afirma', 'relata', 'describe',
+    'muestra', 'entrega', 'revelan', 'cuentan', 'detallan',
+}
+_CITA_ENVOLVENTE = re.compile(r'^\s*["\'«»“”].*["\'«»“”]\s*$')
+_PREP_INICIAL = {
+    'para', 'por', 'de', 'del', 'en', 'y', 'e', 'o', 'con', 'sin', 'sobre',
+    'entre', 'hacia', 'desde', 'hasta', 'que',
+}
+
+
+def _empieza_con_verbo(pals) -> bool:
+    """True si la primera palabra es verbo conjugado (misma regla que validar)."""
+    if not pals:
+        return False
+    prim = nz(pals[0])
+    nexo2 = len(pals) > 1 and nz(pals[1]) in PREP_FIN
+    return bool(not nexo2 and (prim in VERBOS1 or
+                               (len(prim) > 4 and RE_VERBO.search(prim))))
+
+
+def _es_frase_destacada(ultimo: str, primero: str) -> bool:
+    """True si el segmento tras ':' parece frase destacada y el previo, el hecho.
+
+    v4.21: «Lina Tejeiro revela detalles del nacimiento de su hijo Gael:
+    Septiembre era el momento perfecto» — el destacado es corto y sin clase
+    de evento; el hecho es sustancialmente más largo y sí tiene clase.
+    Sin esta regla, dos titulares casi idénticos (con y sin comillas) tomaban
+    segmentos distintos y quedaban con subtema inconsistente.
+    """
+    wu, wp = ultimo.split(), primero.split()
+    return (len(wu) <= 6 and len(wp) >= 2 * len(wu)
+            and not _clases_de_texto(ultimo) and bool(_clases_de_texto(primero)))
+
+
 def _subtema_desde_titulo(titulo: str) -> str:
-    """Rótulo de emergencia a partir del propio titular (nunca inventado)."""
+    """Rótulo de emergencia a partir del propio titular (nunca inventado).
+
+    v4.21: además del recorte honesto, limpia marcas de titular-noticia que
+    nunca pertenecen a una etiqueta: interjecciones («¡Atención!»), signos
+    «¡!¿?» en los bordes y comillas envolventes. Si el segmento tras los dos
+    puntos es una cita («…: "Septiembre era el momento perfecto"»), el hecho
+    está en el segmento previo y se prefiere ese. Tras recortar a 7 palabras
+    también se quitan verbos iniciales («revela detalles…» → «detalles…»).
+    """
     t = sq(titulo or '').strip()
     if not t:
         return 'Hecho informativo'
+    # v4.21: titular-pregunta («¿Cuántos años tiene…? Inició en la radio…»):
+    # las oraciones-pregunta no aportan el hecho; se eliminan y se conserva
+    # el contenido declarativo.
+    if '?' in t or '¿' in t:
+        t = re.sub(r'¿[^?¿]*\?', ' ', t)
+        t = t.replace('¿', ' ').replace('?', ' ')
+        t = re.sub(r'\s+', ' ', t).strip(' .')
+        if not t:
+            return 'Hecho informativo'
     # Titular en dos partes («…: así fue el ascenso político de X»): el hecho
-    # suele estar después de los dos puntos.
+    # suele estar después de los dos puntos… salvo que ese segmento sea una
+    # cita destacada; entonces el hecho está antes («Lina Tejeiro revela…:
+    # "Septiembre era el momento perfecto"»).
     if ':' in t:
-        t = t.split(':')[-1].strip()
+        segs = [s.strip() for s in t.split(':') if s.strip()]
+        if segs:
+            ultimo = segs[-1]
+            if _CITA_ENVOLVENTE.match(ultimo):
+                previos = [s for s in segs[:-1]
+                           if not _CITA_ENVOLVENTE.match(s)]
+                t = previos[0] if previos else ultimo
+            elif len(segs) > 1 and _es_frase_destacada(ultimo, segs[0]):
+                t = segs[0]
+            else:
+                t = ultimo
+    t = t.strip('"\'«»“”').strip()
+    t = re.sub(r'^[¡!¿?]+', '', t).strip()
+    t = _INTERJECCION_TITULAR.sub('', t).strip()
+    t = re.sub(r'[¡!¿?]+$', '', t).strip()
+    if not t:
+        return 'Hecho informativo'
     t = re.sub(r'^(as[ií]\s+fue\s+el|as[ií]\s+fue\s+la|esto\s+es\s+lo\s+que)\s+',
                '', t, flags=re.I).strip()
     t = re.sub(r'^(el|la|los|las|un|una)\s+', '', t, flags=re.I).strip()
@@ -1804,9 +2033,12 @@ def _subtema_desde_titulo(titulo: str) -> str:
     if len(pals) > 7:
         # Titular largo sin dos puntos: el asunto distintivo suele ir al
         # final («…el VIII Congreso Internacional de … Psicológica»).
-        t = ' '.join(pals[-7:])
-        t = re.sub(r'^(para|por|de|del|en|y|e|o|con|sin|sobre|entre|hacia|desde|hasta|que)\s+',
-                   '', t, flags=re.I).strip()
+        pals = pals[-7:]
+        while len(pals) > 3 and (nz(pals[0]) in _PREP_INICIAL
+                                 or nz(pals[0]) in _VERBO_INFO_SING
+                                 or _empieza_con_verbo(pals)):
+            pals = pals[1:]
+        t = ' '.join(pals)
     if t and t == t.upper() and any(c.isalpha() for c in t):
         # Conserva siglas (IA, PAE); nexos y resto a frase normal: primera
         # palabra con mayúscula inicial, las demás en minúsculas.
@@ -1865,6 +2097,354 @@ def reparar_subtemas_ajenos(grupos: Sequence[dict],
         if _etiqueta_ajena(g, e['sub_tema'], grupos):
             e['sub_tema'] = _subtema_desde_titulo(g.get('titulo'))
             cambios += 1
+    return cambios
+
+
+# ============================================================================
+# v4.21: el subtema nunca es el titular (reparación determinista).
+#
+# Cuando el modelo devuelve el titular tal cual como subtema, o usa una cita
+# o una pregunta como etiqueta, la reparación es mecánica y no necesita una
+# llamada LLM: se deriva un rótulo honesto del propio titular. Esto ahorra
+# llamadas y evita que la vuelta de reparación «arregle» etiquetas buenas.
+# ============================================================================
+# Problemas de validar() con reparación mecánica obvia.
+_PROBLEMAS_MECANICOS = {'copia_titular', 'caracter_marcador'}
+
+
+def _subtema_envuelto_en_cita(s: str) -> bool:
+    """True si TODO el subtema es una cita («"Septiembre era el momento…"»).
+
+    Una cita parcial dentro de una etiqueta nominal («Lanzamiento del álbum
+    'Arriba La L'») sí es informativa y no se toca.
+    """
+    return bool(_CITA_ENVOLVENTE.match(str(s or '').strip()))
+
+
+def reparar_subtema_determinista(sub_tema: str, titulo: str) -> str:
+    """Repara sin LLM un subtema copiado del titular, cita o pregunta.
+
+    Devuelve el rótulo nuevo (validado) o '' si el caso no es mecánico y debe
+    resolverlo la vuelta LLM de reparación.
+    """
+    s = str(sub_tema or '').strip()
+    t = str(titulo or '').strip()
+    if not s or not t:
+        return ''
+    mecanico = (
+        _subtema_envuelto_en_cita(s)
+        or s.rstrip().endswith('?')
+        or (_subtema_copia_titular(s, t) and not _es_etiqueta_valida(s))
+    )
+    if not mecanico:
+        return ''
+    nuevo = _subtema_desde_titulo(t)
+    if not nuevo or nuevo == 'Hecho informativo':
+        return ''
+    pr = validar(nuevo, 'Neutro', [t])
+    if [x for x in pr if not x.startswith('revisar_anclaje')]:
+        return ''
+    return nuevo
+
+
+# ============================================================================
+# v4.20: mismo hecho por ancla de persona + evento compatible.
+#
+# El modelo redacta el mismo hecho con paráfrasis que ninguna comparación de
+# cadenas une («Hospitalización por complicaciones pulmonares» vs «Estado de
+# salud de Yamid Amat»; «"Septiembre era el momento perfecto"» como subtema
+# de una noticia del nacimiento de Gael). La evidencia fuerte aquí es otra y
+# es general/paramétrica (no atada a ningún cliente): el MISMO nombre propio
+# —paciente o persona, DETECTADO en el texto, no configurado— más palabras de
+# evento compatibles (las clases de dominio de v4.20).
+#
+# Reglas (todas deben cumplirse):
+#  1. Ancla compartida: el mismo nombre propio en ambos grupos. Si los dos
+#     subtemas nombran personas distintas («Yamid Amat» vs «Lina Tejeiro»),
+#     no se unen aunque compartan clase de evento. Se admite referencia
+#     cruzada (la madre en un subtema, el hijo en el otro, ambos nombrados en
+#     los titulares: mismo episodio de atención).
+#  2. Evento compatible: alguna clase de evento en común entre (subtema ∪
+#     titular) de ambos. Sin clase común no hay unión («Edad y trayectoria
+#     de Yamid Amat», «Vargas se pronuncia sobre Yamid», «Información sobre
+#     el EPOC» quedan separados: son otro asunto).
+#  3. Paráfrasis, no otro hecho: las firmas de evento de los subtemas
+#     comparten contenido y difieren en a lo sumo 1 token; una condición o
+#     enfermedad distinta veta la unión («hospitalizado por fiebre» no es
+#     «nacimiento»). Los subtemas degenerados (una cita, sin ancla ni evento:
+#     «"Septiembre era el momento perfecto"») adoptan el canon si cumplen 1
+#     y 2, porque no afirman un hecho competing.
+# La marca/alias/voceros nunca son ancla (son el cliente, no el paciente) y
+# la geografía tampoco.
+# ============================================================================
+_ANCLA_MULTI_PAT = re.compile(
+    r'\b([A-ZÁÉÍÓÚÑ][a-záéíóúñ]{2,}(?:\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]{2,})+)\b')
+_ANCLA_UNO_PAT = re.compile(r'\b([A-ZÁÉÍÓÚÑ][a-záéíóúñ]{3,})\b')
+_ANCLA_DESCARTA = {
+    'enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto',
+    'septiembre', 'octubre', 'noviembre', 'diciembre',
+    'lunes', 'martes', 'miercoles', 'jueves', 'viernes', 'sabado', 'domingo',
+    'clinica', 'hospital', 'fundacion', 'universidad', 'doctor', 'doctora',
+    'presidente', 'presidenta', 'ministro', 'ministra', 'alcalde', 'alcaldesa',
+    'gobernador', 'director', 'directora', 'noticiero', 'noticieros',
+    'estado', 'estados',
+}
+
+
+def _tokens_marca(brand: str, aliases: Sequence[str],
+                  voceros: Sequence[str] = ()) -> set:
+    toks = set()
+    for x in [brand] + list(aliases or []) + list(voceros or []):
+        toks.update(w for w in words(x) if len(w) >= 3)
+    return toks
+
+
+# Tokens que vetan un ancla: si el "nombre propio" contiene vocabulario de
+# evento («Salud» en «Sistema de Salud Colombiano») o genéricos, no es una
+# persona y no puede anclar un hecho (v4.20).
+def _ancla_vetada(toks: tuple) -> bool:
+    for t in toks:
+        if raiz(t) in _CLASE_DE:
+            return True
+        if t in GENERICO_NO_UNEN or t in MODIFICADOR_GENERICO_NO_UNE:
+            return True
+    return False
+
+
+# Nombre propio largo con conectores en minúscula («Así Vamos en Salud»,
+# «Universidad de los Andes»): si contiene vocabulario de evento, ninguno de
+# sus tokens puede ser ancla de persona (v4.20). El patrón básico de anclas
+# solo ve «Así Vamos» porque «en» va en minúscula; este lo ve completo.
+_ORG_PAT = re.compile(
+    r'\b([A-ZÁÉÍÓÚÑ][a-záéíóúñ]{2,}'
+    r'(?:\s+(?:de|del|en|y|e)\s+[A-ZÁÉÍÓÚÑ][a-záéíóúñ]{2,})+)\b')
+
+
+def _anclas_en(texto: str, tokens_marca: set,
+               solo_subtema: bool = False) -> set:
+    """Nombres propios candidatos como tuplas de tokens normalizados."""
+    t = texto or ''
+    # Veto organizacional: tokens de un nombre con conectores que contiene
+    # vocabulario de evento («asi», «vamos» en «Así Vamos en Salud»).
+    veto_org = set()
+    for m in _ORG_PAT.finditer(t):
+        toks = tuple(x for x in words(m.group(1)) if len(x) >= 3)
+        if any(raiz(x) in _CLASE_DE for x in toks):
+            veto_org.update(toks)
+    anclas = set()
+    for m in _ANCLA_MULTI_PAT.finditer(t):
+        toks = tuple(t for t in words(m.group(1)) if len(t) >= 3)
+        if len(toks) < 2:
+            continue
+        if any(t in tokens_marca for t in toks):
+            continue
+        if all(_es_geografia(t) for t in toks):
+            continue
+        if _ancla_vetada(toks):
+            continue
+        if any(x in veto_org for x in toks):
+            continue
+        anclas.add(toks)
+    if solo_subtema:
+        # Ancla de un token solo si va en el subtema («Gael», «Yamid»): en
+        # titulares suelta es demasiado ruidosa.
+        for m in _ANCLA_UNO_PAT.finditer(t):
+            wt = words(m.group(1))
+            if not wt:
+                continue
+            tok = wt[0]
+            if (tok in tokens_marca or _es_geografia(tok)
+                    or tok in _ANCLA_DESCARTA or _ancla_vetada((tok,))):
+                continue
+            anclas.add((tok,))
+    return anclas
+
+
+def _ancla_compartida(a: tuple, b: tuple) -> bool:
+    if a == b:
+        return True
+    if len(a) == 1 and a[0] in b:
+        return True
+    if len(b) == 1 and b[0] in a:
+        return True
+    return False
+
+
+def _clases_de_texto(texto: str) -> set:
+    """Clases de evento presentes en el texto (unigramas + bigramas)."""
+    toks = [w for w in words(texto or '') if len(w) >= 3]
+    r = [raiz(w) for w in toks]
+    sal = set()
+    for k in range(len(r) - 1):
+        cid = _BIGRAM_CLASE.get((r[k], r[k + 1]))
+        if cid:
+            sal.add(cid)
+    for t in r:
+        cid = _CLASE_DE.get(t)
+        if cid:
+            sal.add(cid)
+    return sal
+
+
+def _sig_evento_sub(subtema: str, anclas: set, tokens_marca: set) -> set:
+    """Firma de evento del subtema: contenido menos anclas, marca y
+    geografía, normalizado por clase de evento."""
+    ancla_toks = set()
+    for a in anclas:
+        ancla_toks.update(a)
+    toks = [w for w in words(subtema or '')
+            if w not in CONECT and w not in FILLER and w not in MARCO
+            and len(w) >= 3 and not _es_geografia(w)
+            and w not in ancla_toks and w not in tokens_marca]
+    r = [raiz(w) for w in toks]
+    sal = set()
+    usados = set()
+    for k in range(len(r) - 1):
+        cid = _BIGRAM_CLASE.get((r[k], r[k + 1]))
+        if cid:
+            sal.add(cid)
+            usados.add(k)
+            usados.add(k + 1)
+    for k, t in enumerate(r):
+        if k in usados:
+            continue
+        sal.add(_CLASE_DE.get(t, t))
+    return sal
+
+
+def _hecho_compatible_por_ancla(fi: dict, fj: dict) -> bool:
+    """True si dos grupos son el mismo hecho por ancla + evento (v4.20)."""
+    ai_sub, aj_sub = fi['a_sub'], fj['a_sub']
+    # 1. Ancla compartida.
+    if ai_sub and aj_sub:
+        # Los dos subtemas nombran persona: deben coincidir, o estar
+        # cruz-referenciados (madre/hijo nombrados en los titulares).
+        directa = any(_ancla_compartida(a, b) for a in ai_sub for b in aj_sub)
+        cruzada = (all(any(_ancla_compartida(a, b) for b in fj['a_all'])
+                       for a in ai_sub)
+                   and all(any(_ancla_compartida(b, a) for a in fi['a_all'])
+                           for b in aj_sub))
+        if not (directa or cruzada):
+            return False
+    else:
+        # Al menos un lado es degenerado (cita sin ancla): el ancla
+        # compartida debe estar nombrada en el subtema del otro lado.
+        ok = False
+        for a in fi['a_all']:
+            for b in fj['a_all']:
+                if not _ancla_compartida(a, b):
+                    continue
+                toks = set(a) | set(b)
+                if toks <= fi['toks_sub'] or toks <= fj['toks_sub']:
+                    ok = True
+                    break
+            if ok:
+                break
+        if not ok:
+            return False
+    # 2. Evento compatible: alguna clase en común.
+    if not (fi['clases_all'] & fj['clases_all']):
+        return False
+    # 3. Paráfrasis, no otro hecho (los degenerados no afirman hecho propio).
+    if fi['degenerado'] or fj['degenerado']:
+        return True
+    si, sj = fi['sig'], fj['sig']
+    if not (si & sj):
+        return False
+    diff = si ^ sj
+    if len(diff) > 1:
+        return False
+    if diff & _CONDICION_NO_EVENTO:
+        return False
+    return True
+
+
+def unificar_hecho_por_ancla(grupos: Sequence[dict], etiquetas: Dict[int, dict],
+                             brand: str, aliases: Sequence[str],
+                             voceros: Sequence[str] = ()) -> int:
+    """Une grupos que son el mismo hecho por ancla de persona + evento (v4.20).
+
+    Corre tras reparar_subtemas_ajenos y antes del voto de tono: el voto y las
+    guardas trabajan ya sobre subtemas unificados. El canon del hecho es el
+    subtema más frecuente (empate: con ancla nombrada, luego el más largo).
+    """
+    tokens_marca = _tokens_marca(brand, aliases, voceros)
+    n = len(grupos)
+    if n < 2:
+        return 0
+    infos = []
+    for g in grupos:
+        gid = g.get('grupo')
+        e = etiquetas.get(gid) or {}
+        sub_orig = str(e.get('sub_tema') or '')
+        sub = nz(sub_orig)
+        tit = str(g.get('titulo') or '')
+        # Los anclas se detectan sobre el texto ORIGINAL (con mayúsculas):
+        # nz() normaliza a minúsculas y el patrón de nombres propios no
+        # calzaría nunca (bug v4.20: a_sub quedaba siempre vacío).
+        a_sub = _anclas_en(sub_orig, tokens_marca, solo_subtema=True)
+        a_all = (_anclas_en(sub_orig, tokens_marca)
+                 | _anclas_en(tit, tokens_marca))
+        sig = _sig_evento_sub(sub, a_sub, tokens_marca)
+        clases_sub = _clases_de_texto(sub)
+        infos.append({
+            'gid': gid,
+            'sub': sub,
+            'sub_orig': sub_orig,
+            'a_sub': a_sub,
+            'a_all': a_all,
+            'toks_sub': set(words(sub)),
+            'sig': sig,
+            'clases_all': clases_sub | _clases_de_texto(tit),
+            'degenerado': (not a_sub) and not clases_sub,
+        })
+    par = list(range(n))
+
+    def find(x):
+        while par[x] != x:
+            par[x] = par[par[x]]
+            x = par[x]
+        return x
+
+    def uni(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            par[max(ra, rb)] = min(ra, rb)
+
+    for i in range(n):
+        if not infos[i]['sub']:
+            continue
+        for j in range(i + 1, n):
+            if not infos[j]['sub'] or find(i) == find(j):
+                continue
+            if _hecho_compatible_por_ancla(infos[i], infos[j]):
+                uni(i, j)
+
+    cambios = 0
+    buckets = {}
+    for i in range(n):
+        buckets.setdefault(find(i), []).append(i)
+    for miembros in buckets.values():
+        if len(miembros) < 2:
+            continue
+        conteo = Counter(infos[k]['sub'] for k in miembros)
+        # Canon: más frecuente (comparación normalizada); en empate, el que
+        # nombra el ancla y luego el más largo (más específico, v4.15/v4.18).
+        # Se escribe la forma ORIGINAL más frecuente del canon, nunca la
+        # normalizada en minúsculas.
+        def _clave(s):
+            k0 = next(k for k in miembros if infos[k]['sub'] == s)
+            con_ancla = 1 if infos[k0]['a_sub'] else 0
+            return (conteo[s], con_ancla, len(s.split()), len(s))
+        canon_norm = max(conteo, key=_clave)
+        canon_orig = Counter(infos[k]['sub_orig'] for k in miembros
+                             if infos[k]['sub'] == canon_norm).most_common(1)[0][0]
+        for k in miembros:
+            gid = infos[k]['gid']
+            e = etiquetas.get(gid)
+            if e and str(e.get('sub_tema') or '') != canon_orig:
+                e['sub_tema'] = canon_orig
+                cambios += 1
     return cambios
 
 
@@ -3647,8 +4227,16 @@ def enrich_rows_with_ai(
     ajenos = reparar_subtemas_ajenos(grupos, etiquetas)
     if ajenos:
         _ULTIMO_RESUMEN['subtemas_ajenos_reparados'] = ajenos
-    if (cambios or extra_uni or extra_llm or ajenos) and progress_callback:
-        progreso(93, 'Sub-temas unificados: %d' % (cambios + extra_uni + extra_llm + ajenos))
+    # v4.20: mismo hecho por ancla de persona + evento compatible («Estado de
+    # salud de Yamid Amat» = «Hospitalización de Yamid Amat» = «Yamid Amat en
+    # UCI»; el nacimiento de Gael = el ingreso de Lina Tejeiro). Corre tras
+    # las reparaciones y antes del voto de tono.
+    extra_ancla = unificar_hecho_por_ancla(
+        grupos, etiquetas, brand, aliases, voceros=cfg.get('voceros') or [])
+    if extra_ancla:
+        _ULTIMO_RESUMEN['subtemas_unificados_por_ancla'] = extra_ancla
+    if (cambios or extra_uni or extra_llm or ajenos or extra_ancla) and progress_callback:
+        progreso(93, 'Sub-temas unificados: %d' % (cambios + extra_uni + extra_llm + ajenos + extra_ancla))
 
     # Con PKL de tono el modelo del cliente es la autoridad: no se aplica la
     # guarda LLM (degradar Negativo / subir a Positivo) porque pisaría el PKL.
@@ -3688,6 +4276,33 @@ def enrich_rows_with_ai(
             if progress_callback:
                 progreso(93, 'Regla tragedia: %d Positivos con experto citado pasaron a Neutro'
                          % len(tragedia))
+        # v4.20: el Positivo también se evalúa hacia la marca: una mención
+        # incidental en una noticia positiva no es un Positivo (espejo de la
+        # regla v4.16 para el Negativo).
+        incidental = aplicar_regla_positivo_incidental(
+            grupos, etiquetas, brand, aliases, voceros=cfg.get('voceros') or [])
+        if incidental:
+            _ULTIMO_RESUMEN['tono_positivo_incidental'] = incidental
+            if progress_callback:
+                progreso(93, 'Positivo incidental: %d pasaron a Neutro' % len(incidental))
+        # v4.20: los Neutros que bajaron las guardas deterministas son
+        # "pegajosos": el voto final no puede revertirlos (crítica con
+        # respuesta equilibrada, tragedia con experto de la casa, Negativo sin
+        # blanco dirigido ni señalamiento real, Positivo incidental).
+        for gid in (set(corregidos) | set(equilibrio) | set(sin_blanco)
+                    | set(tragedia) | set(incidental)):
+            e = etiquetas.get(gid)
+            if e is not None:
+                e.setdefault('flags', {})['neutro_pegajoso'] = True
+        # v4.20: voto FINAL de tono dentro de cada subtema ya unificado.
+        # Reconcilia las divisiones que las guardas dejan dentro del mismo
+        # hecho («Estado de salud de Yamid Amat» 194 Positivo / 67 Neutro)
+        # sin deshacer ninguna regla superior.
+        voto_final = voto_final_tono_por_subtema(grupos, etiquetas)
+        if voto_final:
+            _ULTIMO_RESUMEN['tono_voto_final_por_subtema'] = voto_final
+            if progress_callback:
+                progreso(93, 'Tono final unificado por subtema: %d' % voto_final)
         if positivos:
             _ULTIMO_RESUMEN['tono_corregido_positivo'] = positivos
             _ULTIMO_RESUMEN['tono_subido_por_guarda'] = positivos
@@ -3889,6 +4504,54 @@ def _respuesta_marca(texto: str, actores: Sequence[str]) -> bool:
     return False
 
 
+def voto_final_tono_por_subtema(grupos: Sequence[dict],
+                                etiquetas: Dict[int, dict]) -> int:
+    """Voto final de tono dentro de cada subtema unificado (v4.20).
+
+    Corre al final de la tubería, DESPUÉS de todas las guardas deterministas
+    (positiva, crítica con respuesta, tragedia). Caso real: 268 noticias de
+    «Estado de salud de Yamid Amat» quedaron 194 Positivo / 67 Neutro porque
+    las guardas corren por noticia y pueden dividir el tono dentro del mismo
+    hecho. Este voto reconcilia: si una mayoría clara (>=60%) del subtema
+    comparte un tono, las minorías lo adoptan.
+
+    No deshace las reglas superiores: respeta los Neutros pegajosos (una
+    noticia que una guarda bajó de Negativo a Neutro por crítica con
+    respuesta, o de Positivo a Neutro por tragedia con experto de la casa,
+    lleva la marca y el voto no la toca), y nunca toca un Negativo.
+    """
+    cambios = 0
+    por_sub = defaultdict(list)
+    for g in grupos:
+        e = etiquetas.get(g.get('grupo'))
+        if e and (e.get('sub_tema') or '').strip():
+            por_sub[e['sub_tema'].strip()].append(g.get('grupo'))
+    for miembros in por_sub.values():
+        if len(miembros) < 2:
+            continue
+        protegidos = {gid for gid in miembros
+                      if (etiquetas[gid].get('flags') or {}).get('neutro_pegajoso')}
+        votan = [etiquetas[gid]['tono'] for gid in miembros
+                 if gid not in protegidos
+                 and etiquetas[gid].get('tono') != 'Negativo']
+        if not votan:
+            continue
+        c = Counter(votan)
+        ganador, nvotos = c.most_common(1)[0]
+        if nvotos < 0.6 * len(votan):
+            continue
+        for gid in miembros:
+            if gid in protegidos:
+                continue
+            e = etiquetas[gid]
+            if e.get('tono') == 'Negativo':
+                continue
+            if e.get('tono') != ganador:
+                e['tono'] = ganador
+                cambios += 1
+    return cambios
+
+
 def aplicar_regla_critica_con_respuesta(grupos: Sequence[dict],
                                        etiquetas: Dict[int, dict],
                                        brand: str, aliases: Sequence[str],
@@ -3972,14 +4635,65 @@ def _marca_blanco_de_critica(texto: str, brand: str, aliases: Sequence[str]) -> 
     return any(re.search(p, t) for p in patrones)
 
 
+# Predicados que delatan que un alias ambiguo («Santa Fe») se refiere a una
+# entidad deportiva y no a la marca. Solo se usan para desambiguar la forma
+# corta cuando el alias es subcadena del nombre de la marca; si el cliente ES
+# el club, su alias no es ambiguo y esto no aplica.
+_DEPORTE_PAT = re.compile(
+    r'\b(partido|estadio|cancha|hinchada|golead\w*|campeonato|torneo|liga|'
+    r'clasificaci\w+|descens\w+|empate|empat\w+|penal\w*|arbitr\w*|f[úu]tbol|'
+    r'camp[ií]n|gol(es)?|jugad\w+|t[eé]cnico|alineaci\w+|derrota|victoria|'
+    r'triunfo)\b', re.I)
+
+
+def _forma_corta_ambigua(forma: str, formas: Sequence[str]) -> bool:
+    """True si `forma` es subcadena de otra forma más larga («santa fe» en
+    «fundación santa fe»): puede referirse a otra entidad con el mismo alias."""
+    return any(b != forma and forma in b for b in formas)
+
+
+def _menciones_resolubles(titulo: str, texto: str, formas: Sequence[str]) -> int:
+    """Cuenta menciones de la marca resolviendo la forma más larga primero.
+
+    Las menciones sueltas de la forma corta ambigua no cuentan cuando el
+    texto mezcla entidades (aparece la forma larga: «Fundación Santa Fe» +
+    el club «Santa Fe») o van con predicado deportivo: un alias compartido
+    no fabrica protagonismo (caso real v4.20: dos Negativos por noticias del
+    equipo de fútbol).
+    """
+    cuerpo = nz('%s\n%s' % (titulo or '', texto or ''))
+    if not cuerpo:
+        return 0
+    pat = re.compile('(%s)' % '|'.join(re.escape(f) for f in formas))
+    total = 0
+    for m in pat.finditer(cuerpo):
+        f = m.group(1)
+        if _forma_corta_ambigua(f, formas):
+            if any(b != f and f in b and b in cuerpo for b in formas):
+                continue
+            ventana = cuerpo[max(0, m.start() - 80): m.end() + 80]
+            if _DEPORTE_PAT.search(ventana):
+                continue
+        total += 1
+    return total
+
+
 def _marca_protagonista(titulo: str, texto: str, actores: Sequence[str]) -> bool:
     """True si la marca protagoniza la noticia: aparece en el titular o tiene
-    al menos dos menciones en el texto. Una mención incidental aislada no
-    basta (criterio 'mención breve/sin protagonismo = Neutro')."""
-    if any(a in nz(titulo or '') for a in actores):
-        return True
-    x = nz(texto or '')
-    return sum(x.count(a) for a in actores) >= 2
+    al menos dos menciones resolubles en el texto. Una mención incidental
+    aislada no basta (criterio 'mención breve/sin protagonismo = Neutro'), y
+    un alias ambiguo compartido con otra entidad no cuenta como protagonismo.
+    """
+    formas = sorted({a for a in actores if a}, key=len, reverse=True)
+    if not formas:
+        return False
+    nt = nz(titulo or '')
+    for f in formas:
+        if f in nt:
+            if _forma_corta_ambigua(f, formas) and _DEPORTE_PAT.search(nt):
+                continue
+            return True
+    return _menciones_resolubles(titulo, texto, formas) >= 2
 
 
 def aplicar_regla_negativo_sin_blanco(grupos: Sequence[dict], etiquetas: Dict[int, dict],
@@ -4011,6 +4725,47 @@ def aplicar_regla_negativo_sin_blanco(grupos: Sequence[dict], etiquetas: Dict[in
     return bajados
 
 
+def aplicar_regla_positivo_incidental(grupos: Sequence[dict], etiquetas: Dict[int, dict],
+                                      brand: str, aliases: Sequence[str],
+                                      voceros: Sequence[str] = ()) -> List[int]:
+    """Calibra el Positivo: el sentimiento se evalúa hacia la marca.
+
+    Baja Positivo a Neutro cuando la marca no protagoniza la noticia (mención
+    incidental) Y no hay evidencia positiva sobre ella. Es el espejo de
+    aplicar_regla_negativo_sin_blanco (v4.16): el LLM hereda el tono general
+    de la noticia («mención en nota positiva ≠ positiva»). La guarda positiva
+    ya valida la evidencia real sobre la marca; si ella no subiría este grupo
+    desde Neutro, el Positivo es incidental. Casos reales v4.20 (Serena del
+    Mar): la reapertura era del OTRO hospital; la predicción era de Mhoni
+    Vidente. Devuelve los grupos corregidos.
+    """
+    actores = [nz(x) for x in [brand] + list(aliases or []) + list(voceros or [])
+               if x and len(nz(x)) >= 4]
+    if not actores:
+        return []
+    bajados = []
+    for g in grupos:
+        e = etiquetas.get(g.get('grupo'))
+        if not e or e.get('tono') != 'Positivo':
+            continue
+        titulo = g.get('titulo', '')
+        texto = '%s. %s' % (titulo, g.get('contexto') or g.get('texto', ''))
+        if _marca_protagonista(titulo, texto, actores):
+            continue
+        # ¿La guarda positiva encontraría evidencia real sobre la marca en
+        # este contenido? Se prueba sobre una copia en Neutro para reutilizar
+        # toda su lógica (fuente experta, sede, participación, autoría...).
+        copia_g = dict(g)
+        copia_e = dict(e, tono='Neutro')
+        copia_e.pop('flags', None)
+        if aplicar_guarda_positiva([copia_g], {copia_g.get('grupo'): copia_e},
+                                   brand, aliases, voceros):
+            continue
+        e['tono'] = 'Neutro'
+        bajados.append(g.get('grupo'))
+    return bajados
+
+
 def aplicar_guarda_tono(grupos: Sequence[dict], etiquetas: Dict[int, dict],
                         brand: str, aliases: Sequence[str]) -> List[int]:
     """Degrada a Neutro los Negativos que solo describen un hecho tragico, sin señalamiento dirigido.
@@ -4034,7 +4789,7 @@ def aplicar_guarda_tono(grupos: Sequence[dict], etiquetas: Dict[int, dict],
 HABLA_PAT = re.compile(
     r'\b(dijo|afirm[oó]|señal[oó]|advirti[oó]|consider[oó]|explic[oó]|asegur[oó]|'
     r'indic[oó]|destac[oó]|manifest[oó]|sostu?vo|sostiene|precis[oó]|coment[oó]|'
-    r'expres[oó]|declar[oó]|puntualiz[oó]|de\s+acuerdo\s+con)\b')
+    r'expres[oó]|declar[oó]|puntualiz[oó]|inform[oó]|report[oó]|de\s+acuerdo\s+con)\b')
 
 
 # Regla del usuario (2026-09-20): "tragedia con experto de la casa = neutral".
@@ -4115,6 +4870,42 @@ def _mencion_biografica(oracion: str, actores: Sequence[str]) -> bool:
     return any(a in n[m.end():] for a in actores)
 
 
+# Clases de evento asistencial: cualquiera de ellas en el texto indica un
+# episodio de atención en salud (v4.20).
+_CLASES_ASISTENCIALES = frozenset({'salud', 'nacimiento', 'cirugia'})
+
+
+def _atencion_paciente_en_marca(texto: str, brand: str,
+                               aliases: Sequence[str]) -> bool:
+    """True si el texto describe la atención de un paciente en la marca.
+
+    Señales (todas a nivel de grupo): un ancla de persona (el paciente,
+    detectada en el texto, no configurada), vocabulario de evento de salud
+    (las clases de dominio: hospitalización, UCI, pronóstico...) y la
+    marca/alias como lugar de la atención («en/de/a la Fundación Santa Fe»,
+    «en la Clínica Santa Fe»). Para clientes de salud, el episodio
+    asistencial es contenido propio de la marca (v4.20): no es una mención
+    incidental.
+    """
+    t = nz(texto or '')
+    if not t:
+        return False
+    tokens_marca = _tokens_marca(brand, aliases)
+    # Solo anclas multi-palabra: un sustantivo común capitalizado («Conversatorio»)
+    # no es un paciente. Los nombres de una palabra («Gael») se resuelven por
+    # la unificación por ancla del subtema, no aquí.
+    if not _anclas_en(texto, tokens_marca):
+        return False
+    if not (_CLASES_ASISTENCIALES & _clases_de_texto(texto)):
+        return False
+    actores = [nz(x) for x in [brand] + list(aliases or [])
+               if x and len(nz(x)) >= 4]
+    sede = (r'(en|de|del|a|al|hacia)\s+(la\s+|el\s+)?'
+            r'(cl[ií]nica|hospital|fundaci[oó]n|instituto|centro|sede)?\s*')
+    return any(re.search(sede + re.escape(a) + r'(?=\W|$)', t)
+               for a in actores)
+
+
 def aplicar_guarda_positiva(grupos: Sequence[dict], etiquetas: Dict[int, dict],
                             brand: str, aliases: Sequence[str],
                             voceros: Sequence[str] = ()) -> List[int]:
@@ -4166,6 +4957,16 @@ def aplicar_guarda_positiva(grupos: Sequence[dict], etiquetas: Dict[int, dict],
         # tragedia = Neutro. No bloquea la marca que actúa (dona, organiza…).
         tragedia_sin_accion = (bool(_TRAGEDIA_PAT.search(texto))
                                 and not _marca_actora(texto, actores))
+        # v4.20: atención a un paciente en la marca (ancla de persona + evento
+        # de salud + marca como lugar de la atención). Para clientes de salud
+        # el episodio asistencial es contenido propio: Positivo. No aplica en
+        # tragedia sin acción ni con crítica dirigida a la marca.
+        if (not tragedia_sin_accion
+                and not _critica_dirigida(texto, brand, aliases)
+                and _atencion_paciente_en_marca(texto, brand, aliases)):
+            e['tono'] = 'Positivo'
+            corregidos.append(g.get('grupo'))
+            continue
         for oracion in re.split(r'(?<=[.!?;:])\s+|\n+', ctrl(texto)):
             n = nz(oracion)
             if (not n or peticion.search(oracion) or critica.search(oracion) or
@@ -4247,6 +5048,35 @@ def aplicar_guarda_positiva(grupos: Sequence[dict], etiquetas: Dict[int, dict],
                         e['tono'] = 'Positivo'
                         corregidos.append(g.get('grupo'))
                         break
+                else:
+                    # v4.20: la marca como lugar del evento en construcción de
+                    # sujeto («Serena del Mar vivió una gran fiesta deportiva»,
+                    # «la Universidad fue sede del encuentro»): el evento
+                    # ocurre EN la marca aunque la gramática la ponga como
+                    # sujeto. Se exige sustantivo de evento + verbo de sede.
+                    if (re.search(r'\b(fiesta|festejo|carrera|evento|espect[aá]culo|'
+                                  r'concierto|encuentro|festival)\b', n)
+                            and re.search(r'\b(vivi[oó]|vivieron|acogi[oó]|acogieron|'
+                                          r'alberg[oó]|albergaron|fue\s+sede|'
+                                          r'sirvi[oó]\s+de\s+sede)\b', n)
+                            and any(a in n for a in actores)):
+                        e['tono'] = 'Positivo'
+                        corregidos.append(g.get('grupo'))
+                        break
+                # v4.20: alianza/convenio con la marca («alianza entre Morphy y
+                # la Fundación…», «convenio con la Universidad…»): la marca es
+                # parte del hecho, no mención incidental. Se excluye «de
+                # acuerdo con» (atribución de fuente, no alianza).
+                m_alianza = re.search(
+                    r'\b(alianzas?|convenios?|pactos?|(?<!de\s)acuerdo)\b', n)
+                if m_alianza and any(
+                        re.search(r'\b(entre|con)\b.{0,80}?'
+                                  + re.escape(a) + r'(?=\W|$)',
+                                  n[m_alianza.end():m_alianza.end() + 120])
+                        for a in actores):
+                    e['tono'] = 'Positivo'
+                    corregidos.append(g.get('grupo'))
+                    break
             if re.search(r'\b(recib(?:ió|e|ieron)|atend(?:erá|ió|e))\b', oracion, re.I) and re.search(
                     r'(premio|acreditaci|reconocimiento|pacientes|benefici)', oracion, re.I):
                 e['tono'] = 'Positivo'
