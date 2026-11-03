@@ -48,6 +48,193 @@ Los subtemas se limpian y limitan a un máximo de seis palabras, como frases nom
 
 Las validaciones no contienen nombres ni reglas especiales para clientes concretos. El mecanismo es reutilizable: separa los tokens de cualquier `Marca principal`, identifica el tipo de acontecimiento y conserva las palabras que describen su objeto. Por ejemplo, puede formar etiquetas como `Lanzamiento de carrera deportiva`, `Convenio de formación profesional` o `Investigación por fallas operativas`, según el contenido de cada noticia.
 
+### Una noticia = un subtema, un tono y un tema (v4.72)
+
+Pedido: noticias iguales o realmente similares (mismo título, mismo
+`CuerpoEs`, textos similares en esas columnas o en `Contexto analizado`)
+deben llevar el mismo subtema, y el subtema debe ser el correcto. Se
+conservan el modelo de API y el orden de columnas del xlsx final.
+
+**Qué fallaba (medido con un banco de pruebas nuevo).** Después del modelo,
+unos trece pases tocaban el subtema por grupo y luego por FILA (fidelidad
+por fila, anti-copia, título final, forma final). Cada uno podía reemplazar
+el rótulo de una fila por un recorte de su propio titular, así que la misma
+noticia terminaba con varios subtemas («Disminución de donantes de órganos»
+en unas filas, «Lista de espera» y «Preocupación en hospitales» en otras),
+o con un rótulo peor que el del modelo («Requisitos» en lugar de
+«Prevención del cáncer de mama»). Además, una nota puente cuyo titular no
+nombra el lugar («…sede de urgencias en el norte de Bogotá») encadenaba
+«…en Chía» con «…en Usaquén».
+
+- **Pase final por noticia** (`unificar_por_noticia`), después de volcar el
+  análisis en las filas, así que nada posterior lo deshace:
+  - *Noticias*: filas del mismo grupo, del mismo hecho consolidado, con el
+    mismo titular comparable (sin «VIDEO |», sin « - Medio», sin cola de
+    llamado, sin comillas ni mayúsculas), el mismo `CuerpoEs`, un pasaje
+    literal compartido (8 palabras seguidas con cifra, o dos pasajes) o
+    coseno TF-IDF ≥ 0.50 con enlace promedio ≥ 0.35 entre bloques (sin
+    encadenar). Nunca une dos notas del mismo molde que nombran, cada una,
+    un lugar o una persona ausente en la otra.
+  - *Subtema*: uno por noticia, elegido entre los de sus filas y los que el
+    modelo escribió para sus grupos, cotejado contra la noticia COMPLETA
+    (todos sus titulares y textos). Orden: subtema fijo del perfil > bien
+    formado y con asunto (solo la marca no vale) > fiel > sin copia de
+    ningún titular > escrito por el modelo para esa noticia > más filas.
+    La paráfrasis del modelo se acepta aunque un medio use otras palabras;
+    un rótulo que describe mejor a OTRA noticia del dossier se rechaza.
+  - *Molde en otra ciudad*: si dos noticias distintas comparten rótulo y
+    chocan por lugar/persona, cada una recupera su rótulo propio o se
+    especifica con su lugar («Apertura de sede de urgencias en Chía»).
+  - *Tono*: uno por noticia y por subtema compartido (mayoría; empate por la
+    evidencia del texto). *Tema*: uno por subtema (con PKL de tema, la
+    clase del PKL más frecuente de la noticia).
+- **Agrupación** (`construir_grupos`, consolidación por evidencia): las
+  uniones se aplican de la más fuerte a la más débil y la guarda de lugar
+  o persona se revisa entre BLOQUES y titulares del mismo molde; si un
+  titular no nombra lugar, se usa el de la primera oración del cuerpo
+  (sin la entradilla «BOGOTÁ (Colprensa).»).
+- **Rótulos de emergencia** más fieles: sin colas de servicio
+  («: requisitos», «: así funciona…»), sin atribución («…, advierte la
+  Fundación»), sin la segunda oración coordinada («…y crece la lista de
+  espera») ni entradillas de agencia. Si la reformulación anti-copia falla,
+  se conserva el rótulo del modelo cuando el respaldo derivado del titular
+  es otra copia.
+- **Modo solo PKL**: el tono y el tema se unifican con el mismo
+  agrupamiento por evidencia (el agrupador anterior partía o mezclaba
+  noticias).
+- **Agilidad**: `ctrl()` (la función más llamada) usa una expresión regular
+  y `sq()` se memoriza; el pase nuevo cuesta ~1-2 s de CPU en 700 filas.
+
+**Banco de pruebas** (`tools/banco_agrupacion.py`, sin API): dossier
+sintético con verdad de base (20 noticias, 70-120 notas por semilla, con
+titulares parafraseados, prefijos/sufijos del medio, mayúsculas, resúmenes
+de radio, mismo cuerpo con otro titular y trampas «mismo molde en otra
+ciudad» / «mismo asunto, otro hecho») y un modelo simulado que redacta el
+subtema de forma distinta por grupo.
+
+| 10 semillas (172 noticias con varias notas) | v4.71 | v4.72 |
+|---|---|---|
+| Noticias con subtema partido | 12 | 0 |
+| Fusiones de noticias distintas | 4 | 0 |
+| Noticias con tono / tema partido | 1 / 1 | 0 / 0 |
+| Filas con un subtema correcto de su noticia | 91.4 % | 95.4 % |
+| Con 30 % de rótulos malos del modelo: partidas / fusiones / correctas | 12 / 5 / 88.8 % | 0 / 0 / 93.6 % |
+| Modo solo PKL (agrupamiento): noticias partidas / grupos mezclados | 68 / 32 | 0 / 0 |
+
+```bash
+python3 tools/banco_agrupacion.py --semillas 10            # resumen
+python3 tools/banco_agrupacion.py --semillas 10 --ruido 0.3 --detalle
+```
+
+### Agrupación estricta y rendimiento (v4.71)
+
+Pedido: un dossier de 250 notas tardaba 857 s; y noticias iguales o muy
+similares deben quedar con el mismo tono y subtema (con PKL), o con el mismo
+tono, tema y subtema (sin PKL), como en API_Secretaria_General_Bogota.
+
+**Por qué tardaba.** No era la API: era CPU del código determinista. Los
+pases por pares (fila×fila, grupo×grupo, rótulo×fila) volvían a normalizar y
+tokenizar el `CuerpoEs` completo en cada par. El peor caso era
+`unificar_etiquetas_titulos_similares`, que recalculaba la «huella de
+historia de riesgo» de las dos filas en cada uno de los ~31.000 pares de un
+dossier de 250 notas; `_es_geografia` además reconstruía y normalizaba toda
+la lista de geografía en cada llamada.
+
+- `nz()`, `words()`, `raiz()`, `_contenido_discriminante`, 5-gramas de
+  contexto, fechas/bigramas de evento y raíces del texto se memorizan por
+  texto (caché acotada, se limpia al inicio de cada corrida). Mismo
+  resultado; cada texto se procesa una vez.
+- La huella de riesgo se calcula una vez por fila y solo se comparan las
+  filas que la tienen.
+- La reformulación anti-copia final (`reparar_copias_finales`) llama al
+  modelo en paralelo (antes, en serie).
+- Medición con un dossier sintético de 250 notas (cuerpos de ~4.000
+  caracteres, modelo simulado sin latencia): v4.70 tardaba 359 s de CPU;
+  v4.71 tarda ~7 s (500 notas: ~18 s). El resto del tiempo real es la
+  espera de la API.
+
+**Reglas de agrupación de Secretaría (v1.29-v1.35), ahora en Grill.** El
+analizador es el mismo de Secretaría; lo específico de Bogotá (TIPO/GÉNERO,
+tono del distrito, tono solo por gestión, menciones ajenas) queda detrás de
+flags del perfil que los clientes de Grill no activan.
+
+- **Agrupación estricta por defecto** (`agrupacion_estricta`, un perfil
+  puede poner `false`): dos notas comparten subtema solo con evidencia
+  (título igual o muy parecido, Contexto analizado o CuerpoEs con pasajes
+  compartidos). Sin uniones por parecido del rótulo ni por «ancla» temática.
+- Consolidación por evidencia (`consolidar_por_evidencia`), variantes del
+  mismo rótulo, un subtema por asunto repetido en titulares, garantía
+  final `garantizar_coherencia_hecho` (misma noticia ⇒ mismo subtema; mismo
+  subtema ⇒ mismo tono, también cuando el tono viene del PKL) y revisión
+  final de forma del subtema (sin comas, puntos, pronombre inicial ni
+  «sujeto + verbo»).
+- Tono: `CRITICA_PAT` con inicio de palabra («atac» ya no coincide dentro
+  de «contratación»), críticas al vocero cuentan como críticas a la marca,
+  empates resueltos con la evidencia del texto, homónimo de otro país =
+  Neutro.
+
+**Nuevas guardas v4.71 (aplican con o sin PKL).**
+
+- *Mismo molde, otro lugar o persona*: «…becas en Cartagena» y «…becas en
+  Medellín» no son la misma noticia. Si cada titular nombra un lugar o una
+  persona que no aparece en ninguna parte de la otra nota, no se unen
+  (agrupación, grafo de evidencia, coherencia por texto, título final,
+  asunto del titular).
+- La cola de llamado del titular («…: lo que dijo X», «…: esto se sabe»,
+  «…: detalles») no cuenta para comparar titulares ni se usa como subtema.
+- Un subtema nunca empieza con un pretérito con tilde («Informó este
+  miércoles», «Conoció el pasado jueves»: `RE_VERBO` comparaba terminaciones
+  con tilde sobre texto ya sin tildes), ni es solo una persona («Ricardo
+  Salazar») o solo una expresión de tiempo («Fin de semana»).
+- La revisión final de forma solo cambia un subtema por otro que
+  corresponda a esa fila.
+
+Resultado en el dossier sintético (50 noticias, 250 notas): historias con
+subtema partido 35 → 0-1 (subtemas distintos 81 → ~48 para 50 noticias); historias con tono o tema distinto entre sus notas:
+0, con y sin PKL.
+
+### Coherencia de tema y subtema con el texto (v4.70)
+
+Regla: noticias iguales o realmente similares (columnas `Título` y sobre todo
+`CuerpoEs`) llevan el mismo subtema; un subtema nunca se pone a una noticia
+que no tiene que ver con él, y los subtemas solo se agrupan en un tema si
+guardan relación con el texto de `Contexto analizado`. Aplica con o sin PKL.
+
+- **Similitud por texto** (`coherencia_texto.py`): TF-IDF sin tildes, sin
+  palabras vacías y sin los tokens de marca/alias/voceros (están en todas
+  las notas y no distinguen hechos). Calibración: la misma noticia reescrita
+  por otro medio ≈ 0.55-0.70; hechos distintos del mismo asunto ≈ 0.15-0.20;
+  notas ajenas ≈ 0.00-0.05.
+- **Agrupación de notas**: las uniones solo por parecido del titular son
+  débiles y se vetan si los dos `CuerpoEs` (250+ caracteres) no se parecen
+  (coseno < 0.20). Las uniones fuertes (cuerpo idéntico o contenido,
+  pasajes compartidos, titular casi copia) se conservan.
+- **Coherencia de subtemas** (`coherencia_subtemas_por_texto`), después de
+  todas las unificaciones por rótulo y antes del voto de tono y del tema:
+  - *Separar*: dentro de un subtema, las notas sin relación textual con el
+    grupo principal lo pierden, salvo que el rótulo completo esté en su
+    titular/entrada/Contexto y el etiquetador se lo haya dado. Recuperan su
+    subtema propio (si es fiel a su noticia) o reciben uno nuevo.
+  - *Unir*: notas con similitud ≥ 0.45 (la misma noticia) y subtemas
+    distintos adoptan el rótulo de la mayoría si es fiel a todas.
+  - La reparación anti-copia final ya no puede devolver un subtema que este
+    pase rechazó.
+- **Tema** (`refinar_familias_por_contexto`): una familia de subtemas se
+  separa si sus `Contexto analizado` no tienen relación (coseno < 0.08), y
+  dos subtemas con `Contexto analizado` muy parecido (≥ 0.30) van al mismo
+  tema aunque sus rótulos no compartan palabras.
+- **Contexto analizado**: se extrae del `CuerpoEs` cuando trae la marca, un
+  alias o un vocero (antes: el texto más largo disponible). Los voceros
+  también se buscan por nombre + primer apellido («Miguel Silva» para
+  «Miguel Silva Moyano»; «Juan Pérez» para «Juan Carlos Pérez»).
+- **Columna `texto`**: Contexto analizado sin el Título aunque el título
+  difiera en forma (comillas, espacios, entidades HTML); no corta dentro de
+  una palabra.
+- **Columna `Link Ext`**: solo el texto de la URL, sin hipervínculo, sin
+  azul ni subrayado.
+- **Rótulo de emergencia**: el verbo del titular se nominaliza
+  («Secretaría General lanza ventanilla…» → «Lanzamiento de ventanilla…»).
+
 ### 👥 Perfiles de cliente (multicliente)
 
 El tono, los alias, los voceros y la lista de Temas se adaptan por cliente sin tocar código:
