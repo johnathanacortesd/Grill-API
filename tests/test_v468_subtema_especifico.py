@@ -15,7 +15,9 @@ class TestSubtemaEspecifico(unittest.TestCase):
         r = A._subtema_especifico(
             'El Congreso aprobó la reforma pensional en segundo debate',
             ['El Congreso aprobó la reforma pensional en segundo debate.'])
-        self.assertEqual(r, 'Aprobó la reforma pensional en segundo debate')
+        # v4.70: el verbo del titular se nominaliza (un subtema no empieza
+        # con verbo conjugado).
+        self.assertEqual(r, 'Aprobación de reforma pensional en segundo debate')
 
     def test_solo_preguntas_con_cuerpo(self):
         # Regla del usuario: "así venga con preguntas" va subtema
@@ -24,7 +26,11 @@ class TestSubtemaEspecifico(unittest.TestCase):
             '¿Cuántos años tiene? ¿Cómo inició?',
             ['Inició en la radio hace veinte años. '
              'Hoy dirige el programa matutino de la emisora.'])
-        self.assertEqual(r, 'Inició en la radio hace veinte años')
+        # v4.71: un subtema nunca empieza con un pretérito («Inició…»,
+        # regla v4.70/Sec v1.34); el específico sale de la oración siguiente.
+        self.assertTrue(r)
+        self.assertNotEqual(r, 'Hecho informativo')
+        self.assertFalse(r.startswith('Inició'))
 
     def test_titulo_vacio_con_cuerpo(self):
         r = A._subtema_especifico(
@@ -32,7 +38,7 @@ class TestSubtemaEspecifico(unittest.TestCase):
                  'en el sur de la ciudad.'])
         self.assertTrue(r)
         self.assertNotEqual(r, 'Hecho informativo')
-        self.assertIn('Metropolitano', r)
+        self.assertIn('metropolitano', r.lower())
 
     def test_titulo_cola_llamado_con_cuerpo(self):
         r = A._subtema_especifico(
