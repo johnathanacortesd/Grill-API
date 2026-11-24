@@ -1,4 +1,8 @@
-# Grill-API — News Analytics & NLP Platform
+# Grill API — News Analytics & NLP Platform
+
+> Grill API · Creado por Johnathan Cortés y Claude
+
+**Motor de clasificación:** solo **OpenAI Luna (gpt-6-luna)**, con `OPENAI_API_KEY` en los Secrets (y `TYPESAFE_API_KEY` opcional para la verificación de temas con Jev). Es la misma app que [API_2_Grill](https://github.com/johnathanacortesd/API_2_Grill) (motor de Defensoría en versión general, agilidad, «Qué entregar», varias marcas, PKL y el mismo orden de columnas), sin el selector de motor ni Claude Haiku. Los PKL de tono/tema ponen Tono/Tema y Luna el Subtema. Sin TIPO/GÉNERO.
 
 [![Streamlit App](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://grill-api.streamlit.app/)
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB.svg?logo=python&logoColor=white)](https://www.python.org/)
@@ -37,6 +41,213 @@ El acceso a la interfaz de producción está resguardado mediante autenticación
 ---
 
 ## 🚀 Funcionalidades
+
+### Columnas Nro. Pagina y Menciones - Empresa (v4.81)
+
+- **Nro. Pagina** del origen va justo antes de «Duración - Nro. Caracteres».
+- **Menciones - Empresa** va justo después de «Link (Streaming - Imagen)»:
+  en Radio y Televisión lleva la columna «Menciones - Empresa» del origen; en
+  Internet, Prensa y Revistas, la columna «Empresa rel.».
+
+### Columna Tamaño (v4.79–v4.80)
+
+- **Tamaño** va justo antes de Audiencia:
+  - Internet, Prensa y Revistas: la **Dimensioncm2** del origen.
+  - Radio y Televisión: el valor de **Duración - Nro. Caracteres** (que también
+    se queda en su columna).
+- Las duraciones «hh:mm:ss» (texto u hora de Excel) salen tal cual en Tamaño y
+  en Duración - Nro. Caracteres; antes «00:02:30» se volvía el número 230.
+
+### Columna Hora y fechas (v4.78)
+
+- El xlsx de resultado lleva la columna **Hora** del dossier de origen, justo
+  después de Fecha (el orden del boletín de Defensoría no la traía).
+- Fechas en texto «aaaa-mm-dd» se leen bien: antes, si toda la columna venía
+  así, se volteaban día y mes («2026-09-01» salía como 9 de enero). Las demás
+  (dd/mm/aaaa y fechas de Excel) no cambian.
+
+### Modelos PKL del cliente con Claude Haiku (v4.77)
+
+- En las dos pestañas se pueden subir el **PKL de tono**, el **de tema**, ambos o
+  ninguno (scikit-learn guardado con joblib, p. ej. pipeline tfidf + clf). Si un
+  eje no tiene PKL, se mantiene el análisis con IA.
+- Funcionan con los dos motores. Con Claude Haiku: el PKL de tono pone el
+  Tono_IA (Haiku no analiza el tono ni corre el auditor de tono), el PKL de tema
+  pone el Tema_IA con sus clases tal cual y Haiku hace el Subtema_IA, que nunca
+  lo pone un PKL.
+- **Tema_IA en el xlsx:** el orden del boletín no traía Tema_IA; ahora va entre
+  Tono_IA y Subtema_IA cuando se pide el tema o se sube un PKL de tema. Sin IA
+  (solo PKL), el xlsx no lleva Subtema_IA.
+
+### Agilidad, avance explicado, columnas y varias marcas (v4.75)
+
+- **Más rápido sin perder precisión:** la normalización de texto que el motor
+  repetía millones de veces ahora se guarda en memoria. Dossier de prueba de
+  200 notas: 78 s → 4 s fuera de las llamadas a la API, con tono y subtema
+  idénticos fila por fila.
+- **Avance explicado:** el panel muestra los 5 pasos del análisis IA (contexto
+  de la marca, agrupación, Haiku, revisión, repaso final) y cada mensaje dice
+  qué hace y cuántas notas lleva; la agrupación informa cuántas notas quedaron
+  en cuántas noticias distintas.
+- **Qué entregar:** «Tono y Subtema» (por defecto), «Solo Tono» (el xlsx no
+  lleva Subtema_IA; el subtema se usa por dentro para que la misma noticia
+  tenga el mismo tono) o «Solo Subtema» (Haiku no analiza el tono: más rápido y
+  más barato; el xlsx no lleva Tono_IA).
+- **Una o varias marcas:** en «Marca» se puede escribir una marca o varias
+  separadas por punto y coma o coma («GSK; Sanofi»). Cada una recibe su propio
+  tono, con sus propios alias y voceros. Para decir de qué marca es cada alias
+  o vocero: «GSK: GlaxoSmithKline, Glaxo; Sanofi: Sanofi Pasteur» (los que
+  siguen a «Marca:» son de esa marca); sin indicarlo, se asignan según con qué
+  marca aparecen en el dossier y, si no hay evidencia, por la palabra que
+  comparten con el nombre de la marca.
+- **Tono por la marca de cada fila:** el dossier ya trae una fila por marca
+  mencionada, en «Menciones - Empresa» (radio, TV y web) o «Empresa rel.»
+  (prensa). Cada fila se mide hacia la marca escrita que coincide con esa
+  columna (por nombre o alias); sin esa columna, hacia la marca escrita que
+  nombra la nota (primero el titular) o, si no aparece ninguna, hacia la
+  primera. Si la columna trae una marca que no se escribió (p. ej. un
+  competidor), el tono de esa fila se mide hacia esa marca. Cada marca corre en
+  una pasada aparte del motor; con una sola marca y sin filas de otras, es la
+  corrida de siempre. El xlsx agrega «Marca analizada» antes de «FECHA INFORME» cuando hay
+  más de una marca. Si en todo el dossier hay una sola marca escrita distinto
+  («UNAL» / «Universidad Nacional de Colombia»), se toma como el cliente. Una
+  marca que falla no tumba las demás: sus filas salen en «Para revisar».
+
+### Motor de Defensoría, versión general (v4.74)
+
+Grill corre el mismo motor que la app de Defensoría del Pueblo (v1.33): la misma
+precisión de tono y subtema, la misma agrupación (solo se agrupan notas iguales o
+muy parecidas) y el mismo orden de columnas del xlsx de resultado. La diferencia
+es que no hay cliente fijo: todo depende de la marca, los alias y los voceros
+que se escriban (o del perfil que se elija).
+
+- **Sin perfil** rigen los ajustes de Defensoría sin lo propio de ese cliente:
+  agrupación estricta, criterio aspectual estricto y una guía de subtema general
+  (el asunto concreto de la nota, nunca la entidad ni el vocero como tema).
+- **Orden de columnas** del boletín de Defensoría, sin «HORA B»: ID Noticia,
+  Fecha, Medio, Región, Tipo de Medio, Sección - Programa, Título, Duración,
+  CPE, Audiencia, Tier, Tono_IA, Subtema_IA, Link Nota, texto, Link (Streaming -
+  Imagen), Link Ext, FECHA INFORME, ID duplicada, Contexto analizado, Resumen -
+  Aclaracion, Audio, Web Ext. Con un perfil que clasifica TIPO y GÉNERO, van
+  después de Subtema_IA.
+- **No se usa** lo propio de Defensoría: alertas tempranas, hoja de notas ya
+  analizadas y hora del boletín.
+- **Al actualizar** en Streamlit Cloud, la app vuelve a cargar todos sus
+  módulos juntos (antes podían quedar mezclados la versión nueva y la vieja).
+- Desde v4.77 se pueden subir PKL de tono y de tema (ver abajo).
+
+### Misma noticia = un subtema (v4.73, de Defensoría v1.32–v1.33)
+
+Versión general: funciona con la marca, alias y voceros que se escriban en la
+app; ninguna regla depende de un cliente.
+
+- **La misma nota en impreso y web** («Vanguardia» / «Vanguardia.com») o
+  reproducida por otro medio lleva el mismo subtema: ≈17 palabras seguidas en
+  común del Contexto analizado si es el mismo medio, ≈35 si son medios
+  distintos. Una frase corta compartida (una cifra) no basta y los fragmentos de
+  plantilla no cuentan. (Defensoría v1.33 / Secretaría v1.46)
+- **Variantes del mismo hecho** («Evacuación de civiles en Catatumbo» /
+  «Evacuación de civiles y menores en Catatumbo») se unen al final, solo si el
+  rótulo elegido es fiel al titular y al contexto de cada nota. Hechos distintos
+  no se tocan. (Defensoría v1.32, con agrupación estricta)
+- **Nunca la entidad como subtema:** «Datos Defensoría del Pueblo», «Gestión de
+  la entidad», «Declaraciones de <vocero>» se rechazan y se reescriben con el
+  asunto concreto (se calcula con la marca, alias y voceros digitados).
+- Garantía final de los **subtemas fijos** del perfil (frase seguida en el
+  titular, resumen, cuerpo o contexto).
+- El subtema nunca sale con el nombre del medio pegado («… - CAMBIO COLOMBIA») y
+  los ID numéricos salen sin «.0» en el Excel.
+
+### Nunca agrupar porque sí (caso «Jardín Olarte», 2026-11-09)
+
+Dossier real de la Secretaría General revisado a mano (51 filas). Con las
+etiquetas revisadas como respuesta del modelo, el código las dañaba en 7
+subtemas; ahora coinciden salvo una unificación legítima.
+
+- **El pie del medio no es evidencia.** El pase «una noticia = un subtema»
+  unía dos notas de Pulzo porque compartían «Pulzo.com se escribe con Z», y
+  dos de Bogotá.gov por su pie fijo. Los pasajes entre notas del mismo medio
+  ya no cuentan, y un pasaje compartido solo une si además los textos se
+  parecen (coseno >= 0,20).
+- **El nombre propio de un programa es un subtema válido** («Plan Motos y
+  Vehículos en Engativá», «Jóvenes a la E», «Operación Kratos»): no se
+  rechaza por corto ni por estar en el titular, y ninguna reparación lo
+  reemplaza por un recorte del texto.
+- **Una reparación nunca deja un rótulo peor**: si el respaldo recortado
+  empieza con verbo o es otro extracto, se conserva el del modelo.
+
+### Agilidad, medición por etapa y pantalla de resultados
+
+**Agilidad (modo Claude Haiku)**
+
+- **Clasificación en paralelo.** Con 4 o más páginas de noticias (100+),
+  hasta 4 agentes clasifican tramos a la vez (`motor_haiku.planear_tramos`);
+  cada uno solo lee y guarda su tramo. Un agente de cierre clasifica lo que
+  haya quedado pendiente y hace la revisión de consistencia entre tramos.
+  `paralelo: 1` en `ai_config` vuelve a un solo agente.
+- **Auditor de tono y evaluador de agrupación a la vez**, en lugar de uno
+  después del otro.
+- **Memoria del cliente** (`memoria_cliente.py`). Una noticia ya clasificada
+  para el mismo cliente con la misma configuración hereda su tono, subtema y
+  tema sin volver al modelo. Vive junto al historial
+  (`memoria_<cliente>.json`), caduca a los 45 días y se descarta sola si
+  cambia la marca, los alias, voceros, criterio, guía, temas, PKL o las
+  instrucciones del motor. Se apaga con la casilla «Reutilizar
+  clasificaciones previas» o `memoria: false`.
+- **Candidatos por matriz.** El revisor y el evaluador buscan notas parecidas
+  con `rapidfuzz.process.cdist` en lugar de comparar par por par en Python
+  (mismo resultado, verificado contra el código anterior).
+
+**Medición por etapa.** `process_dossier` devuelve `tiempos`: lectura y
+limpieza, análisis (con sus sub-etapas: contexto, agrupación, clasificación,
+evaluador y auditor, unificación, reglas, pase final) y generación del Excel.
+
+**Pantalla de resultados.** Distribución de tono, tabla de subtemas con su
+reparto por tono, noticias clasificadas con filtro y búsqueda, pestaña «Para
+revisar» (tonos que corrigió el auditor con su razón, clasificaciones
+aceptadas con observaciones, notas sin mención literal de la marca) y tiempo
+por etapa. El historial del cliente se muestra como tabla.
+
+### Tono del cliente por rol y agentes con tareas precisas (modo Claude Haiku)
+
+El tono mide cómo la noticia evalúa al cliente (marca, alias o voceros), no
+el ánimo general de la nota. El agente decide primero el **rol** del cliente
+y de ahí sale el tono; `guardar_clasificacion` rechaza la fila si no
+coinciden.
+
+| Rol | Qué dice la nota del cliente | Tono |
+|---|---|---|
+| `gestion` | Hace algo a su favor: gestión, obra, programa, pronunciamiento | Positivo |
+| `logro` | Le atribuyen un resultado o impacto favorable, un reconocimiento | Positivo |
+| `critica` | Crítica, denuncia, sanción o cuestionamiento dirigido a él | Negativo |
+| `afectacion` | Le atribuyen una falla, crisis o impacto adverso | Negativo |
+| `equilibrada` | Señalamiento con su respuesta o descargo | Neutro |
+| `referencial` | Mención de paso: dato, fuente, antecedente, contexto | Neutro |
+
+El criterio de tono del perfil sigue mandando en los casos que nombre.
+
+Agentes del modo Haiku y su tarea:
+
+- **Clasificador** (agente principal): rol, tono y subtema por noticia.
+  `leer_noticias` marca `sin_mencion_literal` cuando el texto no nombra al
+  cliente, sus alias ni sus voceros. El subtema se redacta como hecho +
+  objeto + dato distintivo y pasa una prueba de precisión (no le sirve a
+  otra noticia del lote ni solo a un medio).
+- **revisor-subtemas** (subagente): mismo hecho solo si coinciden evento,
+  actores, lugar y momento; un subtema preciso por hecho. Recibe el cliente,
+  alias, voceros y criterio en su propio prompt (antes dependía de que el
+  agente principal se los copiara).
+- **auditor-tono** (`motor_haiku.auditar_tono`, lanzado por código al
+  terminar el agente): verifica solo el tono de las filas de riesgo:
+  Negativos, tonos sin mención literal del cliente, Positivos sin el cliente
+  en el título y subtemas con tonos distintos. Solo aplica veredictos con
+  rol y tono coherentes. No corre con PKL de tono. Se apaga con
+  `auditor_tono: false` en `ai_config`.
+- **evaluador-agrupacion**: ahora recibe el cliente, alias, voceros y
+  criterio (antes fijaba el tono común del grupo sin saber de quién se mide).
+
+El resumen (`analisis['haiku']`) trae `roles` (conteo por rol) y
+`auditor_tono` (filas revisadas, cambios con su razón y costo).
 
 ### Agrupación consistente (actualizada)
 
@@ -338,15 +549,17 @@ streamlit run app.py
 
 La aplicación estará disponible en `http://localhost:8501`.
 
-### 5. Alternativa Colab (si Streamlit Cloud se queda en Etiquetando k/N)
+### 5. Alternativa Colab (si Streamlit Cloud no carga o falla al subir el xlsx)
 
-Abra **`Grill_API_Colab.txt`** en Google Colab (*Runtime → Run all*). Es un script **autosuficiente**: no importa `app.py` ni ningún otro archivo.
+`Grill_API_Colab.py` ejecuta **la misma app** (`app.py`) dentro de Google Colab: clona el repo, instala `requirements.txt` y lanza `streamlit run app.py`. Mismas pestañas, funciones, modelos y precisión que la app publicada; no es una reimplementación.
 
-- `pip install -q` de las dependencias (sin Streamlit).
-- `OPENAI_API_KEY` **solo** desde Colab Secrets (`userdata.get`) o la variable de entorno. No hace falta pegarla.
-- Interfaz Gradio: xlsx (+ PKL opcionales de tema/tono) → xlsx con `Contexto analizado`, `Tono IA`, `Tema`, `Subtema` y `Grupo noticia`.
-- Modelo **hardcoded** `gpt-4.1-nano-2025-04-14` (se ignora `OPENAI_CLASIF_MODEL`). Embeddings: `text-embedding-3-small`.
-- Subtemas: heurística para todos los grupos + pulido LLM en lotes de 25–40 (un dossier de ~300 filas hace como máximo ~8 ChatCompletions de subtema).
+1. Claves `APP_PASSWORD`, `OPENAI_API_KEY`, `TYPESAFE_API_KEY` (Jev, necesaria para el mismo tono que producción), `REGIONES_CSV_URL`, `INTERNET_CSV_URL`: en Colab *Secrets* (icono de llave, *Acceso del cuaderno* activado).
+2. Pegar `Grill_API_Colab.py` completo en una celda (se muestra como formulario; *Editar → Mostrar/ocultar código* para ocultarlo) y ejecutarla. Las instalaciones son silenciosas.
+3. Pulsar **Abrir la app ↗** en el panel que aparece (enlace público de Cloudflare, `trycloudflare.com`). Si el túnel se cae, se reabre solo y el panel muestra el enlace nuevo.
+
+**Deje el cuaderno abierto mientras usa la app.** La app corre dentro de la celda: si cierra la pestaña, detiene la celda o Colab desconecta la sesión (≈90 min sin actividad, máximo ≈12 h en la versión gratuita), la app se apaga.
+
+Con `GUARDAR_EN_DRIVE = True` los perfiles de cliente y el historial se guardan en Google Drive.
 
 ---
 
