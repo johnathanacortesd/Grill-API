@@ -64,7 +64,7 @@ from pipeline import (process_dossier, leer_columnas_xlsx, sugerir_columna,
                       cargar_ids_analizados_desde_sheets, cargar_hoja_analizadas)
 
 # Versión visible de la app (se muestra en el encabezado). Actualizar en cada release.
-APP_VERSION = "v4.85"
+APP_VERSION = "v4.86"
 
 # v4.74: versión general del motor de Defensoría. No hay cliente fijo: el
 # análisis depende de la marca, los alias y los voceros que se escriban (o
@@ -468,7 +468,7 @@ PASOS_IA = [
     "Contexto de la marca (dónde aparece el cliente en cada nota)",
     "Agrupación: solo notas iguales o muy parecidas van juntas",
     "OpenAI Luna (gpt-6-luna) decide tono y subtema de cada noticia",
-    "Revisión: unificación de subtemas y reglas de tono",
+    "Revisión: evaluador de agrupación y auditor de tono (Luna)",
     "Repaso final: misma noticia = mismo subtema y tono",
 ]
 
